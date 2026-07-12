@@ -1,0 +1,14 @@
+# Example routine registry entry.
+#
+# Copy to $ROUTINES_HOME/registry/<id>.toml (the filename stem becomes the id).
+# The registry lives on disk so the scheduler keeps firing during a brain
+# outage; run history + heartbeats still flow to fbrain.
+
+harness        = "claude"
+model          = "claude-opus-4-8"
+rrule          = "FREQ=HOURLY;INTERVAL=2"
+prompt_path    = "/Users/tomtang/.last-stack/routines/disk-reclaim.md"
+cwd            = "/Users/tomtang/code/edgevector"
+status         = "active"
+timeout_min    = 30
+heartbeat_slug = "routine-heartbeats"

@@ -1,0 +1,22 @@
+{
+  "name": "routines",
+  "version": "0.1.0",
+  "description": "Unified scheduler + dispatcher for agent routines (Claude Code / Codex) with per-routine harness + model routing.",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "routines": "src/cli.ts"
+  },
+  "scripts": {
+    "routines": "bun src/cli.ts",
+    "install-shim": "sh scripts/install-shim.sh",
+    "e2e": "bash test/e2e.sh",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.6.0"
+  }
+}
