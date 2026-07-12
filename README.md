@@ -88,6 +88,9 @@ This repo merges through **LastGit-native change requests**, not GitHub PRs
 node socket (`~/.lastgit/forge/data/folddb.sock`) for every lastgit call — see
 fbrain `sop-lastgit-native-forge-workflow`.
 
+Mirror sync proof: LastGit CRs are expected to appear on the GitHub mirror within
+the configured sync interval (validated 2026-07-12T23:11:25Z).
+
 ## Test
 
 ```sh
