@@ -1,0 +1,6 @@
+lastgit
+# Review-artifact venue for EdgeVector/routines: LastGit-native change requests
+# (opt-in per last-stack-pr-venue; only line 1 is parsed).
+# Forge node socket: ~/.lastgit/forge/data/folddb.sock — pin LASTGIT_SOCKET to
+# it for every lastgit/git-remote-lastdb call; NEVER use the primary brain
+# socket. Workflow: fbrain get sop-lastgit-native-forge-workflow
