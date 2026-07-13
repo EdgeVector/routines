@@ -52,6 +52,7 @@ routines run <id>             # run a routine now (foreground)
 routines pause|resume <id>    # toggle status
 routines route <id> --harness codex --model gpt-5.5
 routines logs <id>            # recent runs (--path, --tail, --json)
+routines import               # import the legacy schedulers into the registry (dry-run)
 routines doctor               # validate registry + environment
 routines daemon               # the scheduler loop (launchd entrypoint); --once, --catchup <s>
 routines install-daemon       # install + load the launchd user agent
@@ -105,9 +106,54 @@ overrides (`ROUTINES_CLAUDE_BIN`, `ROUTINES_CODEX_BIN`,
 no API credits while exercising the full dispatch → spawn → log → heartbeat
 path that routines owns.
 
+## Migration (one-time cutover)
+
+`routines import` reads the two **legacy** schedulers and generates registry
+entries, preserving each routine's prompt / rrule / model / cwd / harness:
+
+- `~/.codex/automations/*/automation.toml` — only the **ACTIVE** crons (PAUSED
+  ones are already off). A stray `RRULE:` value prefix is stripped; the huge
+  inline prompt is preserved verbatim.
+- the Claude scheduler's `scheduled-tasks.json` (auto-discovered) — only
+  **enabled** tasks with a cron; one-shot `fireAt` reminders and disabled tasks
+  are skipped. 5-field cron is converted to the same RRULE dialect. Each task's
+  `SKILL.md` is referenced via `prompt_path`. Claude tasks carry no per-task
+  model, so they import at `--claude-model` (default `sonnet`); re-route with
+  `routines route`.
+
+```sh
+routines import                 # DRY-RUN: print the diff table, write nothing
+routines import --write         # generate ~/.routines/registry/<id>.toml files
+routines import --json          # machine-readable plan (incl. pauseTargets)
+```
+
+**Dual-scheduler dedup.** Many routines are scheduled in *both* legacy
+schedulers under different ids (e.g. Claude `program-driver` and Codex
+`last-stack-program-driver` are one loop). Importing both would make routines
+itself double-fire. `import` detects these by a normalized name and keeps one per
+group (Codex wins by default — flip with `--prefer claude`, or import both with
+`--keep-duplicates`). Every collapsed group is shown under **CROSS-SCHEDULER
+DUPLICATES** so a human resolves routing before cutover. This is the
+`papercut-phantom-program-rollup-churn` hazard, made visible.
+
+Once the registry looks right, `scripts/cutover.sh` pauses the legacy schedulers
+so routines becomes the **sole** scheduler:
+
+```sh
+scripts/cutover.sh              # DRY-RUN: print the plan + write the rollback manifest
+scripts/cutover.sh --apply      # pause Codex ACTIVE->PAUSED + disable Claude tasks
+scripts/cutover.sh --restore <manifest.json>   # reverse a cutover
+```
+
+> ⚠️ `--apply` is a **prod cutover** of shared scheduling infrastructure (it
+> pauses the fkanban-pickup / fleet routines). Run it attended, quit the Claude
+> app first (its scheduler rewrites `scheduled-tasks.json` on every fire, so
+> `--apply` refuses while a Claude process is running), and keep the rollback
+> manifest. The manifest (every entry + its prior status) is written **even in
+> dry-run**, so the rollback list exists before any change.
+
 ## Scope
 
-MVP = the scheduler daemon + CLI + both adapters. **Out of scope** (separate
-cards): the web dashboard (`routines status` is the MVP coordination view),
-migrating/pausing existing Codex crons and Claude scheduled tasks, and any new
-routine content.
+MVP = the scheduler daemon + CLI + both adapters; this card adds the one-time
+`import` + cutover tooling. **Out of scope** (separate cards): the web dashboard
+(`routines status` is the MVP coordination view) and any new routine content.
