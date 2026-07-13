@@ -193,7 +193,7 @@ function rowHtml(r) {
 
 function detailHtml(r) {
   var eid = esc(r.id);
-  var harnessOpts = ["claude", "codex"].map(function (h) {
+  var harnessOpts = ["claude", "codex", "grok"].map(function (h) {
     return '<option value="' + h + '"' + (h === r.harness ? " selected" : "") + ">" + h + "</option>";
   }).join("");
   var route =

@@ -12,8 +12,13 @@ import { registryDir } from "./paths.ts";
 import { parseRRule, type RRule } from "./rrule.ts";
 import { parseToml, type TomlValue } from "./toml.ts";
 
-export type Harness = "claude" | "codex";
+export const HARNESSES = ["claude", "codex", "grok"] as const;
+export type Harness = (typeof HARNESSES)[number];
 export type Status = "active" | "paused";
+
+export function isHarness(value: string): value is Harness {
+  return (HARNESSES as readonly string[]).includes(value);
+}
 
 export interface RoutineEntry {
   id: string;
@@ -83,8 +88,11 @@ export function parseEntry(text: string, sourcePath: string): RoutineEntry {
   }
 
   const harnessRaw = req(str(raw, "harness", sourcePath), "harness", sourcePath);
-  if (harnessRaw !== "claude" && harnessRaw !== "codex") {
-    throw new RegistryError(`invalid harness ${JSON.stringify(harnessRaw)} (claude|codex)`, sourcePath);
+  if (!isHarness(harnessRaw)) {
+    throw new RegistryError(
+      `invalid harness ${JSON.stringify(harnessRaw)} (${HARNESSES.join("|")})`,
+      sourcePath,
+    );
   }
   const harness: Harness = harnessRaw;
 

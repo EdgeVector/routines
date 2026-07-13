@@ -42,6 +42,18 @@ describe("parseEntry", () => {
     expect(() => parseEntry(bad, "/x/r.toml")).toThrow(/harness/);
   });
 
+  test("accepts grok harness", () => {
+    const text = [
+      'harness = "grok"',
+      'model = "grok-4.5"',
+      'rrule = "FREQ=DAILY"',
+      'prompt = "hi"',
+    ].join("\n");
+    const e = parseEntry(text, "/x/g.toml");
+    expect(e.harness).toBe("grok");
+    expect(e.model).toBe("grok-4.5");
+  });
+
   test("rejects unknown key", () => {
     expect(() => parseEntry(base + '\nbogus = "x"', "/x/r.toml")).toThrow(/unknown key/);
   });

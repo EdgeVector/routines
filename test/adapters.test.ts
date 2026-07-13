@@ -50,9 +50,30 @@ describe("buildInvocation", () => {
     expect(inv.args).toEqual(["exec", "--model", "m1", "hi"]);
   });
 
+  test("grok adapter shape (flags before -p prompt)", () => {
+    const inv = buildInvocation(entry("grok", 'effort = "high"'), "hello\n## Setup");
+    expect(inv.bin).toBe("grok");
+    expect(inv.args).toEqual([
+      "-m",
+      "m1",
+      "--always-approve",
+      "--permission-mode",
+      "bypassPermissions",
+      "--output-format",
+      "streaming-json",
+      "--reasoning-effort",
+      "high",
+      "-p",
+      "hello\n## Setup",
+    ]);
+    expect(inv.args[inv.args.length - 2]).toBe("-p");
+  });
+
   test("binary override via env", () => {
     process.env.ROUTINES_CLAUDE_BIN = "/tmp/stub-claude";
+    process.env.ROUTINES_GROK_BIN = "/tmp/stub-grok";
     expect(harnessBinary("claude")).toBe("/tmp/stub-claude");
+    expect(harnessBinary("grok")).toBe("/tmp/stub-grok");
     expect(buildInvocation(entry("claude"), "hello").bin).toBe("/tmp/stub-claude");
   });
 

@@ -2,7 +2,7 @@
 // routines — unified scheduler + dispatcher for agent routines.
 //
 // One scheduler owns dispatch; each routine's on-disk config declares its
-// harness (claude|codex) and model. See fbrain design-routines-orchestrator.
+// harness (claude|codex|grok) and model.
 
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -49,6 +49,7 @@ Environment:
   ROUTINES_HOME               state root (default ~/.routines)
   ROUTINES_CLAUDE_BIN         claude binary (default: claude)
   ROUTINES_CODEX_BIN          codex binary (default: codex)
+  ROUTINES_GROK_BIN           grok binary (default: grok)
   ROUTINES_FSITUATIONS_BIN    fsituations binary (default: fsituations)
   ROUTINES_FBRAIN_BIN         fbrain binary for heartbeats (default: fbrain)`;
 
@@ -177,7 +178,7 @@ function cmdRoute(rest: string[]): number {
   });
   const id = positionals[0];
   if (!id || (!values.harness && !values.model)) {
-    console.error("usage: routines route <id> [--harness claude|codex] [--model <model>]");
+    console.error("usage: routines route <id> [--harness claude|codex|grok] [--model <model>]");
     return 2;
   }
   const entry = loadEntry(id);
@@ -446,6 +447,7 @@ function cmdInstallDaemon(): number {
     process.env.PATH,
     home ? `${home}/.local/bin` : "",
     home ? `${home}/.bun/bin` : "",
+    home ? `${home}/.grok/bin` : "", // grok Build CLI
     "/opt/homebrew/bin",
     "/usr/local/bin",
     "/usr/bin",
