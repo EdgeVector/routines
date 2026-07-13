@@ -61,7 +61,7 @@ export function runRoutine(entry: RoutineEntry, opts: RunOptions = {}): Promise<
     const child = spawn(invocation.bin, invocation.args, {
       cwd,
       env: childEnv,
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: [invocation.stdin !== undefined ? "pipe" : "ignore", "pipe", "pipe"],
     });
 
     let timedOut = false;
@@ -72,6 +72,11 @@ export function runRoutine(entry: RoutineEntry, opts: RunOptions = {}): Promise<
       // Escalate if it ignores SIGTERM.
       setTimeout(() => child.kill("SIGKILL"), 5_000).unref();
     }, timeoutMs);
+
+    if (invocation.stdin !== undefined) {
+      child.stdin?.write(invocation.stdin);
+      child.stdin?.end();
+    }
 
     child.stdout?.on("data", (d: Buffer) => {
       const s = d.toString();

@@ -30,8 +30,8 @@ describe("buildInvocation", () => {
     ]);
   });
 
-  test("codex adapter shape with effort (flags before prompt)", () => {
-    const inv = buildInvocation(entry("codex", 'effort = "high"'), "hello");
+  test("codex adapter uses stdin for the prompt (dash arg)", () => {
+    const inv = buildInvocation(entry("codex", 'effort = "high"'), "hello\n---\nfrontmatter");
     expect(inv.bin).toBe("codex");
     expect(inv.args).toEqual([
       "exec",
@@ -41,10 +41,10 @@ describe("buildInvocation", () => {
       "--ephemeral",
       "-c",
       'model_reasoning_effort="high"',
-      "hello",
+      "-",
     ]);
-    // Prompt is last so multi-line bodies cannot swallow flags.
-    expect(inv.args[inv.args.length - 1]).toBe("hello");
+    expect(inv.stdin).toBe("hello\n---\nfrontmatter");
+    expect(inv.display).toContain("prompt-stdin");
   });
 
   test("codex without effort omits -c", () => {
@@ -55,8 +55,9 @@ describe("buildInvocation", () => {
       "m1",
       "--skip-git-repo-check",
       "--ephemeral",
-      "hi",
+      "-",
     ]);
+    expect(inv.stdin).toBe("hi");
   });
 
   test("grok adapter shape (flags before -p prompt)", () => {
