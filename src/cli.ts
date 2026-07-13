@@ -4,12 +4,13 @@
 // One scheduler owns dispatch; each routine's on-disk config declares its
 // harness (claude|codex) and model. See fbrain design-routines-orchestrator.
 
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 
 import pkg from "../package.json" with { type: "json" };
 import { setKeys } from "./edit.ts";
+import { planImport, renderDiffTable, renderToml, type ImportPlan } from "./import.ts";
 import { evaluateOnce, isLocked, startDaemon } from "./daemon.ts";
 import { installDaemon, plistPath, renderPlist, uninstallDaemon } from "./launchd.ts";
 import { loadActiveSituations, fenceFor } from "./situations.ts";
@@ -32,6 +33,8 @@ Commands:
   resume <id>                 set status = active
   route <id> --harness X --model Y   change a routine's harness and/or model
   logs <id>                   show recent runs for a routine (--json, --path, --tail)
+  import                      import legacy schedulers into the registry (dry-run;
+                              --write to apply). See --help notes below.
   doctor                      validate the registry + environment
   daemon                      run the scheduler loop (launchd entrypoint); --once, --catchup <s>
   install-daemon              install + load the launchd user agent
@@ -73,6 +76,8 @@ async function main(argv: string[]): Promise<number> {
       return cmdSetStatus(rest, "active");
     case "route":
       return cmdRoute(rest);
+    case "import":
+      return cmdImport(rest);
     case "logs":
       return cmdLogs(rest);
     case "doctor":
@@ -201,6 +206,98 @@ function cmdRoute(rest: string[]): number {
   setKeys(entry.sourcePath, updates);
   const next = loadEntry(id);
   console.log(`${id}: ${next.harness}/${next.model}`);
+  return 0;
+}
+
+function cmdImport(rest: string[]): number {
+  const { values } = parseArgs({
+    args: rest,
+    options: {
+      write: { type: "boolean" },
+      force: { type: "boolean" },
+      json: { type: "boolean" },
+      "keep-duplicates": { type: "boolean" },
+      prefer: { type: "string" },
+      "claude-model": { type: "string" },
+      "codex-dir": { type: "string" },
+      "claude-registry": { type: "string" },
+      out: { type: "string" },
+    },
+    allowPositionals: true,
+  });
+
+  const prefer = values.prefer;
+  if (prefer && prefer !== "codex" && prefer !== "claude") {
+    console.error(`invalid --prefer ${prefer} (codex|claude)`);
+    return 2;
+  }
+
+  let plan: ImportPlan;
+  try {
+    plan = planImport({
+      codexDir: values["codex-dir"],
+      claudeRegistry: values["claude-registry"] ?? undefined,
+      claudeModel: values["claude-model"],
+      prefer: prefer as "codex" | "claude" | undefined,
+      keepDuplicates: values["keep-duplicates"] === true,
+    });
+  } catch (err) {
+    console.error(`import failed: ${(err as Error).message}`);
+    return 1;
+  }
+
+  const outDir = values.out ?? registryDir();
+  const toCreate = plan.candidates.filter((c) => c.action === "create");
+  const written: string[] = [];
+  const skippedExisting: string[] = [];
+
+  if (values.write) {
+    mkdirSync(outDir, { recursive: true });
+    for (const c of toCreate) {
+      const dest = join(outDir, `${c.id}.toml`);
+      if (existsSync(dest) && !values.force) {
+        skippedExisting.push(c.id);
+        continue;
+      }
+      writeFileSync(dest, renderToml(c));
+      written.push(c.id);
+    }
+  }
+
+  if (values.json) {
+    console.log(
+      JSON.stringify(
+        {
+          prefer: plan.prefer,
+          outDir,
+          write: values.write === true,
+          create: toCreate.map((c) => ({ id: c.id, source: c.source, harness: c.harness, model: c.model, rrule: c.rrule })),
+          duplicates: plan.duplicates,
+          skipped: plan.skipped,
+          // Every LIVE legacy entry (created + skip-duplicate) — the exact set
+          // the cutover must pause in the legacy schedulers. Inactive `skipped`
+          // sources are already off and are not listed.
+          pauseTargets: plan.candidates.map((c) => ({ id: c.id, source: c.source, sourcePath: c.sourcePath })),
+          written,
+          skippedExisting,
+        },
+        null,
+        2,
+      ),
+    );
+    return 0;
+  }
+
+  console.log(renderDiffTable(plan));
+  console.log("");
+  if (values.write) {
+    console.log(`WROTE ${written.length} file(s) to ${outDir}` + (written.length ? `: ${written.join(", ")}` : ""));
+    if (skippedExisting.length > 0) {
+      console.log(`skipped ${skippedExisting.length} existing (use --force to overwrite): ${skippedExisting.join(", ")}`);
+    }
+  } else {
+    console.log(`DRY-RUN: no files written. Re-run with --write to create ${toCreate.length} registry file(s) in ${outDir}.`);
+  }
   return 0;
 }
 
