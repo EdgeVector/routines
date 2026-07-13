@@ -54,7 +54,7 @@ routines route <id> --harness codex --model gpt-5.5
 routines logs <id>            # recent runs (--path, --tail, --json)
 routines import               # import the legacy schedulers into the registry (dry-run)
 routines web                  # serve the local dashboard (localhost); --port, --host
-routines doctor               # validate registry + environment
+routines doctor               # validate registry + environment (+ configurations project-config)
 routines daemon               # the scheduler loop (launchd entrypoint); --once, --catchup <s>
 routines install-daemon       # install + load the launchd user agent
 routines print-plist          # preview the launchd plist

@@ -19,6 +19,7 @@ import { collectStatus } from "./status.ts";
 import { registryDir, routinesHome, runsDir } from "./paths.ts";
 import { runRoutine } from "./runner.ts";
 import { startServer } from "./server.ts";
+import { loadProjectConfig } from "./project-config.ts";
 
 const HELP = `routines ${pkg.version} — one scheduler for agent routines (claude|codex)
 
@@ -36,7 +37,7 @@ Commands:
   import                      import legacy schedulers into the registry (dry-run;
                               --write to apply). See --help notes below.
   web                         serve the local dashboard (localhost); --port, --host
-  doctor                      validate the registry + environment
+  doctor                      validate the registry + environment (+ configurations)
   daemon                      run the scheduler loop (launchd entrypoint); --once, --catchup <s>
   install-daemon              install + load the launchd user agent
   uninstall-daemon            unload + remove the launchd user agent
@@ -361,6 +362,15 @@ function cmdDoctor(): number {
   console.log(`routines ${pkg.version}  home=${routinesHome()}`);
   console.log(`registry=${registryDir()} ${existsSync(registryDir()) ? "" : "(missing — no routines yet)"}`);
 
+  // Project config (configurations app) — soft dependency.
+  const pc = loadProjectConfig({ force: true });
+  console.log(`\nproject-config: source=${pc.source}`);
+  if (pc.workspaceRoot) console.log(`  workspace_root=${pc.workspaceRoot}`);
+  if (pc.routinesPromptsDir) console.log(`  routines_prompts_dir=${pc.routinesPromptsDir}`);
+  if (pc.source === "none") {
+    console.log("  (no configurations://workspace-config — cwd stays as registry TOML)");
+  }
+
   const { entries, errors } = loadAll();
   console.log(`\n${entries.length} routine(s), ${errors.length} error(s)`);
   for (const err of errors) {
@@ -370,7 +380,8 @@ function cmdDoctor(): number {
   for (const e of entries) {
     const issues: string[] = [];
     if (e.promptPath && !existsSync(e.promptPath)) issues.push(`prompt_path missing: ${e.promptPath}`);
-    if (!existsSync(e.cwd)) issues.push(`cwd missing: ${e.cwd}`);
+    const cwd = e.cwd;
+    if (!existsSync(cwd)) issues.push(`cwd missing: ${cwd}`);
     if (issues.length > 0) {
       problems += issues.length;
       console.log(`  WARN ${e.id}: ${issues.join("; ")}`);
