@@ -27,13 +27,27 @@ export function buildInvocation(entry: RoutineEntry, prompt: string): HarnessInv
   let args: string[];
   switch (entry.harness) {
     case "claude":
-      // claude -p "<prompt>" --model <model> --output-format stream-json
-      args = ["-p", prompt, "--model", entry.model, "--output-format", "stream-json"];
+      // Options BEFORE the prompt. stream-json requires --verbose with -p/--print
+      // (Claude Code: "When using --print, --output-format=stream-json requires --verbose").
+      args = [
+        "-p",
+        "--verbose",
+        "--model",
+        entry.model,
+        "--output-format",
+        "stream-json",
+        prompt,
+      ];
       break;
     case "codex":
-      // codex exec "<prompt>" --model <model>
-      args = ["exec", prompt, "--model", entry.model];
-      if (entry.effort) args.push("--reasoning-effort", entry.effort);
+      // Options BEFORE the prompt. Flags after a multi-line prompt are parsed as
+      // part of the prompt / cause "unexpected argument" usage errors.
+      // Effort is a config override (there is no --reasoning-effort on current codex).
+      args = ["exec", "--model", entry.model];
+      if (entry.effort) {
+        args.push("-c", `model_reasoning_effort=${JSON.stringify(entry.effort)}`);
+      }
+      args.push(prompt);
       break;
     default: {
       const never: never = entry.harness;
