@@ -37,6 +37,8 @@ describe("buildInvocation", () => {
       "exec",
       "--model",
       "m1",
+      "--skip-git-repo-check",
+      "--ephemeral",
       "-c",
       'model_reasoning_effort="high"',
       "hello",
@@ -47,7 +49,14 @@ describe("buildInvocation", () => {
 
   test("codex without effort omits -c", () => {
     const inv = buildInvocation(entry("codex"), "hi");
-    expect(inv.args).toEqual(["exec", "--model", "m1", "hi"]);
+    expect(inv.args).toEqual([
+      "exec",
+      "--model",
+      "m1",
+      "--skip-git-repo-check",
+      "--ephemeral",
+      "hi",
+    ]);
   });
 
   test("grok adapter shape (flags before -p prompt)", () => {

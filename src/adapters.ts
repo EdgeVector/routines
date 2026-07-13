@@ -53,7 +53,15 @@ export function buildInvocation(entry: RoutineEntry, prompt: string): HarnessInv
       // Options BEFORE the prompt. Flags after a multi-line prompt are parsed as
       // part of the prompt / cause "unexpected argument" usage errors.
       // Effort is a config override (there is no --reasoning-effort on current codex).
-      args = ["exec", "--model", entry.model];
+      // --skip-git-repo-check: fleet cwds may be workspace roots, not a single git repo.
+      // --ephemeral: no session persist noise for scheduled runs.
+      args = [
+        "exec",
+        "--model",
+        entry.model,
+        "--skip-git-repo-check",
+        "--ephemeral",
+      ];
       if (entry.effort) {
         args.push("-c", `model_reasoning_effort=${JSON.stringify(entry.effort)}`);
       }
