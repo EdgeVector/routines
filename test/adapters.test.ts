@@ -19,13 +19,35 @@ describe("buildInvocation", () => {
   test("claude adapter shape", () => {
     const inv = buildInvocation(entry("claude"), "hello");
     expect(inv.bin).toBe("claude");
-    expect(inv.args).toEqual(["-p", "hello", "--model", "m1", "--output-format", "stream-json"]);
+    expect(inv.args).toEqual([
+      "-p",
+      "--verbose",
+      "--model",
+      "m1",
+      "--output-format",
+      "stream-json",
+      "hello",
+    ]);
   });
 
-  test("codex adapter shape with effort", () => {
+  test("codex adapter shape with effort (flags before prompt)", () => {
     const inv = buildInvocation(entry("codex", 'effort = "high"'), "hello");
     expect(inv.bin).toBe("codex");
-    expect(inv.args).toEqual(["exec", "hello", "--model", "m1", "--reasoning-effort", "high"]);
+    expect(inv.args).toEqual([
+      "exec",
+      "--model",
+      "m1",
+      "-c",
+      'model_reasoning_effort="high"',
+      "hello",
+    ]);
+    // Prompt is last so multi-line bodies cannot swallow flags.
+    expect(inv.args[inv.args.length - 1]).toBe("hello");
+  });
+
+  test("codex without effort omits -c", () => {
+    const inv = buildInvocation(entry("codex"), "hi");
+    expect(inv.args).toEqual(["exec", "--model", "m1", "hi"]);
   });
 
   test("binary override via env", () => {
