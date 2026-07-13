@@ -1,2 +1,12 @@
 #!/usr/bin/env bun
-import "../src/cli.ts";
+// User-facing CLI entry. Must invoke main() — a bare `import "../src/cli.ts"`
+// leaves import.meta.main false on cli.ts, so the process would exit 0 with
+// no output (and cutover's `routines import --json` would see empty pauseTargets).
+import { main } from "../src/cli.ts";
+
+main(process.argv.slice(2))
+  .then((code) => process.exit(code))
+  .catch((err) => {
+    console.error(err instanceof Error ? err.message : String(err));
+    process.exit(1);
+  });

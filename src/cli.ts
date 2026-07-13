@@ -426,6 +426,28 @@ function selfProgram(): string {
 function cmdInstallDaemon(): number {
   const env: Record<string, string> = {};
   if (process.env.LASTGIT_SOCKET) env.LASTGIT_SOCKET = process.env.LASTGIT_SOCKET;
+  // launchd's default PATH is /usr/bin:/bin:/usr/sbin:/sbin — no homebrew,
+  // no ~/.local/bin, no ~/.bun/bin. Without an explicit PATH the daemon can't
+  // find claude/codex/fsituations/fbrain and dispatches fail (or the Situation
+  // fence degrades every tick).
+  const home = process.env.HOME ?? "";
+  const pathBits = [
+    process.env.PATH,
+    home ? `${home}/.local/bin` : "",
+    home ? `${home}/.bun/bin` : "",
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    "/usr/bin",
+    "/bin",
+  ].filter(Boolean);
+  // De-dupe while preserving order.
+  const seen = new Set<string>();
+  const path = pathBits
+    .join(":")
+    .split(":")
+    .filter((p) => p && (seen.has(p) ? false : (seen.add(p), true)))
+    .join(":");
+  env.PATH = path;
   const res = installDaemon({ program: selfProgram(), env });
   console.log(`plist: ${res.plistPath}`);
   console.log(res.message);

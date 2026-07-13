@@ -263,8 +263,10 @@ export function startDaemon(opts: DaemonOptions = {}): DaemonHandle {
 }
 
 function sleep(ms: number): Promise<void> {
+  // Keep the timer *ref'd* so the event loop stays alive between ticks.
+  // unref() made routinesd exit immediately after the first evaluateOnce
+  // (launchd KeepAlive then thrash-restarted it with exit 0).
   return new Promise((resolve) => {
-    const t = setTimeout(resolve, ms);
-    t.unref?.();
+    setTimeout(resolve, ms);
   });
 }

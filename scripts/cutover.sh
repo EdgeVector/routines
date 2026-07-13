@@ -143,9 +143,11 @@ fi
 
 # ---- apply ----------------------------------------------------------------
 # Refuse to edit the Claude registry while its scheduler is live.
+# Match the Desktop app only — NOT ~/.claude/* MCP servers or the `claude` CLI
+# (pgrep -f "Claude" false-positives on those and blocks a valid cutover).
 if [ "$CLAUDE_N" -gt 0 ]; then
-  if pgrep -f "Claude" >/dev/null 2>&1; then
-    echo "cutover --apply: a 'Claude' process is running; its scheduler will clobber edits to" >&2
+  if pgrep -f "/Applications/Claude\\.app/" >/dev/null 2>&1; then
+    echo "cutover --apply: Claude Desktop is running; its scheduler will clobber edits to" >&2
     echo "  scheduled-tasks.json. Quit Claude fully, then re-run --apply." >&2
     echo "  (Codex automations were NOT modified.)" >&2
     exit 3
