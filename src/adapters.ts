@@ -15,6 +15,12 @@ export interface HarnessInvocation {
   args: string[];
   /** Human-readable command string for run logs (prompt elided). */
   display: string;
+  /**
+   * If set, written to the child's stdin. Codex `exec` is reliable when the
+   * prompt is fed via `-` + stdin; multi-line prompts that start with `---`
+   * (YAML frontmatter) are rejected as unexpected argv when passed positionally.
+   */
+  stdin?: string;
 }
 
 export function harnessBinary(harness: Harness): string {
@@ -49,11 +55,11 @@ export function buildInvocation(entry: RoutineEntry, prompt: string): HarnessInv
         prompt,
       ];
       break;
-    case "codex":
-      // Options BEFORE the prompt. Flags after a multi-line prompt are parsed as
-      // part of the prompt / cause "unexpected argument" usage errors.
-      // Effort is a config override (there is no --reasoning-effort on current codex).
-      // --skip-git-repo-check: fleet cwds may be workspace roots, not a single git repo.
+    case "codex": {
+      // Options before `-`. Feed the prompt on stdin — positional prompts that
+      // start with `---` (skill frontmatter) are rejected as unexpected args by
+      // clap on current codex. Effort via config override (no --reasoning-effort).
+      // --skip-git-repo-check: fleet cwds may be workspace roots, not a git repo.
       // --ephemeral: no session persist noise for scheduled runs.
       args = [
         "exec",
@@ -65,8 +71,15 @@ export function buildInvocation(entry: RoutineEntry, prompt: string): HarnessInv
       if (entry.effort) {
         args.push("-c", `model_reasoning_effort=${JSON.stringify(entry.effort)}`);
       }
-      args.push(prompt);
-      break;
+      args.push("-"); // read prompt from stdin
+      const inv: HarnessInvocation = {
+        bin,
+        args,
+        display: displayArgs(bin, [...args.slice(0, -1), `<prompt-stdin:${prompt.length} chars>`]),
+        stdin: prompt,
+      };
+      return inv;
+    }
     case "grok":
       // Grok Build headless: -p/--single prints and exits. Options before -p.
       // --always-approve for unattended fleet runs (tools may run without prompts).
