@@ -17,6 +17,7 @@ import { resolvePrompt, type RoutineEntry } from "./registry.ts";
 import { runsDir } from "./paths.ts";
 import { writeHeartbeat, type HeartbeatOutcome } from "./heartbeat.ts";
 import { patchState } from "./state.ts";
+import { envFromProjectConfig, loadProjectConfig, resolveRoutineCwd } from "./project-config.ts";
 
 export interface RunResult {
   id: string;
@@ -49,13 +50,17 @@ export function runRoutine(entry: RoutineEntry, opts: RunOptions = {}): Promise<
   mkdirSync(runDir, { recursive: true });
   writeFileSync(join(runDir, "prompt.txt"), prompt);
 
+  const project = loadProjectConfig();
+  const cwd = resolveRoutineCwd(entry.cwd, project);
+  const childEnv = { ...process.env, ...envFromProjectConfig(project) };
+
   const stdoutChunks: string[] = [];
   const stderrChunks: string[] = [];
 
   return new Promise<RunResult>((resolve) => {
     const child = spawn(invocation.bin, invocation.args, {
-      cwd: entry.cwd,
-      env: process.env,
+      cwd,
+      env: childEnv,
       stdio: ["ignore", "pipe", "pipe"],
     });
 

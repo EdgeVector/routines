@@ -27,6 +27,7 @@ import { locksDir } from "./paths.ts";
 import { nextAfter } from "./rrule.ts";
 import { patchState, readState } from "./state.ts";
 import { runRoutine, type RunResult } from "./runner.ts";
+import { loadProjectConfig } from "./project-config.ts";
 
 export interface DaemonOptions {
   once?: boolean;
@@ -202,6 +203,9 @@ export async function evaluateOnce(opts: DaemonOptions = {}): Promise<RunResult[
   for (const e of errors) {
     log({ ts: now.toISOString(), kind: "registry-error", detail: e.message });
   }
+
+  // Warm project config cache (configurations app) so runners inherit PATH / workspace.
+  loadProjectConfig();
 
   const check = loadActiveSituations();
   if (!check.ok) {
