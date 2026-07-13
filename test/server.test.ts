@@ -33,6 +33,7 @@ beforeEach(() => {
   process.env.ROUTINES_HOME = home;
   process.env.ROUTINES_CLAUDE_BIN = stubHarness;
   process.env.ROUTINES_CODEX_BIN = stubHarness;
+  process.env.ROUTINES_GROK_BIN = stubHarness;
   process.env.ROUTINES_FSITUATIONS_BIN = stubSituations;
   process.env.ROUTINES_FBRAIN_BIN = "true"; // heartbeat no-op
 

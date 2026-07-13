@@ -5,7 +5,7 @@
 
 import { acquireLock, isLocked, releaseLock } from "./daemon.ts";
 import { setKeys } from "./edit.ts";
-import { loadEntry, type Harness, type RoutineEntry, type Status } from "./registry.ts";
+import { isHarness, loadEntry, type RoutineEntry, type Status } from "./registry.ts";
 import { runRoutine, type RunResult } from "./runner.ts";
 
 /** Pause or resume a routine by rewriting its `status` key in place. Returns the
@@ -27,10 +27,10 @@ export class ActionError extends Error {}
 export function routeRoutine(entry: RoutineEntry, update: RouteUpdate): RoutineEntry {
   const updates: Record<string, string> = {};
   if (update.harness !== undefined && update.harness !== "") {
-    if (update.harness !== "claude" && update.harness !== "codex") {
-      throw new ActionError(`invalid harness: ${update.harness} (claude|codex)`);
+    if (!isHarness(update.harness)) {
+      throw new ActionError(`invalid harness: ${update.harness} (claude|codex|grok)`);
     }
-    updates.harness = update.harness satisfies Harness;
+    updates.harness = update.harness;
   }
   if (update.model !== undefined && update.model !== "") {
     updates.model = update.model;

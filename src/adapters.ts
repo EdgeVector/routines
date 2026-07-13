@@ -18,8 +18,18 @@ export interface HarnessInvocation {
 }
 
 export function harnessBinary(harness: Harness): string {
-  if (harness === "claude") return process.env.ROUTINES_CLAUDE_BIN ?? "claude";
-  return process.env.ROUTINES_CODEX_BIN ?? "codex";
+  switch (harness) {
+    case "claude":
+      return process.env.ROUTINES_CLAUDE_BIN ?? "claude";
+    case "codex":
+      return process.env.ROUTINES_CODEX_BIN ?? "codex";
+    case "grok":
+      return process.env.ROUTINES_GROK_BIN ?? "grok";
+    default: {
+      const never: never = harness;
+      throw new Error(`unknown harness: ${String(never)}`);
+    }
+  }
 }
 
 export function buildInvocation(entry: RoutineEntry, prompt: string): HarnessInvocation {
@@ -48,6 +58,25 @@ export function buildInvocation(entry: RoutineEntry, prompt: string): HarnessInv
         args.push("-c", `model_reasoning_effort=${JSON.stringify(entry.effort)}`);
       }
       args.push(prompt);
+      break;
+    case "grok":
+      // Grok Build headless: -p/--single prints and exits. Options before -p.
+      // --always-approve for unattended fleet runs (tools may run without prompts).
+      // Docs also mention --yolo; current CLI exposes --always-approve.
+      args = [
+        "-m",
+        entry.model,
+        "--always-approve",
+        "--permission-mode",
+        "bypassPermissions",
+        "--output-format",
+        "streaming-json",
+      ];
+      if (entry.effort) {
+        args.push("--reasoning-effort", entry.effort);
+      }
+      // -p takes the prompt as its value; keep it last so multi-line bodies are one arg.
+      args.push("-p", prompt);
       break;
     default: {
       const never: never = entry.harness;

@@ -28,8 +28,8 @@ and heartbeats still flow to fbrain.
 
 ```toml
 # ~/.routines/registry/disk-reclaim.toml   (filename stem = id)
-harness       = "claude"                       # claude | codex
-model         = "claude-opus-4-8"
+harness       = "claude"                       # claude | codex | grok
+model         = "claude-opus-4-8"              # e.g. sonnet | gpt-5.5 | grok-4.5
 effort        = "medium"                        # optional (codex reasoning effort)
 rrule         = "FREQ=HOURLY;INTERVAL=2"        # RFC 5545, same dialect as Codex automations
 prompt_path   = "/Users/you/.last-stack/routines/disk-reclaim.md"   # or inline `prompt = "..."`
@@ -51,6 +51,7 @@ routines status               # last run / next fire / harness / model — the s
 routines run <id>             # run a routine now (foreground)
 routines pause|resume <id>    # toggle status
 routines route <id> --harness codex --model gpt-5.5
+routines route <id> --harness grok --model grok-4.5
 routines logs <id>            # recent runs (--path, --tail, --json)
 routines import               # import the legacy schedulers into the registry (dry-run)
 routines web                  # serve the local dashboard (localhost); --port, --host

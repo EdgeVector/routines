@@ -28,6 +28,7 @@ beforeEach(() => {
   );
   process.env.ROUTINES_CLAUDE_BIN = harnessStub;
   process.env.ROUTINES_CODEX_BIN = harnessStub;
+  process.env.ROUTINES_GROK_BIN = harnessStub;
 
   // fsituations stub: one active situation scoping *fenced*
   const sit = stub(
