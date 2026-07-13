@@ -1,7 +1,7 @@
 // The routines dashboard page — one self-contained HTML document (inline CSS +
-// JS, no external assets, theme-aware light/dark). Served at GET / by the local
-// web server. Kept as a string constant so `bun build src/server.ts` bundles it
-// with no separate asset to ship.
+// JS, no external assets). Always Gruvbox dark (owner preference). Served at
+// GET / by the local web server. Kept as a string constant so `bun build
+// src/server.ts` bundles it with no separate asset to ship.
 //
 // Implementation note: this is a plain (cooked) template literal. The client JS
 // therefore avoids embedded backslash string-escapes and backticks (they would
@@ -15,20 +15,27 @@ export const PAGE = `<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>routines &middot; dashboard</title>
 <style>
+  /* Gruvbox dark (always — do not follow OS light/dark) */
   :root {
-    --bg: #f6f7f9; --panel: #ffffff; --line: #e4e7ec; --fg: #1a1d21;
-    --muted: #6b7280; --accent: #2563eb; --accent-fg: #ffffff;
-    --ok: #16a34a; --warn: #d97706; --bad: #dc2626; --chip: #eef2ff; --chip-fg: #3730a3;
-    --code-bg: #0f172a; --code-fg: #e2e8f0;
+    --bg: #1d2021;
+    --panel: #282828;
+    --line: #3c3836;
+    --fg: #ebdbb2;
+    --muted: #928374;
+    --accent: #83a598;
+    --accent-fg: #1d2021;
+    --ok: #b8bb26;
+    --warn: #fabd2f;
+    --bad: #fb4934;
+    --chip: #3c3836;
+    --chip-fg: #d5c4a1;
+    --code-bg: #1d2021;
+    --code-fg: #ebdbb2;
+    --orange: #fe8019;
+    --aqua: #8ec07c;
+    --purple: #d3869b;
   }
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --bg: #0e1116; --panel: #171b22; --line: #262b33; --fg: #e6e8eb;
-      --muted: #9aa4b2; --accent: #3b82f6; --accent-fg: #ffffff;
-      --ok: #22c55e; --warn: #f59e0b; --bad: #ef4444; --chip: #1e293b; --chip-fg: #93c5fd;
-      --code-bg: #0b0f16; --code-fg: #d7dde5;
-    }
-  }
+  color-scheme: dark;
   * { box-sizing: border-box; }
   body {
     margin: 0; background: var(--bg); color: var(--fg);
