@@ -76,8 +76,10 @@ function pidAlive(pid: number): boolean {
 }
 
 // Acquire a per-routine single-flight lock. Returns false if a live run holds
-// it. Steals a lock whose owning pid is dead (crashed daemon).
-function acquireLock(id: string): boolean {
+// it. Steals a lock whose owning pid is dead (crashed daemon). Exported so the
+// web dashboard's run-now can share the daemon's single-flight discipline — a
+// routine never overlaps itself, whether fired by the scheduler or a human.
+export function acquireLock(id: string): boolean {
   mkdirSync(locksDir(), { recursive: true });
   const p = lockPath(id);
   if (existsSync(p)) {
@@ -90,7 +92,7 @@ function acquireLock(id: string): boolean {
   return true;
 }
 
-function releaseLock(id: string): void {
+export function releaseLock(id: string): void {
   const p = lockPath(id);
   try {
     rmSync(p, { force: true });

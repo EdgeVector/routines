@@ -52,11 +52,36 @@ routines run <id>             # run a routine now (foreground)
 routines pause|resume <id>    # toggle status
 routines route <id> --harness codex --model gpt-5.5
 routines logs <id>            # recent runs (--path, --tail, --json)
+routines web                  # serve the local dashboard (localhost); --port, --host
 routines doctor               # validate registry + environment
 routines daemon               # the scheduler loop (launchd entrypoint); --once, --catchup <s>
 routines install-daemon       # install + load the launchd user agent
 routines print-plist          # preview the launchd plist
 ```
+
+## Web dashboard
+
+`routines web` serves the "coordinate them all from one place" view — the
+single-pane `routines status` table rendered in the browser, with per-routine
+actions. It is a single self-contained page (inline CSS + JS, **no external
+assets**) plus a small JSON API on `127.0.0.1` only — **localhost, no auth**.
+
+```sh
+routines web                 # http://127.0.0.1:4778 (ROUTINES_WEB_PORT to override)
+routines web --port 8080     # pick a port
+```
+
+The dashboard shows every routine's harness, model, schedule, status, next fire,
+and last-run outcome, and wires each action to the **same code path as the CLI**
+(`src/actions.ts`): run-now (shares the daemon's per-routine single-flight lock),
+pause/resume (rewrites `status` in the registry TOML), and re-route harness/model
+(rewrites `harness`/`model` in place). Expand a routine to see its recent runs
+with exit status and a tail of the captured log. Serve it alongside the daemon —
+it reads the same on-disk registry and run logs, so it reflects live scheduler
+state.
+
+The JSON API (for scripting): `GET /api/routines`, `GET /api/routines/<id>/runs`,
+`GET /api/routines/<id>/runs/<stamp|latest>`, and `POST /api/routines/<id>/{run,pause,resume,route}`.
 
 ## Daemon
 
@@ -94,7 +119,7 @@ the configured sync interval (validated 2026-07-12T23:11:25Z).
 ## Test
 
 ```sh
-bun test            # unit + daemon integration (39 tests)
+bun test            # unit + daemon + dashboard integration (47 tests)
 bun run typecheck   # tsc --noEmit
 bun run e2e         # full both-adapter dispatch e2e on a throwaway ROUTINES_HOME
 ```
@@ -107,7 +132,8 @@ path that routines owns.
 
 ## Scope
 
-MVP = the scheduler daemon + CLI + both adapters. **Out of scope** (separate
-cards): the web dashboard (`routines status` is the MVP coordination view),
+Core = the scheduler daemon + CLI + both adapters + the local `routines web`
+dashboard (single-pane coordination). **Out of scope** (separate cards):
+remote/authenticated access and historical analytics for the dashboard,
 migrating/pausing existing Codex crons and Claude scheduled tasks, and any new
 routine content.

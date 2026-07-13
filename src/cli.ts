@@ -9,15 +9,15 @@ import { join } from "node:path";
 import { parseArgs } from "node:util";
 
 import pkg from "../package.json" with { type: "json" };
-import { setKeys } from "./edit.ts";
-import { evaluateOnce, isLocked, startDaemon } from "./daemon.ts";
+import { routeRoutine, setStatus, ActionError } from "./actions.ts";
+import { evaluateOnce, startDaemon } from "./daemon.ts";
 import { installDaemon, plistPath, renderPlist, uninstallDaemon } from "./launchd.ts";
-import { loadActiveSituations, fenceFor } from "./situations.ts";
+import { loadActiveSituations } from "./situations.ts";
 import { loadAll, loadEntry, resolvePrompt, type RoutineEntry } from "./registry.ts";
-import { nextAfter } from "./rrule.ts";
-import { readState } from "./state.ts";
+import { collectStatus } from "./status.ts";
 import { registryDir, routinesHome, runsDir } from "./paths.ts";
 import { runRoutine } from "./runner.ts";
+import { startServer } from "./server.ts";
 
 const HELP = `routines ${pkg.version} — one scheduler for agent routines (claude|codex)
 
@@ -32,6 +32,7 @@ Commands:
   resume <id>                 set status = active
   route <id> --harness X --model Y   change a routine's harness and/or model
   logs <id>                   show recent runs for a routine (--json, --path, --tail)
+  web                         serve the local dashboard (localhost); --port, --host
   doctor                      validate the registry + environment
   daemon                      run the scheduler loop (launchd entrypoint); --once, --catchup <s>
   install-daemon              install + load the launchd user agent
@@ -75,6 +76,8 @@ async function main(argv: string[]): Promise<number> {
       return cmdRoute(rest);
     case "logs":
       return cmdLogs(rest);
+    case "web":
+      return cmdWeb(rest);
     case "doctor":
       return cmdDoctor();
     case "daemon":
@@ -109,39 +112,22 @@ function cmdList(rest: string[]): number {
 
 function cmdStatus(rest: string[]): number {
   const { values } = parseArgs({ args: rest, options: { json: { type: "boolean" } }, allowPositionals: true });
-  const { entries, errors } = loadAll();
-  const now = new Date();
-  const check = loadActiveSituations();
-  const rows = entries.map((e) => {
-    const st = readState(e.id);
-    const next = e.status === "active" ? nextAfter(e.parsedRrule, now) : null;
-    const fence = fenceFor(e.id, check.situations);
-    return {
-      id: e.id,
-      status: e.status,
-      harness: e.harness,
-      model: e.model,
-      rrule: e.rrule,
-      nextFire: next ? next.toISOString() : null,
-      lastRun: st.lastRun ?? null,
-      lastExit: st.lastExit ?? null,
-      running: isLocked(e.id),
-      fenced: fence.fenced ? (fence.situationSlug ?? true) : false,
-    };
-  });
+  const snap = collectStatus();
   if (values.json) {
-    console.log(JSON.stringify({ situationsOk: check.ok, rows, errors: errors.map((e) => e.message) }, null, 2));
+    // Preserve the historical CLI JSON shape (situationsOk + rows + errors); the
+    // web API serves the fuller collectStatus() snapshot.
+    console.log(JSON.stringify({ situationsOk: snap.situationsOk, rows: snap.rows, errors: snap.errors }, null, 2));
     return 0;
   }
-  console.log(`routines @ ${routinesHome()}  (situations: ${check.ok ? "ok" : "DEGRADED"})`);
-  for (const r of rows) {
+  console.log(`routines @ ${snap.home}  (situations: ${snap.situationsOk ? "ok" : "DEGRADED"})`);
+  for (const r of snap.rows) {
     const flags = [r.running ? "RUNNING" : "", r.fenced ? `FENCED:${r.fenced}` : ""].filter(Boolean).join(" ");
     console.log(
       `${r.id}  [${r.status}] ${r.harness}/${r.model}\n` +
         `    next: ${r.nextFire ?? "-"}  last: ${r.lastRun ?? "-"} (exit ${r.lastExit ?? "-"}) ${flags}`,
     );
   }
-  for (const err of errors) console.error(`ERROR ${err.message}`);
+  for (const err of snap.errors) console.error(`ERROR ${err}`);
   return 0;
 }
 
@@ -172,7 +158,7 @@ function cmdSetStatus(rest: string[], status: "active" | "paused"): number {
     return 2;
   }
   const entry = loadEntry(id); // validates existence + shape
-  setKeys(entry.sourcePath, { status });
+  setStatus(entry, status);
   console.log(`${id}: status = ${status}`);
   return 0;
 }
@@ -189,19 +175,17 @@ function cmdRoute(rest: string[]): number {
     return 2;
   }
   const entry = loadEntry(id);
-  const updates: Record<string, string> = {};
-  if (values.harness) {
-    if (values.harness !== "claude" && values.harness !== "codex") {
-      console.error(`invalid harness: ${values.harness} (claude|codex)`);
+  try {
+    const next = routeRoutine(entry, { harness: values.harness, model: values.model });
+    console.log(`${id}: ${next.harness}/${next.model}`);
+    return 0;
+  } catch (err) {
+    if (err instanceof ActionError) {
+      console.error(err.message);
       return 2;
     }
-    updates.harness = values.harness;
+    throw err;
   }
-  if (values.model) updates.model = values.model;
-  setKeys(entry.sourcePath, updates);
-  const next = loadEntry(id);
-  console.log(`${id}: ${next.harness}/${next.model}`);
-  return 0;
 }
 
 function cmdLogs(rest: string[]): number {
@@ -246,6 +230,32 @@ function cmdLogs(rest: string[]): number {
   console.log(`  dir:  ${latestDir}`);
   console.log(`  cmd:  ${meta.command ?? "-"}`);
   console.log(`  exit: ${meta.exitCode ?? "-"}  dur: ${meta.durationMs ? (meta.durationMs / 1000).toFixed(1) + "s" : "-"}`);
+  return 0;
+}
+
+async function cmdWeb(rest: string[]): Promise<number> {
+  const { values } = parseArgs({
+    args: rest,
+    options: { port: { type: "string" }, host: { type: "string" } },
+    allowPositionals: true,
+  });
+  const port = values.port ? Number(values.port) : Number(process.env.ROUTINES_WEB_PORT ?? 4778);
+  if (!Number.isFinite(port) || port < 0 || port > 65535) {
+    console.error(`invalid port: ${values.port}`);
+    return 2;
+  }
+  const host = values.host ?? "127.0.0.1";
+  const handle = startServer({ port, host });
+  console.error(`routines dashboard: ${handle.url}  (home=${routinesHome()})`);
+  console.error(`serving the registry at ${registryDir()} — localhost only, no auth. Ctrl-C to stop.`);
+  const stop = () => {
+    handle.stop();
+    process.exit(0);
+  };
+  process.on("SIGTERM", stop);
+  process.on("SIGINT", stop);
+  // Hold the process open until signalled.
+  await new Promise<void>(() => {});
   return 0;
 }
 
