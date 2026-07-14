@@ -14,7 +14,7 @@ import { join } from "node:path";
 
 import { buildInvocation, type HarnessInvocation } from "./adapters.ts";
 import { resolvePrompt, type RoutineEntry } from "./registry.ts";
-import { runsDir } from "./paths.ts";
+import { automationMemoryDir, automationMemoryPath, runsDir } from "./paths.ts";
 import { writeHeartbeat, type HeartbeatOutcome } from "./heartbeat.ts";
 import { parseOutcome, type RunOutcome } from "./outcome.ts";
 import { patchState } from "./state.ts";
@@ -45,7 +45,7 @@ export interface RunOptions {
 }
 
 export function runRoutine(entry: RoutineEntry, opts: RunOptions = {}): Promise<RunResult> {
-  const prompt = resolvePrompt(entry);
+  const prompt = buildDispatchPrompt(entry, resolvePrompt(entry));
   const invocation = buildInvocation(entry, prompt);
   const startedAt = new Date();
   const runDir = join(runsDir(), entry.id, runStamp(startedAt));
@@ -171,6 +171,29 @@ export function runRoutine(entry: RoutineEntry, opts: RunOptions = {}): Promise<
       resolve(result);
     }
   });
+}
+
+function buildDispatchPrompt(entry: RoutineEntry, prompt: string): string {
+  const memoryPath = automationMemoryPath(entry.id);
+  try {
+    mkdirSync(automationMemoryDir(entry.id), { recursive: true });
+  } catch {
+    // The harness prompt tells the worker how to report an unwritable path.
+  }
+  return [
+    "## Dispatch envelope (routinesd)",
+    "",
+    `Automation ID: ${entry.id}`,
+    `Automation memory: ${memoryPath}`,
+    "",
+    "Use ONLY the Automation memory path above for cross-run notes. Do not invent",
+    "short aliases under ~/.codex/automations/ from the skill `name:` frontmatter.",
+    "If that exact path is unwritable, note `memory_unwritable=<path>` in the",
+    "heartbeat and continue; do not fail the whole run.",
+    "",
+    "---",
+    prompt,
+  ].join("\n");
 }
 
 function tail(s: string, n: number): string {
