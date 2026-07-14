@@ -42,7 +42,7 @@ export const GROUPS: readonly RoutineGroup[] = [
   {
     id: "quality",
     label: "Quality & observability",
-    blurb: "Perf guards, stress, Sentry triage, telemetry dashboards",
+    blurb: "Perf guards, stress, Sentry, telemetry, fleet health, merge/deploy pipeline",
     order: 50,
   },
   {
@@ -113,6 +113,9 @@ const EXACT: Record<string, string> = {
   "brain-stress-consistency": "quality",
   "sentry-triage": "quality",
   "lastdbd-mini-telemetry-dashboard-refresh": "quality",
+  "routine-fleet-health": "quality",
+  // Merge + post-merge deploy health (P0 pipeline backstop)
+  "last-stack-pipeline-health": "quality",
 
   // Product canaries
   "coderings-capstone-exerciser": "product",
@@ -136,7 +139,7 @@ const PATTERNS: Array<{ re: RegExp; group: string }> = [
     re: /disk-reclaim|worktree-cleanup|token-hygiene|agent-memory-cleanup|teardown/,
     group: "hygiene",
   },
-  { re: /db-perf|brain-stress|sentry|telemetry/, group: "quality" },
+  { re: /db-perf|brain-stress|sentry|telemetry|fleet-health|pipeline-health/, group: "quality" },
   { re: /coderings/, group: "product" },
   { re: /^smoke-/, group: "smoke" },
 ];

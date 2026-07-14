@@ -69,6 +69,30 @@ program-driver 2026-07-13T10:00:00Z ok generated-schema-resolver-local-pack-cons
     expect(o.detail).toContain("generated-schema");
   });
 
+  test("ignores other routines' error heartbeats quoted in a successful retro", () => {
+    // daily-retro transcripts paste incident bodies that quote:
+    //   canonicalize-daily 2026-07-13T17:14:57Z error also erroring...
+    // That must not classify THIS run as error when exit 0 and no own heartbeat.
+    const text = `
+tool output: canonicalize-daily 2026-07-13T17:14:57Z error also erroring in the same window
+kanban-pickup 2026-07-13T17:06:29Z ok cards=1
+{"type":"result","subtype":"success","is_error":false,"result":"Retro complete. 5 bites addressed."}
+`;
+    const o = parseOutcome("daily-retro-prevention", text, { exitCode: 0 });
+    expect(o.kind).toBe("ok");
+    expect(o.detail).toMatch(/Retro complete|stream-json success/i);
+  });
+
+  test("prefers this routine's heartbeat over foreign ok lines", () => {
+    const text = `
+kanban-pickup 2026-07-13T13:06:03Z ok cards=2
+daily-retro-prevention 2026-07-14T13:33:00Z ok bites=5 cards=2
+`;
+    const o = parseOutcome("daily-retro-prevention", text, { exitCode: 0 });
+    expect(o.kind).toBe("ok");
+    expect(o.detail).toContain("bites=5");
+  });
+
   test("exit non-zero falls back to error", () => {
     const o = parseOutcome("last-stack-kanban-watch", "Usage: codex exec", { exitCode: 2 });
     expect(o.kind).toBe("error");

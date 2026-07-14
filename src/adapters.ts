@@ -8,7 +8,11 @@
 // spending real API credits, while still exercising the full dispatch → spawn →
 // log → heartbeat code path that routines actually owns.
 
+import { homedir } from "node:os";
+import { join } from "node:path";
+
 import type { Harness, RoutineEntry } from "./registry.ts";
+import { memoryDir, routinesHome } from "./paths.ts";
 
 export interface HarnessInvocation {
   bin: string;
@@ -45,6 +49,8 @@ export function buildInvocation(entry: RoutineEntry, prompt: string): HarnessInv
     case "claude":
       // Options BEFORE the prompt. stream-json requires --verbose with -p/--print
       // (Claude Code: "When using --print, --output-format=stream-json requires --verbose").
+      // End option parsing with `--` so prompts that start with `---` (YAML
+      // skill frontmatter) are not mistaken for unknown long options.
       args = [
         "-p",
         "--verbose",
@@ -52,6 +58,7 @@ export function buildInvocation(entry: RoutineEntry, prompt: string): HarnessInv
         entry.model,
         "--output-format",
         "stream-json",
+        "--",
         prompt,
       ];
       break;
@@ -61,6 +68,9 @@ export function buildInvocation(entry: RoutineEntry, prompt: string): HarnessInv
       // clap on current codex. Effort via config override (no --reasoning-effort).
       // --skip-git-repo-check: fleet cwds may be workspace roots, not a git repo.
       // --ephemeral: no session persist noise for scheduled runs.
+      // --add-dir: automation memory + LastDB socket homes live outside the
+      // workspace cwd; without these, agents report memory_unwritable and cannot
+      // talk to socket-backed CLIs that need writeable state dirs.
       args = [
         "exec",
         "--model",
@@ -68,6 +78,9 @@ export function buildInvocation(entry: RoutineEntry, prompt: string): HarnessInv
         "--skip-git-repo-check",
         "--ephemeral",
       ];
+      for (const dir of codexWritableDirs()) {
+        args.push("--add-dir", dir);
+      }
       if (entry.effort) {
         args.push("-c", `model_reasoning_effort=${JSON.stringify(entry.effort)}`);
       }
@@ -106,6 +119,31 @@ export function buildInvocation(entry: RoutineEntry, prompt: string): HarnessInv
   }
   const display = displayArgs(bin, args);
   return { bin, args, display };
+}
+
+/** Extra dirs Codex may write outside the routine cwd (workspace-write sandbox). */
+export function codexWritableDirs(): string[] {
+  const home = process.env.HOME && process.env.HOME.length > 0 ? process.env.HOME : homedir();
+  const dirs = [
+    memoryDir(),
+    routinesHome(),
+    join(home, ".codex", "automations"),
+    join(home, ".lastdb"),
+    join(home, ".folddb"), // legacy socket/state path still referenced by some CLIs
+    join(home, ".kanban"),
+    join(home, ".fkanban"),
+    join(home, ".last-stack"),
+    join(home, ".lastgit"),
+  ];
+  // De-dupe while preserving order (ROUTINES_HOME may equal ~/.routines).
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const d of dirs) {
+    if (seen.has(d)) continue;
+    seen.add(d);
+    out.push(d);
+  }
+  return out;
 }
 
 // Render the invocation with the (potentially huge) prompt argument elided so
