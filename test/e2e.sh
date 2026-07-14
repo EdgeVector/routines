@@ -45,10 +45,10 @@ HEARTBEATS="$HOME_DIR/heartbeats.log"
 STUB_FBRAIN="$HOME_DIR/stub-fbrain"
 cat > "$STUB_FBRAIN" <<SH
 #!/bin/sh
-test "$1" = append || exit 11
-test "$2" = routine-heartbeats || exit 12
-test "$3" = --type || exit 13
-test "$4" = reference || exit 14
+test "\$1" = append || exit 11
+test "\$2" = routine-heartbeats || exit 12
+test "\$3" = --type || exit 13
+test "\$4" = reference || exit 14
 cat >> "$HEARTBEATS"
 exit 0
 SH
