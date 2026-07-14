@@ -57,21 +57,41 @@ export const PAGE = `<!doctype html>
   .badge.noop { background: color-mix(in srgb, var(--aqua) 18%, transparent); color: var(--aqua); }
   .badge.useful { background: color-mix(in srgb, var(--ok) 18%, transparent); color: var(--ok); }
   main { padding: 18px 22px 60px; max-width: 1280px; margin: 0 auto; }
-  .wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); }
-  table { border-collapse: collapse; width: 100%; min-width: 980px; }
+  .wrap { overflow-x: hidden; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); }
+  table { border-collapse: collapse; width: 100%; min-width: 0; table-layout: fixed; }
   .rate { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
   .rate.high-noop { color: var(--warn); }
   .rate.balanced { color: var(--aqua); }
   .rate.useful { color: var(--ok); }
-  .detail-line { margin-top: 3px; font-size: 11.5px; color: var(--muted); max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .detail-line {
+    margin-top: 3px; font-size: 11.5px; color: var(--muted);
+    max-width: 100%; overflow: hidden; display: -webkit-box;
+    -webkit-line-clamp: 2; -webkit-box-orient: vertical; white-space: normal;
+    word-break: break-word;
+  }
   th, td { text-align: left; padding: 11px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
   th { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 600; }
   tr:last-child td { border-bottom: none; }
-  td.id { font-weight: 600; }
+  td.id { font-weight: 600; word-break: break-word; overflow-wrap: anywhere; }
   .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
+  .rrule {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11.5px; line-height: 1.35;
+    white-space: normal; word-break: break-word; overflow-wrap: anywhere;
+  }
+  .rrule .part { display: block; }
+  th:nth-child(1), td:nth-child(1) { width: 15%; }
+  th:nth-child(2), td:nth-child(2) { width: 7%; }
+  th:nth-child(3), td:nth-child(3) { width: 11%; }
+  th:nth-child(4), td:nth-child(4) { width: 13%; }
+  th:nth-child(5), td:nth-child(5) { width: 7%; }
+  th:nth-child(6), td:nth-child(6) { width: 11%; }
+  th:nth-child(7), td:nth-child(7) { width: 16%; }
+  th:nth-child(8), td:nth-child(8) { width: 8%; }
+  th:nth-child(9), td:nth-child(9) { width: 11%; }
+  .actions button { margin: 2px 2px 0 0; }
   .muted { color: var(--muted); }
   .chip { display: inline-block; padding: 1px 8px; border-radius: 6px; background: var(--chip); color: var(--chip-fg); font-size: 12px; font-family: ui-monospace, monospace; }
-  .actions { white-space: nowrap; }
   button {
     font: inherit; font-size: 12.5px; padding: 5px 11px; border-radius: 7px; cursor: pointer;
     border: 1px solid var(--line); background: var(--panel); color: var(--fg);
@@ -280,6 +300,26 @@ function setFilter(mode) {
   filterMode = mode || "all";
   if (lastSnap) render(lastSnap);
 }
+/** Break RRULE on ; (and long BYDAY lists on ,) so schedule fits without overflow. */
+function formatRrule(rule) {
+  if (!rule) return '<span class="muted">' + DASH + "</span>";
+  var parts = String(rule).split(";");
+  if (parts.length <= 1) return '<span class="rrule">' + esc(rule) + "</span>";
+  return '<span class="rrule">' + parts.map(function (p, i) {
+    var body = p;
+    // Long weekday lists: break after a few tokens so BYDAY does not stretch the col.
+    if (body.indexOf("BYDAY=") === 0 && body.indexOf(",") > 0) {
+      var days = body.slice(6).split(",");
+      var chunks = [];
+      for (var d = 0; d < days.length; d += 4) {
+        chunks.push(days.slice(d, d + 4).join(","));
+      }
+      body = "BYDAY=" + chunks.join(", ");
+    }
+    var bit = esc(body) + (i < parts.length - 1 ? ";" : "");
+    return '<span class="part">' + bit + "</span>";
+  }).join("") + "</span>";
+}
 
 function rel(iso) {
   if (!iso) return DASH;
@@ -398,7 +438,7 @@ function rowHtml(r) {
     "<td>" + statusBadge(r) + "</td>" +
     '<td><span class="chip">' + esc(r.harness) + '</span> <span class="mono">' + esc(r.model) + "</span>" +
       (r.effort ? ' <span class="muted mono">(' + esc(r.effort) + ")</span>" : "") + "</td>" +
-    '<td class="mono">' + esc(r.rrule) + "</td>" +
+    "<td>" + formatRrule(r.rrule) + "</td>" +
     '<td class="mono">' + (r.nextFire ? esc(rel(r.nextFire)) : '<span class="muted">' + DASH + "</span>") + "</td>" +
     "<td>" + (r.lastRun ? esc(rel(r.lastRun)) + " " : "") + exitBadge(r.lastExit) + " " + flags(r) + "</td>" +
     "<td>" + outcomeBadge(r.lastOutcome, r.lastOutcomeDetail) +
