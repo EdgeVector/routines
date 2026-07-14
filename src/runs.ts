@@ -98,12 +98,24 @@ function summarize(id: string, stamp: string, runDir: string, meta: Record<strin
   };
 }
 
+/** True when a run dir never finished (e.g. web/daemon restart mid-run). */
+function isCompleteRunDir(runDir: string, meta: Record<string, unknown>): boolean {
+  if (!existsSync(join(runDir, "meta.json"))) return false;
+  // meta must have an exitCode field (null is ok for spawn fail) OR finishedAt
+  if (typeof meta.finishedAt === "string") return true;
+  if ("exitCode" in meta) return true;
+  return false;
+}
+
 /** List a routine's runs, most recent first (run-dir stamps sort chronologically). */
 export function listRuns(id: string, limit = 20): RunSummary[] {
   const dir = runDirFor(id);
   if (!existsSync(dir)) return [];
   const stamps = readdirSync(dir)
-    .filter((s) => existsSync(join(dir, s, "meta.json")) || existsSync(join(dir, s)))
+    .filter((s) => {
+      const rd = join(dir, s);
+      return isCompleteRunDir(rd, readMeta(rd));
+    })
     .sort()
     .reverse()
     .slice(0, limit);
