@@ -8,9 +8,11 @@ import {
 
 describe("nameMatchesRoutine", () => {
   test("matches registry id and historical aliases", () => {
-    expect(nameMatchesRoutine("last-stack-fkanban-pickup", "last-stack-fkanban-pickup")).toBe(true);
+    expect(nameMatchesRoutine("last-stack-kanban-pickup", "last-stack-kanban-pickup")).toBe(true);
+    expect(nameMatchesRoutine("last-stack-fkanban-pickup", "last-stack-kanban-pickup")).toBe(true);
+    expect(nameMatchesRoutine("kanban-pickup", "last-stack-kanban-pickup")).toBe(true);
+    expect(nameMatchesRoutine("fkanban-pickup", "last-stack-kanban-pickup")).toBe(true);
     expect(nameMatchesRoutine("kanban-pickup", "last-stack-fkanban-pickup")).toBe(true);
-    expect(nameMatchesRoutine("fkanban-pickup", "last-stack-fkanban-pickup")).toBe(true);
     expect(nameMatchesRoutine("groom-board", "last-stack-groom-board")).toBe(true);
     expect(nameMatchesRoutine("groom-kanban-board", "last-stack-groom-board")).toBe(true);
     expect(nameMatchesRoutine("program-driver", "last-stack-program-driver")).toBe(true);
@@ -33,7 +35,7 @@ ROUTINE_RESULT outcome=noop actions=0 detail=queue empty
 
   test("parses heartbeat-style lines with ISO", () => {
     const text = `kanban-pickup 2026-07-13T13:06:03Z ok cards=2 units=2 spawned=2`;
-    const o = parseOutcome("last-stack-fkanban-pickup", text, { exitCode: 0 });
+    const o = parseOutcome("last-stack-kanban-pickup", text, { exitCode: 0 });
     expect(o.kind).toBe("ok");
     expect(o.source).toBe("heartbeat");
     expect(o.detail).toContain("cards=2");
@@ -41,7 +43,7 @@ ROUTINE_RESULT outcome=noop actions=0 detail=queue empty
 
   test("parses noop validate heartbeat", () => {
     const text = `kanban-validate 2026-07-13T12:33:19Z noop no-runnable-post-merge-candidates`;
-    const o = parseOutcome("last-stack-fkanban-validate", text, { exitCode: 0 });
+    const o = parseOutcome("last-stack-kanban-validate", text, { exitCode: 0 });
     expect(o.kind).toBe("noop");
     expect(o.detail).toContain("no-runnable");
   });
@@ -68,7 +70,7 @@ program-driver 2026-07-13T10:00:00Z ok generated-schema-resolver-local-pack-cons
   });
 
   test("exit non-zero falls back to error", () => {
-    const o = parseOutcome("last-stack-fkanban-watch", "Usage: codex exec", { exitCode: 2 });
+    const o = parseOutcome("last-stack-kanban-watch", "Usage: codex exec", { exitCode: 2 });
     expect(o.kind).toBe("error");
     expect(o.source).toBe("exit");
     expect(o.detail).toBe("exit 2");

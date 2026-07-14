@@ -34,10 +34,13 @@ import { basename, join } from "node:path";
 import { homedir } from "node:os";
 
 import type { Harness, Status } from "./registry.ts";
+import { canonicalRoutineId } from "./kanban-id-migration.ts";
 import { parseRRule } from "./rrule.ts";
 
 export interface ImportCandidate {
   id: string;
+  /** Original legacy scheduler id before routines registry canonicalization. */
+  sourceId?: string;
   source: "codex" | "claude";
   sourcePath: string;
   harness: Harness;
@@ -217,6 +220,9 @@ export function normalizeRRule(raw: string): string {
 // the id in one scheduler, right = canonical (the other scheduler's form).
 const NORM_SYNONYMS: Record<string, string> = {
   "consolidate-fbrain": "consolidate-brain",
+  "fkanban-pickup": "kanban-pickup",
+  "fkanban-watch": "kanban-watch",
+  "fkanban-validate": "kanban-validate",
   "groom-fkanban-board": "groom-board",
   "agent-papercut-sweep": "papercut-sweep",
   "clean-up-stale-worktrees": "worktree-cleanup",
@@ -486,7 +492,10 @@ export function planImport(opts: PlanOptions = {}): ImportPlan {
   }
 
   // Attach normalized names.
-  const withNorm: ImportCandidate[] = raw.map((c) => ({ ...c, normName: normName(c.id), action: "create" }));
+  const withNorm: ImportCandidate[] = raw.map((c) => {
+    const id = canonicalRoutineId(c.id);
+    return { ...c, id, sourceId: c.id, normName: normName(id), action: "create" };
+  });
 
   const duplicates: ImportPlan["duplicates"] = [];
   if (!opts.keepDuplicates) {
