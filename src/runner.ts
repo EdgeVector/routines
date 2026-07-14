@@ -13,7 +13,8 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { buildInvocation, type HarnessInvocation } from "./adapters.ts";
-import { resolvePrompt, type RoutineEntry } from "./registry.ts";
+import type { RoutineEntry } from "./registry.ts";
+import { resolveDispatchPrompt } from "./prompt.ts";
 import { runsDir } from "./paths.ts";
 import { writeHeartbeat, type HeartbeatOutcome } from "./heartbeat.ts";
 import { parseOutcome, type RunOutcome } from "./outcome.ts";
@@ -45,7 +46,7 @@ export interface RunOptions {
 }
 
 export function runRoutine(entry: RoutineEntry, opts: RunOptions = {}): Promise<RunResult> {
-  const prompt = resolvePrompt(entry);
+  const prompt = resolveDispatchPrompt(entry);
   const invocation = buildInvocation(entry, prompt);
   const startedAt = new Date();
   const runDir = join(runsDir(), entry.id, runStamp(startedAt));
