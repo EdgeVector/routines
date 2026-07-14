@@ -26,8 +26,15 @@ describe("buildInvocation", () => {
       "m1",
       "--output-format",
       "stream-json",
+      "--",
       "hello",
     ]);
+  });
+
+  test("claude adapter protects YAML frontmatter prompts from option parsing", () => {
+    const prompt = "---\nname: x\n---\nDo the thing.";
+    const inv = buildInvocation(entry("claude"), prompt);
+    expect(inv.args.slice(-2)).toEqual(["--", prompt]);
   });
 
   test("codex adapter uses stdin for the prompt (dash arg)", () => {
