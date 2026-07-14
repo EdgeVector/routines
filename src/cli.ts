@@ -11,6 +11,7 @@ import { parseArgs } from "node:util";
 import pkg from "../package.json" with { type: "json" };
 import { routeRoutine, setStatus, ActionError } from "./actions.ts";
 import { planImport, renderDiffTable, renderToml, type ImportPlan } from "./import.ts";
+import { migrateKanbanIds } from "./kanban-id-migration.ts";
 import { evaluateOnce, startDaemon } from "./daemon.ts";
 import { installDaemon, plistPath, renderPlist, uninstallDaemon } from "./launchd.ts";
 import { loadActiveSituations } from "./situations.ts";
@@ -36,6 +37,8 @@ Commands:
   logs <id>                   show recent runs for a routine (--json, --path, --tail)
   import                      import legacy schedulers into the registry (dry-run;
                               --write to apply). See --help notes below.
+  migrate-kanban-ids          one-time last-stack-fkanban-* → last-stack-kanban-*
+                              registry/state/memory migration (--write to apply)
   web                         serve the local dashboard (localhost); --port, --host
   doctor                      validate the registry + environment (+ configurations)
   daemon                      run the scheduler loop (launchd entrypoint); --once, --catchup <s>
@@ -81,6 +84,8 @@ async function main(argv: string[]): Promise<number> {
       return cmdRoute(rest);
     case "import":
       return cmdImport(rest);
+    case "migrate-kanban-ids":
+      return cmdMigrateKanbanIds(rest);
     case "logs":
       return cmdLogs(rest);
     case "web":
@@ -100,6 +105,29 @@ async function main(argv: string[]): Promise<number> {
       console.error(HELP);
       return 2;
   }
+}
+
+function cmdMigrateKanbanIds(rest: string[]): number {
+  const { values } = parseArgs({
+    args: rest,
+    options: { write: { type: "boolean" }, json: { type: "boolean" } },
+    allowPositionals: true,
+  });
+  const result = migrateKanbanIds({ write: values.write === true });
+  if (values.json) {
+    console.log(JSON.stringify(result, null, 2));
+    return 0;
+  }
+  console.log(
+    `${values.write ? "MIGRATED" : "DRY-RUN"} ${result.actions.length} kanban id path(s) under ${routinesHome()}`,
+  );
+  for (const a of result.actions) {
+    const dest = a.dest ? ` -> ${a.dest}` : "";
+    const reason = a.reason ? ` (${a.reason})` : "";
+    console.log(`  ${a.kind} ${a.path}${dest}${reason}`);
+  }
+  if (!values.write) console.log("Re-run with --write to apply.");
+  return 0;
 }
 
 function cmdList(rest: string[]): number {
@@ -274,7 +302,7 @@ function cmdImport(rest: string[]): number {
           // Every LIVE legacy entry (created + skip-duplicate) — the exact set
           // the cutover must pause in the legacy schedulers. Inactive `skipped`
           // sources are already off and are not listed.
-          pauseTargets: plan.candidates.map((c) => ({ id: c.id, source: c.source, sourcePath: c.sourcePath })),
+          pauseTargets: plan.candidates.map((c) => ({ id: c.sourceId ?? c.id, source: c.source, sourcePath: c.sourcePath })),
           written,
           skippedExisting,
         },

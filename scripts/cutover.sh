@@ -4,7 +4,7 @@
 #
 #   ⚠️  This is a PROD CUTOVER of shared scheduling infrastructure. It pauses the
 #       live Codex crons and disables the live Claude scheduled tasks — including
-#       the fkanban-pickup / fleet routines. Do NOT run --apply unattended. A
+#       the kanban-pickup / fleet routines. Do NOT run --apply unattended. A
 #       human runs it, witnesses the 24h sole-scheduler validation, and keeps the
 #       rollback manifest.
 #

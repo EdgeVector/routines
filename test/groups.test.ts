@@ -11,9 +11,9 @@ import { parseEntry } from "../src/registry.ts";
 describe("groupForId", () => {
   test("maps the live fleet into expected groups", () => {
     const cases: Array<[string, string]> = [
-      ["last-stack-fkanban-pickup", "board"],
-      ["last-stack-fkanban-watch", "board"],
-      ["last-stack-fkanban-validate", "board"],
+      ["last-stack-kanban-pickup", "board"],
+      ["last-stack-kanban-watch", "board"],
+      ["last-stack-kanban-validate", "board"],
       ["last-stack-groom-board", "board"],
       ["last-stack-program-driver", "board"],
       ["last-stack-drain-open-prs", "board"],
@@ -53,9 +53,11 @@ describe("groupForId", () => {
     for (const [id, want] of cases) {
       expect(groupForId(id).id).toBe(want);
     }
+    expect(groupForId("last-stack-fkanban-pickup").id).toBe("board");
   });
 
   test("pattern rules catch new ids in known families", () => {
+    expect(groupForId("last-stack-kanban-retry").id).toBe("board");
     expect(groupForId("last-stack-fkanban-retry").id).toBe("board");
     expect(groupForId("dogfood-new-thing").id).toBe("dogfood");
     expect(groupForId("smoke-cursor").id).toBe("smoke");
