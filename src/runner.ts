@@ -16,6 +16,7 @@ import { buildInvocation, type HarnessInvocation } from "./adapters.ts";
 import { resolvePrompt, type RoutineEntry } from "./registry.ts";
 import { runsDir } from "./paths.ts";
 import { writeHeartbeat, type HeartbeatOutcome } from "./heartbeat.ts";
+import { parseOutcome, type RunOutcome } from "./outcome.ts";
 import { patchState } from "./state.ts";
 import { envFromProjectConfig, loadProjectConfig, resolveRoutineCwd } from "./project-config.ts";
 
@@ -30,6 +31,7 @@ export interface RunResult {
   finishedAt: string;
   durationMs: number;
   heartbeat: HeartbeatOutcome;
+  outcome: RunOutcome;
 }
 
 // Timestamp safe for a directory name (no colons): 2026-07-12T21-05-00-123Z.
@@ -108,6 +110,12 @@ export function runRoutine(entry: RoutineEntry, opts: RunOptions = {}): Promise<
       writeFileSync(join(runDir, "stderr.log"), stderr);
 
       const exitCode = timedOut ? 124 : code;
+      // Classify work quality from harness output (ok | noop | error | unknown).
+      // Combined streams: agents often print the final heartbeat on either side.
+      const outcome = parseOutcome(entry.id, `${stdout}\n${stderr}`, {
+        exitCode,
+        timedOut,
+      });
       const result: RunResult = {
         id: entry.id,
         runDir,
@@ -119,6 +127,7 @@ export function runRoutine(entry: RoutineEntry, opts: RunOptions = {}): Promise<
         finishedAt: finishedAt.toISOString(),
         durationMs: finishedAt.getTime() - startedAt.getTime(),
         heartbeat: { attempted: false, ok: true },
+        outcome,
       };
 
       result.heartbeat = writeHeartbeat(entry, result);
@@ -139,6 +148,9 @@ export function runRoutine(entry: RoutineEntry, opts: RunOptions = {}): Promise<
             startedAt: result.startedAt,
             finishedAt: result.finishedAt,
             durationMs: result.durationMs,
+            outcome: result.outcome.kind,
+            outcomeDetail: result.outcome.detail,
+            outcomeSource: result.outcome.source,
             stdoutTail: tail(stdout, 2000),
             stderrTail: tail(stderr, 2000),
             heartbeat: result.heartbeat,
@@ -152,6 +164,8 @@ export function runRoutine(entry: RoutineEntry, opts: RunOptions = {}): Promise<
         lastRun: result.finishedAt,
         lastExit: result.exitCode,
         lastRunDir: runDir,
+        lastOutcome: result.outcome.kind,
+        lastOutcomeDetail: result.outcome.detail ?? undefined,
       });
 
       resolve(result);

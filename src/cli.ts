@@ -127,12 +127,23 @@ function cmdStatus(rest: string[]): number {
     return 0;
   }
   console.log(`routines @ ${snap.home}  (situations: ${snap.situationsOk ? "ok" : "DEGRADED"})`);
+  let prevGroup: string | null = null;
   for (const r of snap.rows) {
+    if (r.groupId !== prevGroup) {
+      console.log(`\n## ${r.groupLabel}`);
+      prevGroup = r.groupId;
+    }
     const flags = [r.running ? "RUNNING" : "", r.fenced ? `FENCED:${r.fenced}` : ""].filter(Boolean).join(" ");
+    const outcome = r.lastOutcome ?? "-";
+    const rate =
+      r.noopRate == null
+        ? "noop-rate n/a"
+        : `noop ${Math.round(r.noopRate * 100)}% (${r.outcomeNoop}n/${r.outcomeOk}u/${r.outcomeError}e of ${r.outcomeOk + r.outcomeNoop + r.outcomeError + r.outcomeUnknown})`;
     console.log(
       `${r.id}  [${r.status}] ${r.harness}/${r.model}\n` +
-        `    next: ${r.nextFire ?? "-"}  last: ${r.lastRun ?? "-"} (exit ${r.lastExit ?? "-"}) ${flags}`,
+        `    next: ${r.nextFire ?? "-"}  last: ${r.lastRun ?? "-"} exit=${r.lastExit ?? "-"} outcome=${outcome}  ${rate} ${flags}`,
     );
+    if (r.lastOutcomeDetail) console.log(`    detail: ${r.lastOutcomeDetail}`);
   }
   for (const err of snap.errors) console.error(`ERROR ${err}`);
   return 0;

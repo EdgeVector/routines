@@ -35,6 +35,11 @@ export interface RoutineEntry {
   status: Status;
   timeoutMin: number;
   heartbeatSlug?: string;
+  /**
+   * Optional dashboard group override (`board` | `brain` | `dogfood` | …).
+   * When unset, the status snapshot assigns a group heuristically from the id.
+   */
+  group?: string;
   /** Absolute path of the source TOML file. */
   sourcePath: string;
 }
@@ -61,6 +66,7 @@ const KNOWN_KEYS = new Set([
   "status",
   "timeout_min",
   "heartbeat_slug",
+  "group",
 ]);
 
 export function parseEntry(text: string, sourcePath: string): RoutineEntry {
@@ -119,6 +125,28 @@ export function parseEntry(text: string, sourcePath: string): RoutineEntry {
     throw new RegistryError(`invalid timeout_min ${timeoutMin}`, sourcePath);
   }
 
+  const group = str(raw, "group", sourcePath);
+  if (group !== undefined) {
+    // Lazy import avoided: validate against a fixed set here so registry
+    // parse stays free of circular deps with status/groups consumers.
+    const known = new Set([
+      "board",
+      "brain",
+      "dogfood",
+      "hygiene",
+      "quality",
+      "product",
+      "smoke",
+      "other",
+    ]);
+    if (!known.has(group)) {
+      throw new RegistryError(
+        `invalid group ${JSON.stringify(group)} (${[...known].join("|")})`,
+        sourcePath,
+      );
+    }
+  }
+
   const entry: RoutineEntry = {
     id,
     harness,
@@ -136,6 +164,7 @@ export function parseEntry(text: string, sourcePath: string): RoutineEntry {
   if (effort) entry.effort = effort;
   const heartbeatSlug = str(raw, "heartbeat_slug", sourcePath);
   if (heartbeatSlug) entry.heartbeatSlug = heartbeatSlug;
+  if (group) entry.group = group;
   return entry;
 }
 

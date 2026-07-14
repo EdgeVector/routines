@@ -16,6 +16,9 @@ export interface RoutineState {
   lastExit?: number | null;
   lastRunDir?: string;
   lastSkip?: string; // reason a run was skipped (fence/single-flight)
+  /** Last classified work outcome: ok | noop | error | unknown. */
+  lastOutcome?: string;
+  lastOutcomeDetail?: string;
 }
 
 function statePath(id: string): string {
