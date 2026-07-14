@@ -40,30 +40,34 @@ describe("buildInvocation", () => {
   test("codex adapter uses stdin for the prompt (dash arg)", () => {
     const inv = buildInvocation(entry("codex", 'effort = "high"'), "hello\n---\nfrontmatter");
     expect(inv.bin).toBe("codex");
-    expect(inv.args).toEqual([
+    // Prefix is stable; --add-dir list is host-dependent (ROUTINES_HOME/HOME).
+    expect(inv.args.slice(0, 5)).toEqual([
       "exec",
       "--model",
       "m1",
       "--skip-git-repo-check",
       "--ephemeral",
-      "-c",
-      'model_reasoning_effort="high"',
-      "-",
     ]);
+    expect(inv.args).toContain("--add-dir");
+    expect(inv.args.at(-3)).toBe("-c");
+    expect(inv.args.at(-2)).toBe('model_reasoning_effort="high"');
+    expect(inv.args.at(-1)).toBe("-");
     expect(inv.stdin).toBe("hello\n---\nfrontmatter");
     expect(inv.display).toContain("prompt-stdin");
   });
 
   test("codex without effort omits -c", () => {
     const inv = buildInvocation(entry("codex"), "hi");
-    expect(inv.args).toEqual([
+    expect(inv.args.slice(0, 5)).toEqual([
       "exec",
       "--model",
       "m1",
       "--skip-git-repo-check",
       "--ephemeral",
-      "-",
     ]);
+    expect(inv.args).toContain("--add-dir");
+    expect(inv.args.at(-1)).toBe("-");
+    expect(inv.args).not.toContain("-c");
     expect(inv.stdin).toBe("hi");
   });
 
