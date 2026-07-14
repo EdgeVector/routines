@@ -111,9 +111,12 @@ routines daemon --once --catchup 60              # single evaluation pass (testi
 
 This repo merges through **LastGit-native change requests**, not GitHub PRs
 (GitHub is a read-only mirror). Venue: `.last-stack/pr-venue`; CI gate:
-`.lastgit/ci.sh` (`ci-required`). Pin `LASTGIT_SOCKET` to the dedicated forge
-node socket (`~/.lastgit/forge/data/folddb.sock`) for every lastgit call — see
-fbrain `sop-lastgit-native-forge-workflow`.
+`.lastgit/ci.sh` (`ci-required`). LastGit is homed at `lastdb:///routines` on
+the canonical LastDB socket; see fbrain `sop-lastgit-native-forge-workflow`.
+
+GitHub stays public for clone/browse only. It is not a review or CI venue:
+repository Actions are disabled, this checkout contains no GitHub workflows,
+and LastGit-to-GitHub mirror sync keeps `origin/main` aligned after CR merges.
 
 Mirror sync proof: LastGit CRs are expected to appear on the GitHub mirror within
 the configured sync interval (validated 2026-07-12T23:11:25Z).
@@ -184,3 +187,16 @@ Core = the scheduler daemon + CLI + both adapters + the local `routines web`
 dashboard (single-pane coordination) + the one-time `import` + cutover tooling.
 **Out of scope** (separate cards): remote/authenticated access and historical
 analytics for the dashboard, and any new routine content.
+
+## Error escalation (P0)
+
+When a run ends with **non-zero exit**, **timeout**, or **outcome=error**,
+`routinesd` automatically:
+
+1. Upserts a **P0** kanban card `routine-error-<id>` with the run dir evidence
+2. Dispatches a one-shot **triage agent** (same harness/model; 30m cooldown per id)
+   that investigates `~/.routines/runs/<id>/…` and either fixes or updates the card
+
+Disable with `ROUTINES_ERROR_ESCALATE=0`. The triage runner id
+`routine-error-triage` is never re-escalated (no loops).
+
