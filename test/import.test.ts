@@ -8,6 +8,7 @@ import {
   normalizeRRule,
   normName,
   parseCodexAutomation,
+  preserveExistingRouting,
   readCodexAutomations,
   readClaudeTasks,
   planImport,
@@ -270,6 +271,26 @@ describe("renderToml round-trips through the real registry parser", () => {
     const [file] = planFiles(plan);
     const e = parseEntry(file!.body, `/reg/${file!.file}`);
     expect(e.prompt).toBe('line one\nline "two" with C:\\path and a # hash');
+  });
+
+  test("force refresh can preserve an existing local route", () => {
+    const reg = writeClaudeRegistry(tmp());
+    const plan = planImport({ codexDir: tmp(), claudeRegistry: reg });
+    const imported = plan.candidates.find((c) => c.id === "sentry-triage")!;
+    const existing = renderToml({
+      ...imported,
+      harness: "codex",
+      model: "gpt-5.5",
+      effort: "medium",
+    });
+
+    const preserved = preserveExistingRouting(imported, existing, "/reg/sentry-triage.toml");
+    const e = parseEntry(renderToml(preserved), "/reg/sentry-triage.toml");
+
+    expect(e.harness).toBe("codex");
+    expect(e.model).toBe("gpt-5.5");
+    expect(e.effort).toBe("medium");
+    expect(renderToml(preserved)).toContain("preserved local route codex/gpt-5.5");
   });
 });
 
