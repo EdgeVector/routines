@@ -99,6 +99,14 @@ const ROUTINE_RESULT_RE =
   /ROUTINE_RESULT\s+outcome\s*=\s*(ok|noop|error)\b([^;\n\r]*)/gi;
 
 /**
+ * Compact agent trailer used by some project prompts:
+ *   RESULT: noop reason=DASHBOARD_SKIP ...
+ *   RESULT: ok filed=1
+ */
+const RESULT_COLON_RE =
+  /\bRESULT:\s*(ok|noop|error)\b([^\n\r]*)/gi;
+
+/**
  * Heartbeat-style lines, including:
  *   groom-board 2026-07-13T12:34:00Z ok closed-review-1
  *   kanban-pickup 2026-07-13T13:06:03Z noop cards=0
@@ -146,6 +154,19 @@ export function parseOutcome(
       detail,
       source: "routine_result",
       score: 100,
+      index: m.index ?? 0,
+    });
+  }
+
+  for (const m of text.matchAll(RESULT_COLON_RE)) {
+    const kind = asKind(m[1]!);
+    if (!kind) continue;
+    const rest = clip(m[2] ?? "");
+    candidates.push({
+      kind,
+      detail: rest || null,
+      source: "routine_result",
+      score: 95,
       index: m.index ?? 0,
     });
   }

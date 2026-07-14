@@ -45,6 +45,8 @@ export function buildInvocation(entry: RoutineEntry, prompt: string): HarnessInv
     case "claude":
       // Options BEFORE the prompt. stream-json requires --verbose with -p/--print
       // (Claude Code: "When using --print, --output-format=stream-json requires --verbose").
+      // End option parsing with `--` so prompts that start with `---` (YAML
+      // skill frontmatter) are not mistaken for unknown long options.
       args = [
         "-p",
         "--verbose",
@@ -52,6 +54,7 @@ export function buildInvocation(entry: RoutineEntry, prompt: string): HarnessInv
         entry.model,
         "--output-format",
         "stream-json",
+        "--",
         prompt,
       ];
       break;
