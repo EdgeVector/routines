@@ -37,11 +37,18 @@ beforeEach(() => {
   );
   process.env.ROUTINES_FSITUATIONS_BIN = sit;
 
-  // fbrain stub: append the --text value ($4) to heartbeatOut
+  // fbrain stub: enforce the real append contract and capture stdin.
   heartbeatOut = join(home, "heartbeats.log");
   stub(
     join(home, "stub-fbrain"),
-    `#!/bin/sh\n# args: append <slug> --text <line>\nprintf '%s\\n' "$4" >> ${heartbeatOut}\nexit 0\n`,
+    `#!/bin/sh
+test "$1" = append || exit 11
+test "$2" = routine-heartbeats || exit 12
+test "$3" = --type || exit 13
+test "$4" = reference || exit 14
+cat >> ${heartbeatOut}
+exit 0
+`,
   );
   process.env.ROUTINES_FBRAIN_BIN = join(home, "stub-fbrain");
 });
