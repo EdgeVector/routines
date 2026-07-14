@@ -20,6 +20,12 @@ function stub(path: string, body: string): string {
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), "routines-test-"));
   process.env.ROUTINES_HOME = home;
+  delete process.env.FOLDDB_SOCKET_PATH;
+  delete process.env.FBRAIN_FOLDDB_SOCKET;
+  delete process.env.LASTGIT_SOCKET;
+  delete process.env.LASTDB_SOCKET_PATH;
+  delete process.env.LASTDB_HOME;
+  delete process.env.FOLDDB_HOME;
   mkdirSync(join(home, "registry"), { recursive: true });
 
   const harnessStub = stub(
@@ -166,5 +172,35 @@ describe("daemon evaluateOnce", () => {
     await evaluateOnce({ once: true, catchupMs: 60_000 });
     const dirs = readdirSync(join(home, "runs", "multi"));
     expect(dirs.length).toBeGreaterThanOrEqual(1);
+  });
+
+  test("injects live full-surface socket env when canonical socket is absent", async () => {
+    const nodeHome = join(home, "node");
+    const socket = join(nodeHome, "data", "folddb-full.sock");
+    mkdirSync(join(nodeHome, "data"), { recursive: true });
+    writeFileSync(socket, "");
+    process.env.LASTDB_HOME = nodeHome;
+
+    const harnessStub = stub(
+      join(home, "socket-env-harness"),
+      [
+        "#!/bin/sh",
+        'echo "FOLDDB_SOCKET_PATH=$FOLDDB_SOCKET_PATH"',
+        'echo "FBRAIN_FOLDDB_SOCKET=$FBRAIN_FOLDDB_SOCKET"',
+        'echo "LASTGIT_SOCKET=$LASTGIT_SOCKET"',
+        'echo "LASTDB_SOCKET_PATH=$LASTDB_SOCKET_PATH"',
+        "exit 0",
+      ].join("\n") + "\n",
+    );
+    process.env.ROUTINES_CODEX_BIN = harnessStub;
+    writeRoutine("socket-env", "codex");
+
+    const [result] = await evaluateOnce({ once: true, catchupMs: 60_000, log: () => {} });
+    const stdout = readFileSync(join(result.runDir, "stdout.log"), "utf8");
+
+    expect(stdout).toContain(`FOLDDB_SOCKET_PATH=${socket}`);
+    expect(stdout).toContain(`FBRAIN_FOLDDB_SOCKET=${socket}`);
+    expect(stdout).toContain(`LASTGIT_SOCKET=${socket}`);
+    expect(stdout).toContain(`LASTDB_SOCKET_PATH=${socket}`);
   });
 });

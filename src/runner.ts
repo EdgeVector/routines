@@ -19,6 +19,7 @@ import { writeHeartbeat, type HeartbeatOutcome } from "./heartbeat.ts";
 import { parseOutcome, type RunOutcome } from "./outcome.ts";
 import { patchState } from "./state.ts";
 import { envFromProjectConfig, loadProjectConfig, resolveRoutineCwd } from "./project-config.ts";
+import { discoveredRoutineSocketEnv } from "./socket-env.ts";
 
 export interface RunResult {
   id: string;
@@ -54,7 +55,8 @@ export function runRoutine(entry: RoutineEntry, opts: RunOptions = {}): Promise<
 
   const project = loadProjectConfig();
   const cwd = resolveRoutineCwd(entry.cwd, project);
-  const childEnv = { ...process.env, ...envFromProjectConfig(project) };
+  const configuredEnv = { ...process.env, ...envFromProjectConfig(project) };
+  const childEnv = { ...configuredEnv, ...discoveredRoutineSocketEnv(configuredEnv) };
 
   const stdoutChunks: string[] = [];
   const stderrChunks: string[] = [];
