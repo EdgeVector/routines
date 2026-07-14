@@ -19,6 +19,7 @@ import { writeHeartbeat, type HeartbeatOutcome } from "./heartbeat.ts";
 import { parseOutcome, type RunOutcome } from "./outcome.ts";
 import { patchState } from "./state.ts";
 import { envFromProjectConfig, loadProjectConfig, resolveRoutineCwd } from "./project-config.ts";
+import { escalateRoutineError, shouldEscalate } from "./error-escalate.ts";
 
 export interface RunResult {
   id: string;
@@ -167,6 +168,16 @@ export function runRoutine(entry: RoutineEntry, opts: RunOptions = {}): Promise<
         lastOutcome: result.outcome.kind,
         lastOutcomeDetail: result.outcome.detail ?? undefined,
       });
+
+      // P0 fleet rule: every error run gets a board card + (rate-limited) triage
+      // agent. Never await — must not stall the scheduler or re-throw.
+      if (shouldEscalate(result)) {
+        try {
+          escalateRoutineError(entry, result, { quiet: opts.quiet });
+        } catch {
+          /* never break finalize */
+        }
+      }
 
       resolve(result);
     }
