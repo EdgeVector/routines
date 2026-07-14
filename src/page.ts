@@ -136,6 +136,62 @@ export const PAGE = `<!doctype html>
   }
   .group-blurb { margin: 3px 0 0; font-size: 12px; color: var(--muted); }
   tr.group-first td { border-top: none; }
+
+  .summary {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
+    gap: 10px; margin: 0 0 14px;
+  }
+  .stat {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    padding: 10px 12px; cursor: pointer;
+  }
+  .stat:hover { border-color: var(--accent); }
+  .stat.active { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+  .stat .n { font-size: 22px; font-weight: 700; font-family: ui-monospace, monospace; line-height: 1.1; }
+  .stat .lbl { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin-top: 4px; }
+  .stat.err .n { color: var(--bad); }
+  .stat.run .n { color: var(--purple); }
+  .stat.ok .n { color: var(--ok); }
+  .stat.warn .n { color: var(--warn); }
+  .toolbar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 0 0 14px; }
+  .filters { display: flex; flex-wrap: wrap; gap: 6px; }
+  .filters button {
+    font: inherit; font-size: 12.5px; padding: 5px 12px; border-radius: 999px; cursor: pointer;
+    border: 1px solid var(--line); background: var(--panel); color: var(--fg);
+  }
+  .filters button:hover { border-color: var(--accent); }
+  .filters button.on { background: color-mix(in srgb, var(--accent) 22%, var(--panel)); border-color: var(--accent); color: var(--accent); }
+  .filters button.on.bad, .filters button.bad.on {
+    background: color-mix(in srgb, var(--bad) 18%, var(--panel)); border-color: var(--bad); color: var(--bad);
+  }
+  .search {
+    flex: 1; min-width: 180px; max-width: 320px;
+    font: inherit; font-size: 13px; padding: 7px 11px; border-radius: 9px;
+    border: 1px solid var(--line); background: var(--panel); color: var(--fg);
+  }
+  .search:focus { outline: none; border-color: var(--accent); }
+  .error-strip {
+    display: none; margin: 0 0 14px; padding: 10px 12px; border-radius: 10px;
+    border: 1px solid color-mix(in srgb, var(--bad) 45%, var(--line));
+    background: color-mix(in srgb, var(--bad) 10%, var(--panel));
+  }
+  .error-strip.show { display: block; }
+  .error-strip h3 { margin: 0 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--bad); }
+  .error-strip .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .error-strip a {
+    font-family: ui-monospace, monospace; font-size: 12px; color: var(--fg);
+    text-decoration: none; padding: 3px 9px; border-radius: 7px;
+    background: color-mix(in srgb, var(--bad) 14%, transparent);
+    border: 1px solid color-mix(in srgb, var(--bad) 35%, var(--line));
+  }
+  .error-strip a:hover { border-color: var(--bad); color: var(--bad); }
+  tr.row-error td { background: color-mix(in srgb, var(--bad) 7%, transparent); }
+  tr.row-error td:first-child { box-shadow: inset 3px 0 0 var(--bad); }
+  tr.row-running td { background: color-mix(in srgb, var(--purple) 6%, transparent); }
+  tr.row-running td:first-child { box-shadow: inset 3px 0 0 var(--purple); }
+  .badge.live { background: color-mix(in srgb, var(--purple) 22%, transparent); color: var(--purple); }
+  .pulse { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); display: inline-block; margin-right: 6px; animation: pulse 2s infinite; vertical-align: middle; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
 </style>
 </head>
 <body>
@@ -144,10 +200,25 @@ export const PAGE = `<!doctype html>
   <span class="home mono" id="home"></span>
   <span id="sit"></span>
   <span class="spacer"></span>
-  <span class="muted" id="updated"></span>
+  <span class="muted" id="updated"><span class="pulse" id="pulse"></span></span>
   <button id="refresh">Refresh</button>
 </header>
 <main>
+  <div class="summary" id="summary"></div>
+  <div class="error-strip" id="errorstrip">
+    <h3>Needs attention</h3>
+    <div class="chips" id="errorchips"></div>
+  </div>
+  <div class="toolbar">
+    <div class="filters" id="filters">
+      <button type="button" data-filter="all" class="on">All</button>
+      <button type="button" data-filter="errors">Errors</button>
+      <button type="button" data-filter="running">Running</button>
+      <button type="button" data-filter="paused">Paused</button>
+      <button type="button" data-filter="active">Active</button>
+    </div>
+    <input class="search" id="search" type="search" placeholder="Filter by id..." autocomplete="off" />
+  </div>
   <ul class="group-nav" id="groupnav"></ul>
   <div class="wrap">
     <table>
@@ -165,6 +236,9 @@ export const PAGE = `<!doctype html>
 "use strict";
 var expanded = {};   // id -> true when its detail row is open
 var runsCache = {};  // id -> array of run summaries
+var filterMode = "all";
+var searchQ = "";
+var lastSnap = null;
 var DASH = "—", DOT = "·", ELLIPSIS = "…", ARROW = "→";
 
 function esc(s) {
@@ -172,6 +246,41 @@ function esc(s) {
     return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
   });
 }
+
+function cleanDetail(s) {
+  if (!s) return "";
+  var t = String(s);
+  // Real newlines + escaped "\\n" blobs that leak into agent detail strings.
+  t = t.split(String.fromCharCode(10)).join(" ").split(String.fromCharCode(13)).join(" ");
+  t = t.split("\\\\n").join(" ");
+  while (t.indexOf("  ") >= 0) t = t.split("  ").join(" ");
+  t = t.split(String.fromCharCode(96)).join("").trim();
+  if (t.length > 120) t = t.slice(0, 117) + ELLIPSIS;
+  return t;
+}
+function isErrorRow(r) {
+  if (r.lastOutcome === "error") return true;
+  if (r.lastExit != null && r.lastExit !== 0) return true;
+  return false;
+}
+function rowMatches(r) {
+  if (searchQ) {
+    var q = searchQ.toLowerCase();
+    var blob = (r.id + " " + (r.lastOutcomeDetail || "") + " " + (r.groupLabel || "")).toLowerCase();
+    if (blob.indexOf(q) < 0) return false;
+  }
+  if (filterMode === "all") return true;
+  if (filterMode === "errors") return isErrorRow(r);
+  if (filterMode === "running") return !!r.running;
+  if (filterMode === "paused") return r.status === "paused";
+  if (filterMode === "active") return r.status === "active" && !r.running;
+  return true;
+}
+function setFilter(mode) {
+  filterMode = mode || "all";
+  if (lastSnap) render(lastSnap);
+}
+
 function rel(iso) {
   if (!iso) return DASH;
   var t = new Date(iso).getTime();
@@ -213,7 +322,7 @@ function statusBadge(r) {
 }
 function flags(r) {
   var out = [];
-  if (r.running) out.push('<span class="badge muted">running</span>');
+  if (r.running) out.push('<span class="badge live">running</span>');
   if (r.fenced) out.push('<span class="badge bad" title="Situation fence">fenced: ' + esc(r.fenced) + "</span>");
   return out.length ? '<span class="flags">' + out.join(" ") + "</span>" : "";
 }
@@ -273,14 +382,18 @@ function noopRateHtml(r) {
 
 function rowHtml(r) {
   var eid = esc(r.id);
+  var cls = [];
+  if (isErrorRow(r)) cls.push("row-error");
+  if (r.running) cls.push("row-running");
   var runBtn = '<button class="primary" data-act="run" data-id="' + eid + '"' + (r.running ? " disabled" : "") + '>Run now</button>';
   var pauseBtn = r.status === "paused"
     ? '<button data-act="resume" data-id="' + eid + '">Resume</button>'
     : '<button data-act="pause" data-id="' + eid + '">Pause</button>';
   var routeBtn = '<button data-act="route" data-id="' + eid + '">Re-route</button>';
   var runsBtn = '<button class="link" data-act="runs" data-id="' + eid + '">' + (expanded[r.id] ? "hide runs" : "runs") + "</button>";
+  var detail = cleanDetail(r.lastOutcomeDetail);
   return (
-    "<tr>" +
+    '<tr class="' + cls.join(" ") + '" id="row-' + eid + '">' +
     '<td class="id">' + eid + " " + runsBtn + "</td>" +
     "<td>" + statusBadge(r) + "</td>" +
     '<td><span class="chip">' + esc(r.harness) + '</span> <span class="mono">' + esc(r.model) + "</span>" +
@@ -289,7 +402,7 @@ function rowHtml(r) {
     '<td class="mono">' + (r.nextFire ? esc(rel(r.nextFire)) : '<span class="muted">' + DASH + "</span>") + "</td>" +
     "<td>" + (r.lastRun ? esc(rel(r.lastRun)) + " " : "") + exitBadge(r.lastExit) + " " + flags(r) + "</td>" +
     "<td>" + outcomeBadge(r.lastOutcome, r.lastOutcomeDetail) +
-      (r.lastOutcomeDetail ? '<div class="detail-line" title="' + esc(r.lastOutcomeDetail) + '">' + esc(r.lastOutcomeDetail) + "</div>" : "") +
+      (detail ? '<div class="detail-line" title="' + esc(r.lastOutcomeDetail || "") + '">' + esc(detail) + "</div>" : "") +
       "</td>" +
     "<td>" + noopRateHtml(r) + "</td>" +
     '<td class="actions">' + runBtn + " " + pauseBtn + " " + routeBtn + "</td>" +
@@ -351,16 +464,53 @@ function groupCounts(rows) {
   return order.map(function (id) { return counts[id]; });
 }
 
+function renderSummary(rows) {
+  var n = rows.length, err = 0, run = 0, paused = 0, active = 0;
+  rows.forEach(function (r) {
+    if (isErrorRow(r)) err++;
+    if (r.running) run++;
+    if (r.status === "paused") paused++; else active++;
+  });
+  var el = document.getElementById("summary");
+  if (!el) return;
+  el.innerHTML =
+    '<div class="stat" data-filter="all"><div class="n">' + n + '</div><div class="lbl">total</div></div>' +
+    '<div class="stat err" data-filter="errors"><div class="n">' + err + '</div><div class="lbl">errors</div></div>' +
+    '<div class="stat run" data-filter="running"><div class="n">' + run + '</div><div class="lbl">running</div></div>' +
+    '<div class="stat ok" data-filter="active"><div class="n">' + active + '</div><div class="lbl">active</div></div>' +
+    '<div class="stat warn" data-filter="paused"><div class="n">' + paused + '</div><div class="lbl">paused</div></div>';
+  Array.prototype.forEach.call(el.querySelectorAll(".stat"), function (s) {
+    if (s.getAttribute("data-filter") === filterMode) s.classList.add("active");
+  });
+  var errRows = rows.filter(isErrorRow);
+  var strip = document.getElementById("errorstrip");
+  var chips = document.getElementById("errorchips");
+  if (strip && chips) {
+    if (errRows.length) {
+      strip.classList.add("show");
+      chips.innerHTML = errRows.map(function (r) {
+        return '<a href="#row-' + esc(r.id) + '" data-act="jumperror" data-id="' + esc(r.id) + '">' +
+          esc(r.id) + (r.lastOutcome === "error" ? " · error" : " · exit " + r.lastExit) + "</a>";
+      }).join("");
+    } else {
+      strip.classList.remove("show");
+      chips.innerHTML = "";
+    }
+  }
+}
 function render(snap) {
   document.getElementById("home").textContent = snap.home;
   var sit = document.getElementById("sit");
   sit.innerHTML = snap.situationsOk
     ? '<span class="badge ok">situations ok</span>'
     : '<span class="badge bad" title="' + esc(snap.situationsError || "") + '">situations degraded</span>';
-  document.getElementById("updated").textContent = "updated " + new Date().toLocaleTimeString();
+  document.getElementById("updated").innerHTML = '<span class="pulse"></span>updated ' + new Date().toLocaleTimeString();
 
+  renderSummary(snap.rows || []);
+
+  var visibleRows = (snap.rows || []).filter(rowMatches);
   var nav = document.getElementById("groupnav");
-  var groups = groupCounts(snap.rows);
+  var groups = groupCounts(visibleRows);
   nav.innerHTML = groups.map(function (g) {
     return '<li><a href="#g-' + esc(g.id) + '">' + esc(g.label) +
       ' <span class="count">' + g.n + "</span></a></li>";
@@ -369,6 +519,8 @@ function render(snap) {
   var tbody = document.getElementById("rows");
   if (!snap.rows.length) {
     tbody.innerHTML = '<tr><td colspan="9" class="empty">No routines registered. Add one under $ROUTINES_HOME/registry/&lt;id&gt;.toml</td></tr>';
+  } else if (!visibleRows.length) {
+    tbody.innerHTML = '<tr><td colspan="9" class="empty">No routines match this filter.</td></tr>';
   } else {
     var html = "";
     var prevGroup = null;
@@ -378,12 +530,16 @@ function render(snap) {
       var gid = r.groupId || "other";
       if (gid !== prevGroup) {
         var n = 0;
-        for (var j = i; j < snap.rows.length && (snap.rows[j].groupId || "other") === gid; j++) n++;
-        html += groupHeaderHtml(r, n);
+        for (var j = i; j < snap.rows.length && (snap.rows[j].groupId || "other") === gid; j++) {
+          if (rowMatches(snap.rows[j])) n++;
+        }
+        if (n > 0) html += groupHeaderHtml(r, n);
         prevGroup = gid;
       }
-      html += rowHtml(r);
-      if (expanded[r.id]) html += detailHtml(r);
+      if (rowMatches(r) || expanded[r.id]) {
+        html += rowHtml(r);
+        if (expanded[r.id]) html += detailHtml(r);
+      }
       i++;
     }
     tbody.innerHTML = html;
@@ -392,9 +548,14 @@ function render(snap) {
   errs.innerHTML = (snap.errors && snap.errors.length)
     ? '<p class="badge bad" style="display:block;margin-top:14px">' + snap.errors.map(esc).join("<br>") + "</p>"
     : "";
+  Array.prototype.forEach.call(document.querySelectorAll("#filters button"), function (b) {
+    var f = b.getAttribute("data-filter");
+    b.className = (f === filterMode ? "on" : "") + (f === "errors" ? (f === filterMode ? " on" : "") : "");
+    if (f === filterMode) b.classList.add("on");
+    else b.classList.remove("on");
+  });
 }
 
-var lastSnap = null;
 function load() {
   return api("GET", "/api/routines").then(function (snap) { lastSnap = snap; render(snap); })
     .catch(function (e) { toast("load failed: " + e.message, true); });
@@ -432,6 +593,25 @@ function pollAfterRun(id) {
 }
 
 document.addEventListener("click", function (ev) {
+
+  var tStat = ev.target.closest(".stat[data-filter]");
+  if (tStat) { setFilter(tStat.getAttribute("data-filter")); return; }
+  var tFilt = ev.target.closest("#filters button[data-filter]");
+  if (tFilt) { setFilter(tFilt.getAttribute("data-filter")); return; }
+  var tJump = ev.target.closest("[data-act=jumperror]");
+  if (tJump) {
+    filterMode = "errors";
+    searchQ = "";
+    var se = document.getElementById("search");
+    if (se) se.value = "";
+    if (lastSnap) render(lastSnap);
+    var jid = tJump.getAttribute("data-id");
+    setTimeout(function () {
+      var el = document.getElementById("row-" + jid);
+      if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
+    }, 40);
+    return;
+  }
   var t = ev.target.closest("[data-act]");
   if (!t) return;
   var act = t.getAttribute("data-act");
@@ -461,6 +641,11 @@ document.addEventListener("click", function (ev) {
   }
 });
 document.getElementById("refresh").addEventListener("click", load);
+var searchEl = document.getElementById("search");
+if (searchEl) searchEl.addEventListener("input", function (ev) {
+  searchQ = (ev.target.value || "").trim();
+  if (lastSnap) render(lastSnap);
+});
 
 load();
 setInterval(function () {
