@@ -1,11 +1,18 @@
 // Read per-routine run history for the "run detail" view: recent runs with
-// their exit status + a tail of the captured log. Reads the same
-// $ROUTINES_HOME/runs/<id>/<ts>/ evidence the runner writes and the CLI `logs`
-// command reads.
+// their exit status, work outcome (ok/noop/error), + a tail of the captured
+// log. Reads the same $ROUTINES_HOME/runs/<id>/<ts>/ evidence the runner
+// writes and the CLI `logs` command reads.
 
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
+import {
+  aggregateOutcomes,
+  outcomeFromMeta,
+  parseOutcome,
+  type OutcomeStats,
+  type RunOutcome,
+} from "./outcome.ts";
 import { runsDir } from "./paths.ts";
 
 export interface RunSummary {
@@ -16,6 +23,9 @@ export interface RunSummary {
   durationMs: number | null;
   timedOut: boolean;
   command: string | null;
+  outcome: RunOutcome["kind"];
+  outcomeDetail: string | null;
+  outcomeSource: RunOutcome["source"];
 }
 
 export interface RunDetail extends RunSummary {
@@ -39,7 +49,41 @@ function readMeta(dir: string): Record<string, unknown> {
   }
 }
 
-function summarize(stamp: string, meta: Record<string, unknown>): RunSummary {
+function readText(path: string): string {
+  if (!existsSync(path)) return "";
+  try {
+    return readFileSync(path, "utf8");
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Resolve the work outcome for a run dir. Prefer meta.json fields written by
+ * the runner; for older runs (pre-outcome), re-parse stdout/stderr so history
+ * still feeds noop-rate without a re-run.
+ */
+export function resolveRunOutcome(id: string, runDir: string, meta: Record<string, unknown>): RunOutcome {
+  if (typeof meta.outcome === "string" && meta.outcome !== "unknown") {
+    return outcomeFromMeta(meta);
+  }
+  // Re-parse historical logs (or unknown meta) from captured streams.
+  const stdout = readText(join(runDir, "stdout.log"));
+  const stderr = readText(join(runDir, "stderr.log"));
+  // Prefer full logs; fall back to tails stored in meta if logs were pruned.
+  const text =
+    stdout || stderr
+      ? `${stdout}\n${stderr}`
+      : `${typeof meta.stdoutTail === "string" ? meta.stdoutTail : ""}\n${
+          typeof meta.stderrTail === "string" ? meta.stderrTail : ""
+        }`;
+  const exitCode = typeof meta.exitCode === "number" ? meta.exitCode : null;
+  const timedOut = meta.timedOut === true;
+  return parseOutcome(id, text, { exitCode, timedOut });
+}
+
+function summarize(id: string, stamp: string, runDir: string, meta: Record<string, unknown>): RunSummary {
+  const outcome = resolveRunOutcome(id, runDir, meta);
   return {
     stamp,
     startedAt: typeof meta.startedAt === "string" ? meta.startedAt : null,
@@ -48,6 +92,9 @@ function summarize(stamp: string, meta: Record<string, unknown>): RunSummary {
     durationMs: typeof meta.durationMs === "number" ? meta.durationMs : null,
     timedOut: meta.timedOut === true,
     command: typeof meta.command === "string" ? meta.command : null,
+    outcome: outcome.kind,
+    outcomeDetail: outcome.detail,
+    outcomeSource: outcome.source,
   };
 }
 
@@ -60,7 +107,19 @@ export function listRuns(id: string, limit = 20): RunSummary[] {
     .sort()
     .reverse()
     .slice(0, limit);
-  return stamps.map((s) => summarize(s, readMeta(join(dir, s))));
+  return stamps.map((s) => summarize(id, s, join(dir, s), readMeta(join(dir, s))));
+}
+
+/** Rolling outcome stats over the most recent `limit` runs (default 10). */
+export function outcomeStatsFor(id: string, limit = 10): OutcomeStats {
+  const runs = listRuns(id, limit);
+  return aggregateOutcomes(
+    runs.map((r) => ({
+      kind: r.outcome,
+      detail: r.outcomeDetail,
+      source: r.outcomeSource,
+    })),
+  );
 }
 
 /** Read one run's detail, including a tail of stdout/stderr. `stamp` defaults to
@@ -80,7 +139,7 @@ export function readRun(id: string, stamp?: string, tailBytes = 8000): RunDetail
   const stdout = readTail(join(runDir, "stdout.log"), tailBytes);
   const stderr = readTail(join(runDir, "stderr.log"), tailBytes);
   return {
-    ...summarize(target!, meta),
+    ...summarize(id, target!, runDir, meta),
     id,
     dir: runDir,
     stdoutTail: stdout,

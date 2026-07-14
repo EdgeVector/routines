@@ -54,9 +54,16 @@ export const PAGE = `<!doctype html>
   .badge.bad { background: color-mix(in srgb, var(--bad) 18%, transparent); color: var(--bad); }
   .badge.warn { background: color-mix(in srgb, var(--warn) 20%, transparent); color: var(--warn); }
   .badge.muted { background: var(--chip); color: var(--chip-fg); }
-  main { padding: 18px 22px 60px; max-width: 1200px; margin: 0 auto; }
+  .badge.noop { background: color-mix(in srgb, var(--aqua) 18%, transparent); color: var(--aqua); }
+  .badge.useful { background: color-mix(in srgb, var(--ok) 18%, transparent); color: var(--ok); }
+  main { padding: 18px 22px 60px; max-width: 1280px; margin: 0 auto; }
   .wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); }
-  table { border-collapse: collapse; width: 100%; min-width: 860px; }
+  table { border-collapse: collapse; width: 100%; min-width: 980px; }
+  .rate { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+  .rate.high-noop { color: var(--warn); }
+  .rate.balanced { color: var(--aqua); }
+  .rate.useful { color: var(--ok); }
+  .detail-line { margin-top: 3px; font-size: 11.5px; color: var(--muted); max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   th, td { text-align: left; padding: 11px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
   th { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 600; }
   tr:last-child td { border-bottom: none; }
@@ -95,6 +102,40 @@ export const PAGE = `<!doctype html>
   .toast.err { border-left-color: var(--bad); }
   .empty { padding: 40px; text-align: center; color: var(--muted); }
   .flags { display: inline-flex; gap: 6px; }
+  .group-nav {
+    display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 14px; padding: 0;
+    list-style: none;
+  }
+  .group-nav a {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 5px 11px; border-radius: 999px; text-decoration: none;
+    border: 1px solid var(--line); background: var(--panel); color: var(--fg);
+    font-size: 12.5px;
+  }
+  .group-nav a:hover { border-color: var(--accent); color: var(--accent); }
+  .group-nav .count {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11px; color: var(--muted);
+  }
+  tr.group-header td {
+    padding: 16px 14px 10px; border-bottom: 1px solid var(--line);
+    background: color-mix(in srgb, var(--bg) 55%, var(--panel));
+  }
+  tr.group-header:first-child td { padding-top: 12px; }
+  .group-title {
+    display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+  }
+  .group-title h2 {
+    margin: 0; font-size: 14px; font-weight: 700; letter-spacing: .02em;
+    color: var(--orange);
+  }
+  .group-title .count-pill {
+    font-size: 11px; font-weight: 600; padding: 1px 8px; border-radius: 999px;
+    background: color-mix(in srgb, var(--orange) 16%, transparent);
+    color: var(--orange); font-family: ui-monospace, monospace;
+  }
+  .group-blurb { margin: 3px 0 0; font-size: 12px; color: var(--muted); }
+  tr.group-first td { border-top: none; }
 </style>
 </head>
 <body>
@@ -107,11 +148,12 @@ export const PAGE = `<!doctype html>
   <button id="refresh">Refresh</button>
 </header>
 <main>
+  <ul class="group-nav" id="groupnav"></ul>
   <div class="wrap">
     <table>
       <thead><tr>
         <th>Routine</th><th>Status</th><th>Harness / Model</th><th>Schedule</th>
-        <th>Next fire</th><th>Last run</th><th>Actions</th>
+        <th>Next fire</th><th>Last run</th><th>Outcome</th><th>Noop rate</th><th>Actions</th>
       </tr></thead>
       <tbody id="rows"></tbody>
     </table>
@@ -176,6 +218,59 @@ function flags(r) {
   return out.length ? '<span class="flags">' + out.join(" ") + "</span>" : "";
 }
 
+function groupHeaderHtml(r, count) {
+  return (
+    '<tr class="group-header" id="g-' + esc(r.groupId) + '">' +
+    '<td colspan="9">' +
+    '<div class="group-title">' +
+    "<h2>" + esc(r.groupLabel) + "</h2>" +
+    '<span class="count-pill">' + count + "</span>" +
+    "</div>" +
+    (r.groupBlurb ? '<p class="group-blurb">' + esc(r.groupBlurb) + "</p>" : "") +
+    "</td></tr>"
+  );
+}
+
+function outcomeBadge(kind, detail) {
+  if (!kind || kind === "unknown") {
+    return '<span class="badge muted" title="' + esc(detail || "no classified outcome yet") + '">unknown</span>';
+  }
+  if (kind === "ok") {
+    return '<span class="badge useful" title="' + esc(detail || "useful work") + '">useful</span>';
+  }
+  if (kind === "noop") {
+    return '<span class="badge noop" title="' + esc(detail || "ran, nothing to do") + '">noop</span>';
+  }
+  if (kind === "error") {
+    return '<span class="badge bad" title="' + esc(detail || "failed") + '">error</span>';
+  }
+  return '<span class="badge muted">' + esc(kind) + "</span>";
+}
+
+function noopRateHtml(r) {
+  var clean = (r.outcomeOk || 0) + (r.outcomeNoop || 0);
+  var total = clean + (r.outcomeError || 0) + (r.outcomeUnknown || 0);
+  if (r.noopRate == null || clean === 0) {
+    // Do NOT use \" inside this file's PAGE template literal — cooked template
+    // processing eats the backslash and the browser sees broken JS.
+    return '<span class="muted rate" title="Need at least one ok/noop run">' + DASH +
+      (total ? ' <span class="muted">(' + total + " run" + (total === 1 ? "" : "s") + ")</span>" : "") +
+      "</span>";
+  }
+  var pct = Math.round(r.noopRate * 100);
+  var cls = "rate";
+  if (pct >= 70) cls += " high-noop";
+  else if (pct <= 30) cls += " useful";
+  else cls += " balanced";
+  var title = "Last " + (r.outcomeWindow || 10) + " runs: " +
+    (r.outcomeOk || 0) + " useful, " + (r.outcomeNoop || 0) + " noop, " +
+    (r.outcomeError || 0) + " error, " + (r.outcomeUnknown || 0) + " unknown. " +
+    "Noop rate = noop/(ok+noop). High noop suggests lengthening the cadence.";
+  return '<span class="' + cls + '" title="' + esc(title) + '">' + pct + "% noop</span>" +
+    '<div class="muted rate">' + (r.outcomeNoop || 0) + "n / " + (r.outcomeOk || 0) + "u" +
+    ((r.outcomeError || 0) ? " / " + r.outcomeError + "e" : "") + "</div>";
+}
+
 function rowHtml(r) {
   var eid = esc(r.id);
   var runBtn = '<button class="primary" data-act="run" data-id="' + eid + '"' + (r.running ? " disabled" : "") + '>Run now</button>';
@@ -193,6 +288,10 @@ function rowHtml(r) {
     '<td class="mono">' + esc(r.rrule) + "</td>" +
     '<td class="mono">' + (r.nextFire ? esc(rel(r.nextFire)) : '<span class="muted">' + DASH + "</span>") + "</td>" +
     "<td>" + (r.lastRun ? esc(rel(r.lastRun)) + " " : "") + exitBadge(r.lastExit) + " " + flags(r) + "</td>" +
+    "<td>" + outcomeBadge(r.lastOutcome, r.lastOutcomeDetail) +
+      (r.lastOutcomeDetail ? '<div class="detail-line" title="' + esc(r.lastOutcomeDetail) + '">' + esc(r.lastOutcomeDetail) + "</div>" : "") +
+      "</td>" +
+    "<td>" + noopRateHtml(r) + "</td>" +
     '<td class="actions">' + runBtn + " " + pauseBtn + " " + routeBtn + "</td>" +
     "</tr>"
   );
@@ -212,7 +311,7 @@ function detailHtml(r) {
     "</div>";
   var runsHtml = '<div class="runlist" data-runs="' + eid + '">' + runsListHtml(r.id) + "</div>";
   return (
-    '<tr class="detail"><td colspan="7"><div class="detail-inner">' +
+    '<tr class="detail"><td colspan="9"><div class="detail-inner">' +
     route + runsHtml +
     '<div data-logfor="' + eid + '"></div>' +
     "</div></td></tr>"
@@ -225,15 +324,31 @@ function runsListHtml(id) {
   return runs.map(function (run) {
     var meta = (run.finishedAt ? esc(rel(run.finishedAt)) : "") +
       (run.durationMs != null ? " " + DOT + " " + (run.durationMs / 1000).toFixed(1) + "s" : "") +
-      (run.timedOut ? " " + DOT + " timed out" : "");
+      (run.timedOut ? " " + DOT + " timed out" : "") +
+      (run.outcomeDetail ? " " + DOT + " " + esc(run.outcomeDetail) : "");
     return (
       '<div class="runrow" data-act="showrun" data-id="' + esc(id) + '" data-stamp="' + esc(run.stamp) + '">' +
       exitBadge(run.exitCode) +
+      outcomeBadge(run.outcome, run.outcomeDetail) +
       '<span class="mono">' + esc(run.stamp) + "</span>" +
       '<span class="muted">' + meta + "</span>" +
       "</div>"
     );
   }).join("");
+}
+
+function groupCounts(rows) {
+  var counts = {};
+  var order = [];
+  rows.forEach(function (r) {
+    var id = r.groupId || "other";
+    if (!counts[id]) {
+      counts[id] = { id: id, label: r.groupLabel || id, blurb: r.groupBlurb || "", n: 0 };
+      order.push(id);
+    }
+    counts[id].n++;
+  });
+  return order.map(function (id) { return counts[id]; });
 }
 
 function render(snap) {
@@ -244,15 +359,33 @@ function render(snap) {
     : '<span class="badge bad" title="' + esc(snap.situationsError || "") + '">situations degraded</span>';
   document.getElementById("updated").textContent = "updated " + new Date().toLocaleTimeString();
 
+  var nav = document.getElementById("groupnav");
+  var groups = groupCounts(snap.rows);
+  nav.innerHTML = groups.map(function (g) {
+    return '<li><a href="#g-' + esc(g.id) + '">' + esc(g.label) +
+      ' <span class="count">' + g.n + "</span></a></li>";
+  }).join("");
+
   var tbody = document.getElementById("rows");
   if (!snap.rows.length) {
-    tbody.innerHTML = '<tr><td colspan="7" class="empty">No routines registered. Add one under $ROUTINES_HOME/registry/&lt;id&gt;.toml</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="9" class="empty">No routines registered. Add one under $ROUTINES_HOME/registry/&lt;id&gt;.toml</td></tr>';
   } else {
     var html = "";
-    snap.rows.forEach(function (r) {
+    var prevGroup = null;
+    var i = 0;
+    while (i < snap.rows.length) {
+      var r = snap.rows[i];
+      var gid = r.groupId || "other";
+      if (gid !== prevGroup) {
+        var n = 0;
+        for (var j = i; j < snap.rows.length && (snap.rows[j].groupId || "other") === gid; j++) n++;
+        html += groupHeaderHtml(r, n);
+        prevGroup = gid;
+      }
       html += rowHtml(r);
       if (expanded[r.id]) html += detailHtml(r);
-    });
+      i++;
+    }
     tbody.innerHTML = html;
   }
   var errs = document.getElementById("errors");
