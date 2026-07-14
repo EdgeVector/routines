@@ -156,6 +156,21 @@ routines import --write         # generate ~/.routines/registry/<id>.toml files
 routines import --json          # machine-readable plan (incl. pauseTargets)
 ```
 
+Codex automation IDs that used `last-stack-fkanban-pickup`, `last-stack-fkanban-watch`,
+or `last-stack-fkanban-validate` import as the canonical
+`last-stack-kanban-pickup`, `last-stack-kanban-watch`, and
+`last-stack-kanban-validate` registry IDs. Existing installs can run the
+idempotent one-time filesystem migration before cutover:
+
+```sh
+routines migrate-kanban-ids          # DRY-RUN: registry/state/memory/lock/run moves
+routines migrate-kanban-ids --write  # apply the moves under $ROUTINES_HOME
+```
+
+When both old and new paths exist, the migration keeps the new registry entry,
+merges state/run/memory directories where possible, and archives the old path so
+only the canonical `last-stack-kanban-*` registry files can fire.
+
 **Dual-scheduler dedup.** Many routines are scheduled in *both* legacy
 schedulers under different ids (e.g. Claude `program-driver` and Codex
 `last-stack-program-driver` are one loop). Importing both would make routines
@@ -175,7 +190,7 @@ scripts/cutover.sh --restore <manifest.json>   # reverse a cutover
 ```
 
 > ⚠️ `--apply` is a **prod cutover** of shared scheduling infrastructure (it
-> pauses the fkanban-pickup / fleet routines). Run it attended, quit the Claude
+> pauses the kanban-pickup / fleet routines). Run it attended, quit the Claude
 > app first (its scheduler rewrites `scheduled-tasks.json` on every fire, so
 > `--apply` refuses while a Claude process is running), and keep the rollback
 > manifest. The manifest (every entry + its prior status) is written **even in

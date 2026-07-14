@@ -37,11 +37,18 @@ beforeEach(() => {
   );
   process.env.ROUTINES_FSITUATIONS_BIN = sit;
 
-  // fbrain stub: append the --text value ($4) to heartbeatOut
+  // fbrain stub: enforce the real append contract and capture stdin.
   heartbeatOut = join(home, "heartbeats.log");
   stub(
     join(home, "stub-fbrain"),
-    `#!/bin/sh\n# args: append <slug> --text <line>\nprintf '%s\\n' "$4" >> ${heartbeatOut}\nexit 0\n`,
+    `#!/bin/sh
+test "$1" = append || exit 11
+test "$2" = routine-heartbeats || exit 12
+test "$3" = --type || exit 13
+test "$4" = reference || exit 14
+cat >> ${heartbeatOut}
+exit 0
+`,
   );
   process.env.ROUTINES_FBRAIN_BIN = join(home, "stub-fbrain");
 });
@@ -113,6 +120,42 @@ describe("daemon evaluateOnce", () => {
     const results = await evaluateOnce({ once: true, catchupMs: 60_000 });
     expect(results.length).toBe(0);
     expect(existsSync(join(home, "runs", "paused-one"))).toBe(false);
+  });
+
+  test("dispatch envelope uses registry id for automation memory, not prompt frontmatter name", async () => {
+    const prompt = [
+      "---",
+      "name: kanban-pickup",
+      "description: frontmatter name differs from registry id",
+      "---",
+      "Do the work.",
+    ].join("\n");
+    writeFileSync(
+      join(home, "registry", "last-stack-fkanban-pickup.toml"),
+      [
+        'harness = "codex"',
+        'model = "test-model"',
+        'rrule = "FREQ=SECONDLY"',
+        `prompt = ${JSON.stringify(prompt)}`,
+        'heartbeat_slug = "routine-heartbeats"',
+      ].join("\n") + "\n",
+    );
+
+    const results = await evaluateOnce({ once: true, catchupMs: 60_000 });
+    expect(results.map((r) => r.id)).toEqual(["last-stack-fkanban-pickup"]);
+
+    const [result] = results;
+    expect(result).toBeDefined();
+    if (!result) throw new Error("expected dispatched run");
+
+    const dispatched = readFileSync(join(result.runDir, "prompt.txt"), "utf8");
+    const memoryPath = join(home, "memory", "last-stack-fkanban-pickup", "memory.md");
+    expect(dispatched).toContain("## Dispatch envelope (routinesd)");
+    expect(dispatched).toContain("Automation ID: last-stack-fkanban-pickup");
+    expect(dispatched).toContain(`Automation memory: ${memoryPath}`);
+    expect(dispatched).toContain("name: kanban-pickup");
+    expect(dispatched).not.toContain(".codex/automations/kanban-pickup");
+    expect(existsSync(join(home, "memory", "last-stack-fkanban-pickup"))).toBe(true);
   });
 
   test("run dirs accumulate per routine", async () => {

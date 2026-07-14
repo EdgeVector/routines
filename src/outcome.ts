@@ -9,6 +9,8 @@
 // dashboard can show last outcome + rolling noop rates for cadence tuning.
 // Classification is best-effort and never fails a run.
 
+import { canonicalRoutineId } from "./kanban-id-migration.ts";
+
 export type OutcomeKind = "ok" | "noop" | "error" | "unknown";
 
 export type OutcomeSource =
@@ -44,12 +46,15 @@ const DETAIL_MAX = 240;
 
 /** Names agents historically put in heartbeats that map to a registry id. */
 const ALIAS_TO_CANONICAL: Record<string, string> = {
-  "kanban-pickup": "last-stack-fkanban-pickup",
-  "fkanban-pickup": "last-stack-fkanban-pickup",
-  "kanban-watch": "last-stack-fkanban-watch",
-  "fkanban-watch": "last-stack-fkanban-watch",
-  "kanban-validate": "last-stack-fkanban-validate",
-  "fkanban-validate": "last-stack-fkanban-validate",
+  "last-stack-fkanban-pickup": "last-stack-kanban-pickup",
+  "kanban-pickup": "last-stack-kanban-pickup",
+  "fkanban-pickup": "last-stack-kanban-pickup",
+  "last-stack-fkanban-watch": "last-stack-kanban-watch",
+  "kanban-watch": "last-stack-kanban-watch",
+  "fkanban-watch": "last-stack-kanban-watch",
+  "last-stack-fkanban-validate": "last-stack-kanban-validate",
+  "kanban-validate": "last-stack-kanban-validate",
+  "fkanban-validate": "last-stack-kanban-validate",
   "groom-board": "last-stack-groom-board",
   "groom-fkanban-board": "last-stack-groom-board",
   "groom-kanban-board": "last-stack-groom-board",
@@ -72,8 +77,8 @@ const ALIAS_TO_CANONICAL: Record<string, string> = {
 
 /** Alternate names that should count as matching `routineId`. */
 export function nameMatchesRoutine(name: string, routineId: string): boolean {
-  const n = name.toLowerCase();
-  const id = routineId.toLowerCase();
+  const n = canonicalRoutineId(name.toLowerCase());
+  const id = canonicalRoutineId(routineId.toLowerCase());
   if (n === id) return true;
   if (ALIAS_TO_CANONICAL[n] === id) return true;
   // strip common prefixes either way

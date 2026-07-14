@@ -78,6 +78,7 @@ describe("normName", () => {
   });
   test("curated synonyms collapse the non-obvious pairs", () => {
     expect(normName("consolidate-fbrain")).toBe(normName("last-stack-consolidate-brain"));
+    expect(normName("last-stack-fkanban-pickup")).toBe(normName("last-stack-kanban-pickup"));
     expect(normName("groom-fkanban-board")).toBe(normName("last-stack-groom-board"));
     expect(normName("daily-agent-papercut-sweep")).toBe(normName("last-stack-papercut-sweep"));
     expect(normName("clean-up-stale-worktrees")).toBe(normName("last-stack-worktree-cleanup"));
@@ -221,6 +222,21 @@ describe("planImport (fixtures)", () => {
     const { codexDir } = fixtureDirs();
     const plan = planImport({ codexDir, claudeRegistry: null });
     expect(plan.candidates.every((c) => c.source === "codex")).toBe(true);
+  });
+
+  test("canonicalizes fkanban registry ids but preserves legacy source ids for pause targets", () => {
+    const codexDir = tmp();
+    mkdirSync(join(codexDir, "last-stack-fkanban-pickup"));
+    writeFileSync(
+      join(codexDir, "last-stack-fkanban-pickup", "automation.toml"),
+      CODEX_FIXTURE.replace('id = "last-stack-program-driver"', 'id = "last-stack-fkanban-pickup"'),
+    );
+    const plan = planImport({ codexDir, claudeRegistry: null });
+    expect(plan.candidates.map((c) => c.id)).toEqual(["last-stack-kanban-pickup"]);
+    expect(plan.candidates[0]!.sourceId).toBe("last-stack-fkanban-pickup");
+    const [file] = planFiles(plan);
+    expect(file!.file).toBe("last-stack-kanban-pickup.toml");
+    expect(parseEntry(file!.body, `/reg/${file!.file}`).id).toBe("last-stack-kanban-pickup");
   });
 });
 

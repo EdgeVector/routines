@@ -113,6 +113,27 @@ export const PAGE = `<!doctype html>
     overflow-x: auto; max-height: 340px; white-space: pre-wrap; word-break: break-word;
   }
   .logtitle { margin: 10px 0 0; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+  .run-summary {
+    margin: 10px 0 0; padding: 12px 14px; border-radius: 9px;
+    border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--line));
+    background: color-mix(in srgb, var(--accent) 10%, var(--panel));
+    white-space: pre-wrap; word-break: break-word; line-height: 1.45;
+    max-height: 420px; overflow-y: auto; font-size: 13px;
+  }
+  .run-summary .sum-label {
+    font-size: 11px; text-transform: uppercase; letter-spacing: .06em;
+    color: var(--accent); font-weight: 700; margin-bottom: 6px;
+  }
+  .run-summary .sum-src {
+    display: inline-block; margin-left: 8px; font-size: 10px; font-weight: 600;
+    padding: 1px 7px; border-radius: 999px; background: var(--chip); color: var(--chip-fg);
+    text-transform: none; letter-spacing: 0; vertical-align: middle;
+  }
+  details.raw-log { margin-top: 10px; }
+  details.raw-log > summary {
+    cursor: pointer; color: var(--muted); font-size: 12px; user-select: none;
+  }
+  details.raw-log > summary:hover { color: var(--accent); }
   .toast {
     position: fixed; right: 18px; bottom: 18px; background: var(--panel); border: 1px solid var(--line);
     border-left: 4px solid var(--accent); padding: 10px 14px; border-radius: 9px; box-shadow: 0 6px 24px rgba(0,0,0,.18);
@@ -613,9 +634,27 @@ function showRun(id, stamp) {
     if (!host) return;
     var out = (d.stdoutTail || "").trim() || "(no stdout captured)";
     var err = (d.stderrTail || "").trim();
-    var html = '<div class="muted mono" style="margin-top:8px">' + esc(d.dir) + "</div>" +
-      '<div class="logtitle">stdout</div><pre class="log">' + esc(out) + "</pre>";
-    if (err) html += '<div class="logtitle">stderr</div><pre class="log">' + esc(err) + "</pre>";
+    var html = '<div class="muted mono" style="margin-top:8px">' + esc(d.dir) + "</div>";
+    // Prefer a clean "result" panel over the stream-json blob.
+    if (d.summary) {
+      var srcLabel = d.summarySource ? String(d.summarySource).replace(/_/g, " ") : "extracted";
+      html +=
+        '<div class="run-summary">' +
+        '<div class="sum-label">Result <span class="sum-src">' + esc(srcLabel) + "</span></div>" +
+        esc(d.summary) +
+        "</div>";
+      html +=
+        '<details class="raw-log">' +
+        "<summary>Raw harness log (stream-json / stdout" +
+        (err ? " + stderr" : "") +
+        ")</summary>" +
+        '<div class="logtitle">stdout</div><pre class="log">' + esc(out) + "</pre>";
+      if (err) html += '<div class="logtitle">stderr</div><pre class="log">' + esc(err) + "</pre>";
+      html += "</details>";
+    } else {
+      html += '<div class="logtitle">stdout</div><pre class="log">' + esc(out) + "</pre>";
+      if (err) html += '<div class="logtitle">stderr</div><pre class="log">' + esc(err) + "</pre>";
+    }
     host.innerHTML = html;
   }).catch(function (e) { toast(e.message, true); });
 }

@@ -39,13 +39,20 @@ export function writeHeartbeat(entry: RoutineEntry, result: RunResult): Heartbea
   if (!entry.heartbeatSlug) return { attempted: false, ok: true };
   const line = heartbeatLine(entry, result);
   const bin = fbrainBinary();
-  const res = spawnSync(bin, ["append", entry.heartbeatSlug, "--text", line], {
+  const res = spawnSync(bin, ["append", entry.heartbeatSlug, "--type", "reference"], {
     encoding: "utf8",
+    input: `${line}\n`,
     timeout: 30_000,
   });
   if (res.error) return { attempted: true, ok: false, line, error: `${bin}: ${res.error.message}` };
   if (typeof res.status === "number" && res.status !== 0) {
-    return { attempted: true, ok: false, line, error: `${bin} exited ${res.status}` };
+    const detail = res.stderr?.trim() || res.stdout?.trim();
+    return {
+      attempted: true,
+      ok: false,
+      line,
+      error: detail ? `${bin} exited ${res.status}: ${detail}` : `${bin} exited ${res.status}`,
+    };
   }
   return { attempted: true, ok: true, line };
 }

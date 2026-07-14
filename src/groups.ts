@@ -78,9 +78,9 @@ export function groupById(id: string): RoutineGroup {
 /** Exact id → group. Keep this tight; fall through to pattern rules. */
 const EXACT: Record<string, string> = {
   // Board pipeline
-  "last-stack-fkanban-pickup": "board",
-  "last-stack-fkanban-watch": "board",
-  "last-stack-fkanban-validate": "board",
+  "last-stack-kanban-pickup": "board",
+  "last-stack-kanban-watch": "board",
+  "last-stack-kanban-validate": "board",
   "last-stack-groom-board": "board",
   "last-stack-program-driver": "board",
   "last-stack-drain-open-prs": "board",
@@ -129,7 +129,7 @@ const EXACT: Record<string, string> = {
 
 /** Pattern rules applied when no exact match (order matters — first win). */
 const PATTERNS: Array<{ re: RegExp; group: string }> = [
-  { re: /fkanban|groom-board|program-driver|drain-open-prs/, group: "board" },
+  { re: /(?:f)?kanban|groom-board|program-driver|drain-open-prs/, group: "board" },
   {
     re: /consolidat.*brain|capture-knowledge|morning-sync|papercut|self-improvement|owner-review|retro-prevention|canonicalize/,
     group: "brain",
