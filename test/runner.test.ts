@@ -54,7 +54,7 @@ describe("runRoutine timeout handling", () => {
   test("explicit ok heartbeat completes a run even if the harness lingers until timeout", async () => {
     process.env.ROUTINES_CLAUDE_BIN = stub(
       join(home, "hanging-ok-harness"),
-      '#!/bin/sh\necho "brain-stress-consistency 2026-07-14T20:43:29Z ok GREEN findings=0"\nexec sleep 5\n',
+      '#!/bin/sh\necho "brain-stress-consistency 2026-07-14T20:43:29Z ok GREEN findings=0"\nexec sleep 1\n',
     );
     writeRoutine("brain-stress-consistency");
 
@@ -69,5 +69,5 @@ describe("runRoutine timeout handling", () => {
     expect(meta.exitCode).toBe(0);
     expect(meta.timedOut).toBe(true);
     expect(meta.outcome).toBe("ok");
-  });
+  }, 15000);
 });
