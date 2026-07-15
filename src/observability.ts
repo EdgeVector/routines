@@ -32,16 +32,18 @@ type SentryCaptureModule = {
   flush?: (timeoutMs?: number) => Promise<boolean>;
 };
 
+type RoutinesSentryDisabledReason =
+  | "disabled"
+  | "missing_dsn"
+  | "lastsecrets_failed"
+  | "shared_helper_missing"
+  | "shared_helper_failed";
+
 export type RoutinesSentryResult =
   | { enabled: true; service: string }
   | {
       enabled: false;
-      reason:
-        | "disabled"
-        | "missing_dsn"
-        | "lastsecrets_failed"
-        | "shared_helper_missing"
-        | "shared_helper_failed";
+      reason: RoutinesSentryDisabledReason;
     };
 
 export interface RoutinesSentryTestDeps {
@@ -84,7 +86,7 @@ export async function initRoutinesSentry(
   try {
     const result = await initSentry({ service: opts.service, env });
     if (!result.enabled) {
-      return { enabled: false, reason: (result.reason as RoutinesSentryResult["reason"]) ?? "missing_dsn" };
+      return { enabled: false, reason: (result.reason as RoutinesSentryDisabledReason) ?? "missing_dsn" };
     }
   } catch {
     return { enabled: false, reason: "shared_helper_failed" };
