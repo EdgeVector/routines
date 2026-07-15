@@ -28,6 +28,7 @@ import { runRoutine } from "./runner.ts";
 import { startServer } from "./server.ts";
 import { loadProjectConfig } from "./project-config.ts";
 import { publishFleetStatus } from "./publish-status.ts";
+import { initRoutinesSentry } from "./observability.ts";
 
 const HELP = `routines ${pkg.version} — one scheduler for agent routines (claude|codex)
 
@@ -444,6 +445,7 @@ async function cmdWeb(rest: string[]): Promise<number> {
     return 2;
   }
   const host = values.host ?? "127.0.0.1";
+  await initRoutinesSentry({ service: "routines-web" });
   const handle = startServer({ port, host });
   console.error(`routines dashboard: ${handle.url}  (home=${routinesHome()})`);
   console.error(`serving the registry at ${registryDir()} — localhost only, no auth. Ctrl-C to stop.`);
@@ -513,6 +515,7 @@ async function cmdDaemon(rest: string[]): Promise<number> {
   });
   const catchupMs = values.catchup ? Number(values.catchup) * 1000 : 0;
   const concurrency = values.concurrency ? Number(values.concurrency) : 4;
+  await initRoutinesSentry({ service: "routinesd" });
 
   if (values.once) {
     const results = await evaluateOnce({ once: true, catchupMs, concurrency });
@@ -561,6 +564,9 @@ function cmdInstallDaemon(): number {
     .filter((p) => p && (seen.has(p) ? false : (seen.add(p), true)))
     .join(":");
   env.PATH = path;
+  env.OBS_SENTRY_DSN = process.env.OBS_SENTRY_DSN ?? "lastsecrets://obs-sentry-dsn-routines";
+  env.OBS_SENTRY_ENVIRONMENT = process.env.OBS_SENTRY_ENVIRONMENT ?? "production";
+  env.OBS_SENTRY_RELEASE = process.env.OBS_SENTRY_RELEASE ?? `routines@${pkg.version}`;
   const res = installDaemon({ program: selfProgram(), env });
   console.log(`plist: ${res.plistPath}`);
   console.log(res.message);
