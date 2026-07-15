@@ -53,6 +53,7 @@ routines pause|resume <id>    # toggle status
 routines route <id> --harness codex --model gpt-5.5
 routines route <id> --harness grok --model grok-4.5
 routines logs <id>            # recent runs (--path, --tail, --json)
+routines publish-status       # publish slim fleet status + recent run summaries to LastDB
 routines import               # import the legacy schedulers into the registry (dry-run)
 routines web                  # serve the local dashboard (localhost); --port, --host
 routines doctor               # validate registry + environment (+ configurations project-config)
@@ -84,6 +85,26 @@ state.
 
 The JSON API (for scripting): `GET /api/routines`, `GET /api/routines/<id>/runs`,
 `GET /api/routines/<id>/runs/<stamp|latest>`, and `POST /api/routines/<id>/{run,pause,resume,route}`.
+
+## LastDB fleet status publish
+
+`routines publish-status` writes a slim, admin-deliverable fleet snapshot to the
+local LastDB Mini socket. It reuses `collectStatus()` and `listRuns()`, declares
+the app-owned schemas on first run, and upserts:
+
+- `routines/RoutineFleetSnapshot` key `fleet-latest`
+- `routines/RoutineStatus` key `<routine id>`
+- `routines/RoutineRunSummary` key `<routine id>/<run stamp>`
+
+The publisher intentionally excludes prompts and full logs. Recent run evidence
+is capped (`--tail-bytes`, default 2048) and common secret-looking assignments
+are redacted before write.
+
+```sh
+routines publish-status --json
+routines publish-status --runs 5 --tail-bytes 2048
+routines publish-status --dry-run --json
+```
 
 ## Daemon
 
@@ -214,4 +235,3 @@ When a run ends with **non-zero exit**, **timeout**, or **outcome=error**,
 
 Disable with `ROUTINES_ERROR_ESCALATE=0`. The triage runner id
 `routine-error-triage` is never re-escalated (no loops).
-
