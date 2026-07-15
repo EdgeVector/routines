@@ -54,7 +54,11 @@ describe("runRoutine timeout handling", () => {
   test("explicit ok heartbeat completes a run even if the harness lingers until timeout", async () => {
     process.env.ROUTINES_CLAUDE_BIN = stub(
       join(home, "hanging-ok-harness"),
-      '#!/bin/sh\necho "brain-stress-consistency 2026-07-14T20:43:29Z ok GREEN findings=0"\nexec sleep 5\n',
+      [
+        "#!/bin/sh",
+        "exec node -e 'console.log(\"brain-stress-consistency 2026-07-14T20:43:29Z ok GREEN findings=0\"); setTimeout(() => process.exit(0), 1000);' -- \"$@\"",
+        "",
+      ].join("\n"),
     );
     writeRoutine("brain-stress-consistency");
 
