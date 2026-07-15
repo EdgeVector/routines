@@ -106,6 +106,18 @@ daily-retro-prevention 2026-07-14T13:33:00Z ok bites=5 cards=2
     expect(o.detail).toBe("timed out");
   });
 
+  test("does not parse Rust test result output as a routine RESULT trailer", () => {
+    const text =
+      "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 353.65s";
+    const clean = parseOutcome("db-perf-guard", text, { exitCode: 0 });
+    expect(clean.kind).toBe("unknown");
+
+    const timedOut = parseOutcome("db-perf-guard", text, { exitCode: 124, timedOut: true });
+    expect(timedOut.kind).toBe("error");
+    expect(timedOut.source).toBe("exit");
+    expect(timedOut.detail).toBe("timed out");
+  });
+
   test("exit 0 with no signal is unknown (not guessed as noop)", () => {
     const o = parseOutcome("last-stack-groom-board", "Board groom complete.\nCounts: ...", { exitCode: 0 });
     // Prose without explicit ok|noop|error token near a name may still miss —
