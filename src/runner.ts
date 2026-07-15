@@ -13,13 +13,15 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { buildInvocation, type HarnessInvocation } from "./adapters.ts";
-import { resolvePrompt, type RoutineEntry } from "./registry.ts";
-import { automationMemoryDir, automationMemoryPath, runsDir } from "./paths.ts";
+import type { RoutineEntry } from "./registry.ts";
+import { resolveDispatchPrompt } from "./prompt.ts";
+import { runsDir } from "./paths.ts";
 import { writeHeartbeat, type HeartbeatOutcome } from "./heartbeat.ts";
 import { parseOutcome, type RunOutcome } from "./outcome.ts";
 import { patchState } from "./state.ts";
 import { envFromProjectConfig, loadProjectConfig, resolveRoutineCwd } from "./project-config.ts";
 import { discoveredRoutineSocketEnv } from "./socket-env.ts";
+import { escalateRoutineError, shouldEscalate } from "./error-escalate.ts";
 
 export interface RunResult {
   id: string;
@@ -46,7 +48,7 @@ export interface RunOptions {
 }
 
 export function runRoutine(entry: RoutineEntry, opts: RunOptions = {}): Promise<RunResult> {
-  const prompt = buildDispatchPrompt(entry, resolvePrompt(entry));
+  const prompt = resolveDispatchPrompt(entry);
   const invocation = buildInvocation(entry, prompt);
   const startedAt = new Date();
   const runDir = join(runsDir(), entry.id, runStamp(startedAt));
@@ -171,11 +173,22 @@ export function runRoutine(entry: RoutineEntry, opts: RunOptions = {}): Promise<
         lastOutcomeDetail: result.outcome.detail ?? undefined,
       });
 
+      // P0 fleet rule: every error run gets a board card + (rate-limited) triage
+      // agent. Never await — must not stall the scheduler or re-throw.
+      if (shouldEscalate(result)) {
+        try {
+          escalateRoutineError(entry, result, { quiet: opts.quiet });
+        } catch {
+          /* never break finalize */
+        }
+      }
+
       resolve(result);
     }
   });
 }
 
+/** Map timeout exit 124 → 0 when the agent still produced a durable ok/noop outcome. */
 function completedExitCode(
   rawExitCode: number | null,
   timedOut: boolean,
@@ -189,29 +202,6 @@ function completedExitCode(
     return 0;
   }
   return rawExitCode;
-}
-
-function buildDispatchPrompt(entry: RoutineEntry, prompt: string): string {
-  const memoryPath = automationMemoryPath(entry.id);
-  try {
-    mkdirSync(automationMemoryDir(entry.id), { recursive: true });
-  } catch {
-    // The harness prompt tells the worker how to report an unwritable path.
-  }
-  return [
-    "## Dispatch envelope (routinesd)",
-    "",
-    `Automation ID: ${entry.id}`,
-    `Automation memory: ${memoryPath}`,
-    "",
-    "Use ONLY the Automation memory path above for cross-run notes. Do not invent",
-    "short aliases under ~/.codex/automations/ from the skill `name:` frontmatter.",
-    "If that exact path is unwritable, note `memory_unwritable=<path>` in the",
-    "heartbeat and continue; do not fail the whole run.",
-    "",
-    "---",
-    prompt,
-  ].join("\n");
 }
 
 function tail(s: string, n: number): string {

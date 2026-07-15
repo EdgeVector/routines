@@ -202,3 +202,16 @@ Core = the scheduler daemon + CLI + both adapters + the local `routines web`
 dashboard (single-pane coordination) + the one-time `import` + cutover tooling.
 **Out of scope** (separate cards): remote/authenticated access and historical
 analytics for the dashboard, and any new routine content.
+
+## Error escalation (P0)
+
+When a run ends with **non-zero exit**, **timeout**, or **outcome=error**,
+`routinesd` automatically:
+
+1. Upserts a **P0** kanban card `routine-error-<id>` with the run dir evidence
+2. Dispatches a one-shot **triage agent** (same harness/model; 30m cooldown per id)
+   that investigates `~/.routines/runs/<id>/…` and either fixes or updates the card
+
+Disable with `ROUTINES_ERROR_ESCALATE=0`. The triage runner id
+`routine-error-triage` is never re-escalated (no loops).
+

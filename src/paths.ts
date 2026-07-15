@@ -43,3 +43,16 @@ export function automationMemoryPath(id: string): string {
 export function daemonLogDir(): string {
   return join(routinesHome(), "daemon");
 }
+
+/**
+ * Per-routine automation memory (durable cross-run notes). Lives under
+ * ROUTINES_HOME so fleet harnesses can write without inventing short Codex
+ * automation aliases or depending on PAUSED ~/.codex/automations trees.
+ */
+export function memoryDir(): string {
+  return join(routinesHome(), "memory");
+}
+
+export function memoryPathFor(id: string): string {
+  return join(memoryDir(), id, "memory.md");
+}
