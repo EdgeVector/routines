@@ -75,6 +75,17 @@ describe("shouldEscalate", () => {
   test("timeout", () => {
     expect(shouldEscalate(result({ exitCode: 124, timedOut: true }))).toBe(true);
   });
+  test("completed ok heartbeat timeout is not escalated", () => {
+    expect(
+      shouldEscalate(
+        result({
+          exitCode: 0,
+          timedOut: true,
+          outcome: { kind: "ok", detail: "GREEN findings=0", source: "heartbeat" },
+        }),
+      ),
+    ).toBe(false);
+  });
   test("soft outcome error with exit 0", () => {
     expect(
       shouldEscalate(
