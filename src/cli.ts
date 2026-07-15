@@ -27,6 +27,7 @@ import { registryDir, routinesHome, runsDir } from "./paths.ts";
 import { runRoutine } from "./runner.ts";
 import { startServer } from "./server.ts";
 import { loadProjectConfig } from "./project-config.ts";
+import { publishFleetStatus } from "./publish-status.ts";
 
 const HELP = `routines ${pkg.version} — one scheduler for agent routines (claude|codex)
 
@@ -41,6 +42,7 @@ Commands:
   resume <id>                 set status = active
   route <id> --harness X --model Y   change a routine's harness and/or model
   logs <id>                   show recent runs for a routine (--json, --path, --tail)
+  publish-status              write slim fleet status records to LastDB (--json)
   import                      import legacy schedulers into the registry (dry-run;
                               --write to apply). See --help notes below.
   migrate-kanban-ids          one-time last-stack-fkanban-* → last-stack-kanban-*
@@ -99,6 +101,8 @@ async function main(argv: string[]): Promise<number> {
       return cmdMigrateKanbanIds(rest);
     case "logs":
       return cmdLogs(rest);
+    case "publish-status":
+      return await cmdPublishStatus(rest);
     case "web":
       return cmdWeb(rest);
     case "doctor":
@@ -339,6 +343,47 @@ function cmdImport(rest: string[]): number {
   } else {
     console.log(`DRY-RUN: no files written. Re-run with --write to create ${toCreate.length} registry file(s) in ${outDir}.`);
   }
+  return 0;
+}
+
+async function cmdPublishStatus(rest: string[]): Promise<number> {
+  const { values } = parseArgs({
+    args: rest,
+    options: {
+      json: { type: "boolean" },
+      "dry-run": { type: "boolean" },
+      runs: { type: "string" },
+      "tail-bytes": { type: "string" },
+    },
+    allowPositionals: true,
+  });
+  const runLimit = values.runs ? Number(values.runs) : undefined;
+  const logTailBytes = values["tail-bytes"] ? Number(values["tail-bytes"]) : undefined;
+  if (runLimit !== undefined && (!Number.isInteger(runLimit) || runLimit < 1)) {
+    console.error(`invalid --runs ${values.runs}`);
+    return 2;
+  }
+  if (logTailBytes !== undefined && (!Number.isInteger(logTailBytes) || logTailBytes < 1)) {
+    console.error(`invalid --tail-bytes ${values["tail-bytes"]}`);
+    return 2;
+  }
+
+  const result = await publishFleetStatus({
+    dryRun: values["dry-run"] === true,
+    runLimit,
+    logTailBytes,
+  });
+  if (values.json) {
+    console.log(JSON.stringify(result, null, 2));
+    return 0;
+  }
+  const action = result.dryRun ? "DRY-RUN" : "PUBLISHED";
+  console.log(
+    `${action} routines fleet status captured_at=${result.capturedAt} rows=${result.rows.length} run_summaries=${result.runSummaries.length}`,
+  );
+  console.log(
+    `schemas snapshot=${result.schemaHashes.snapshot} status=${result.schemaHashes.status} run_summary=${result.schemaHashes.runSummary}`,
+  );
   return 0;
 }
 
