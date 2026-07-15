@@ -1,6 +1,12 @@
 import { describe, expect, test } from "bun:test";
 
-import { fenceFor, globMatch, type ActiveSituation } from "../src/situations.ts";
+import {
+  fenceFor,
+  formatNoticesBanner,
+  globMatch,
+  type ActiveSituation,
+  type RecentNotice,
+} from "../src/situations.ts";
 
 describe("globMatch", () => {
   test("wildcards", () => {
@@ -37,5 +43,31 @@ describe("fenceFor", () => {
 
   test("exact match in a second situation", () => {
     expect(fenceFor("specific-routine", situations).situationSlug).toBe("other");
+  });
+});
+
+describe("formatNoticesBanner", () => {
+  test("empty list is explicit", () => {
+    const banner = formatNoticesBanner([], "2h");
+    expect(banner).toContain("No notices in the last 2h");
+    expect(banner).toContain("non-blocking");
+  });
+
+  test("lists kind/title/at", () => {
+    const notices: RecentNotice[] = [
+      {
+        slug: "notice-upgrade-lastdb",
+        kind: "upgrade",
+        title: "LastDB upgraded to 0.22.8",
+        at: "2026-07-14T19:12:03.000Z",
+        summary: "brief blips expected",
+        scope_systems: ["lastdbd"],
+      },
+    ];
+    const banner = formatNoticesBanner(notices, "1h");
+    expect(banner).toContain("[upgrade]");
+    expect(banner).toContain("notice-upgrade-lastdb");
+    expect(banner).toContain("LastDB upgraded to 0.22.8");
+    expect(banner).toContain("systems=lastdbd");
   });
 });

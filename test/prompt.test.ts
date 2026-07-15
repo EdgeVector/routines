@@ -30,6 +30,7 @@ describe("dispatch prompt envelope", () => {
   test("resolveDispatchPrompt prepends Automation ID + memory path", () => {
     tmp = mkdtempSync(join(tmpdir(), "routines-mem-"));
     process.env.ROUTINES_HOME = tmp;
+    process.env.ROUTINES_SKIP_NOTICES = "1";
     const entry = parseEntry(
       ['harness = "codex"', 'model = "m1"', 'rrule = "FREQ=HOURLY"', 'prompt = "Do work."'].join("\n"),
       join(tmp, "last-stack-fkanban-pickup.toml"),
@@ -40,13 +41,26 @@ describe("dispatch prompt envelope", () => {
       `Automation memory: ${join(tmp, "memory", "last-stack-fkanban-pickup", "memory.md")}`,
     );
     expect(text).toContain("Do work.");
+    expect(text).toContain("Situations notices");
     expect(text.indexOf("Dispatch envelope")).toBeLessThan(text.indexOf("Do work."));
   });
 
   test("envelope names the memory path agents must use", () => {
-    const env = buildDispatchEnvelope({ id: "x" } as never, "/tmp/x/memory.md");
+    const env = buildDispatchEnvelope({ id: "x" } as never, "/tmp/x/memory.md", {
+      noticesBanner: "## Situations notices (FYI, non-blocking)\n\nNo notices in the last 2h.\n",
+    });
     expect(env).toContain("Automation ID: x");
     expect(env).toContain("Automation memory: /tmp/x/memory.md");
     expect(env).toContain("Do not invent");
+    expect(env).toContain("No notices in the last 2h");
+  });
+
+  test("envelope injects provided notices banner", () => {
+    const env = buildDispatchEnvelope({ id: "y" } as never, "/tmp/y/memory.md", {
+      noticesBanner:
+        "## Situations notices (FYI, non-blocking — last 2h)\n\n- [upgrade] LastDB upgraded\n",
+    });
+    expect(env).toContain("[upgrade] LastDB upgraded");
+    expect(env.indexOf("Situations notices")).toBeLessThan(env.indexOf("---"));
   });
 });
