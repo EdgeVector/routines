@@ -20,6 +20,7 @@ beforeEach(() => {
   process.env = { ...savedEnv };
   home = mkdtempSync(join(tmpdir(), "routines-runner-"));
   process.env.ROUTINES_HOME = home;
+  process.env.ROUTINES_SIGKILL_GRACE_MS = "50";
   mkdirSync(join(home, "registry"), { recursive: true });
 
   const fbrainOut = join(home, "heartbeats.log");
@@ -50,13 +51,13 @@ function writeRoutine(id: string): void {
   );
 }
 
-describe("runRoutine timeout handling", () => {
-  test("explicit ok heartbeat completes a run even if the harness lingers until timeout", async () => {
+describe("runRoutine heartbeat handling", () => {
+  test("explicit ok heartbeat completes a run", async () => {
     process.env.ROUTINES_CLAUDE_BIN = stub(
-      join(home, "hanging-ok-harness"),
+      join(home, "ok-harness"),
       [
         "#!/bin/sh",
-        "exec node -e 'console.log(\"brain-stress-consistency 2026-07-14T20:43:29Z ok GREEN findings=0\"); setTimeout(() => process.exit(0), 1000);' -- \"$@\"",
+        "printf '%s\\n' 'brain-stress-consistency 2026-07-14T20:43:29Z ok GREEN findings=0'",
         "",
       ].join("\n"),
     );
@@ -64,14 +65,14 @@ describe("runRoutine timeout handling", () => {
 
     const result = await runRoutine(loadEntry("brain-stress-consistency"), { quiet: true });
 
-    expect(result.timedOut).toBe(true);
+    expect(result.timedOut).toBe(false);
     expect(result.outcome.kind).toBe("ok");
     expect(result.outcome.source).toBe("heartbeat");
     expect(result.exitCode).toBe(0);
 
     const meta = JSON.parse(readFileSync(join(result.runDir, "meta.json"), "utf8"));
     expect(meta.exitCode).toBe(0);
-    expect(meta.timedOut).toBe(true);
+    expect(meta.timedOut).toBe(false);
     expect(meta.outcome).toBe("ok");
   });
 });

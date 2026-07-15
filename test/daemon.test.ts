@@ -18,6 +18,7 @@ function stub(path: string, body: string): string {
 }
 
 beforeEach(() => {
+  process.env = { ...savedEnv };
   home = mkdtempSync(join(tmpdir(), "routines-test-"));
   process.env.ROUTINES_HOME = home;
   delete process.env.FOLDDB_SOCKET_PATH;
@@ -26,6 +27,7 @@ beforeEach(() => {
   delete process.env.LASTDB_SOCKET_PATH;
   delete process.env.LASTDB_HOME;
   delete process.env.FOLDDB_HOME;
+  delete process.env.ROUTINES_SITUATIONS_CLI;
   mkdirSync(join(home, "registry"), { recursive: true });
 
   const harnessStub = stub(

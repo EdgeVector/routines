@@ -33,7 +33,7 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { basename, join } from "node:path";
 import { homedir } from "node:os";
 
-import type { Harness, Status } from "./registry.ts";
+import { parseEntry, type Harness, type Status } from "./registry.ts";
 import { canonicalRoutineId } from "./kanban-id-migration.ts";
 import { parseRRule } from "./rrule.ts";
 
@@ -560,6 +560,30 @@ export function renderToml(c: ImportCandidate): string {
     lines.push(`prompt = "${escapeTomlBasic(c.prompt ?? "")}"`);
   }
   return lines.join("\n") + "\n";
+}
+
+export function preserveExistingRouting(
+  c: ImportCandidate,
+  existingToml: string,
+  existingPath: string,
+): ImportCandidate {
+  const existing = parseEntry(existingToml, existingPath);
+  const next: ImportCandidate = {
+    ...c,
+    harness: existing.harness,
+    model: existing.model,
+    note: appendNote(
+      c.note,
+      `preserved local route ${existing.harness}/${existing.model} from existing registry file`,
+    ),
+  };
+  if (existing.effort) next.effort = existing.effort;
+  else delete next.effort;
+  return next;
+}
+
+function appendNote(note: string | undefined, addition: string): string {
+  return note ? `${note}; ${addition}` : addition;
 }
 
 export function renderDiffTable(plan: ImportPlan): string {

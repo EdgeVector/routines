@@ -10,7 +10,13 @@ import { parseArgs } from "node:util";
 
 import pkg from "../package.json" with { type: "json" };
 import { routeRoutine, setStatus, ActionError } from "./actions.ts";
-import { planImport, renderDiffTable, renderToml, type ImportPlan } from "./import.ts";
+import {
+  planImport,
+  preserveExistingRouting,
+  renderDiffTable,
+  renderToml,
+  type ImportPlan,
+} from "./import.ts";
 import { migrateKanbanIds } from "./kanban-id-migration.ts";
 import { evaluateOnce, startDaemon } from "./daemon.ts";
 import { installDaemon, plistPath, renderPlist, uninstallDaemon } from "./launchd.ts";
@@ -54,7 +60,12 @@ Environment:
   ROUTINES_CODEX_BIN          codex binary (default: codex)
   ROUTINES_GROK_BIN           grok binary (default: grok)
   ROUTINES_FSITUATIONS_BIN    fsituations binary (default: fsituations)
-  ROUTINES_FBRAIN_BIN         fbrain binary for heartbeats (default: fbrain)`;
+  ROUTINES_FBRAIN_BIN         fbrain binary for heartbeats (default: fbrain)
+
+Import:
+  --force                     refresh existing registry files
+  --replace-routing           with --force, also replace existing harness/model
+                              instead of preserving local route edits`;
 
 async function main(argv: string[]): Promise<number> {
   const [command, ...rest] = argv;
@@ -246,6 +257,7 @@ function cmdImport(rest: string[]): number {
       "claude-model": { type: "string" },
       "codex-dir": { type: "string" },
       "claude-registry": { type: "string" },
+      "replace-routing": { type: "boolean" },
       out: { type: "string" },
     },
     allowPositionals: true,
@@ -284,7 +296,11 @@ function cmdImport(rest: string[]): number {
         skippedExisting.push(c.id);
         continue;
       }
-      writeFileSync(dest, renderToml(c));
+      const candidate =
+        existsSync(dest) && values["replace-routing"] !== true
+          ? preserveExistingRouting(c, readFileSync(dest, "utf8"), dest)
+          : c;
+      writeFileSync(dest, renderToml(candidate));
       written.push(c.id);
     }
   }
