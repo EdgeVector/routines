@@ -445,7 +445,7 @@ export function readClaudeTasks(
       rrule,
       cwd: t.cwd ?? process.cwd(),
       status: "active",
-      timeoutMin: 30,
+      timeoutMin: defaultTimeoutMin(t.id),
     };
     // The Claude scheduler stores no per-task prompt inline; the task's SKILL.md
     // IS the routine. Preserve it faithfully via prompt_path.
@@ -457,6 +457,11 @@ export function readClaudeTasks(
 }
 
 // --- planning --------------------------------------------------------------
+
+function defaultTimeoutMin(id: string): number {
+  if (canonicalRoutineId(id) === "db-perf-guard") return 60;
+  return 30;
+}
 
 export function planImport(opts: PlanOptions = {}): ImportPlan {
   const codexDir = opts.codexDir ?? join(homedir(), ".codex", "automations");
@@ -481,7 +486,7 @@ export function planImport(opts: PlanOptions = {}): ImportPlan {
       cwd: a.cwd,
       status: "active",
       prompt: a.prompt,
-      timeoutMin: 30,
+      timeoutMin: defaultTimeoutMin(a.id),
     });
   }
 
