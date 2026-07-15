@@ -112,7 +112,7 @@ const ROUTINE_RESULT_RE =
  *   RESULT: ok filed=1
  */
 const RESULT_COLON_RE =
-  /\bRESULT:\s*(ok|noop|error)\b([^\n\r]*)/gi;
+  /^[^\S\r\n]*RESULT:\s*(ok|noop|error)\b([^\n\r]*)/gim;
 
 /**
  * Heartbeat-style lines, including:
