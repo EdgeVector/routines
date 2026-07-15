@@ -111,13 +111,14 @@ export function runRoutine(entry: RoutineEntry, opts: RunOptions = {}): Promise<
       writeFileSync(join(runDir, "stdout.log"), stdout);
       writeFileSync(join(runDir, "stderr.log"), stderr);
 
-      const exitCode = timedOut ? 124 : code;
+      const rawExitCode = timedOut ? 124 : code;
       // Classify work quality from harness output (ok | noop | error | unknown).
       // Combined streams: agents often print the final heartbeat on either side.
       const outcome = parseOutcome(entry.id, `${stdout}\n${stderr}`, {
-        exitCode,
+        exitCode: rawExitCode,
         timedOut,
       });
+      const exitCode = completedExitCode(rawExitCode, timedOut, outcome);
       const result: RunResult = {
         id: entry.id,
         runDir,
@@ -183,6 +184,22 @@ export function runRoutine(entry: RoutineEntry, opts: RunOptions = {}): Promise<
       resolve(result);
     }
   });
+}
+
+/** Map timeout exit 124 → 0 when the agent still produced a durable ok/noop outcome. */
+function completedExitCode(
+  rawExitCode: number | null,
+  timedOut: boolean,
+  outcome: RunOutcome,
+): number | null {
+  if (
+    timedOut &&
+    (outcome.kind === "ok" || outcome.kind === "noop") &&
+    (outcome.source === "heartbeat" || outcome.source === "routine_result")
+  ) {
+    return 0;
+  }
+  return rawExitCode;
 }
 
 function tail(s: string, n: number): string {
