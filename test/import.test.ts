@@ -239,6 +239,28 @@ describe("planImport (fixtures)", () => {
     expect(file!.file).toBe("last-stack-kanban-pickup.toml");
     expect(parseEntry(file!.body, `/reg/${file!.file}`).id).toBe("last-stack-kanban-pickup");
   });
+
+  test("db-perf-guard imports with extended timeout budget", () => {
+    const codexDir = tmp();
+    mkdirSync(join(codexDir, "db-perf-guard"));
+    writeFileSync(
+      join(codexDir, "db-perf-guard", "automation.toml"),
+      CODEX_FIXTURE.replace('id = "last-stack-program-driver"', 'id = "db-perf-guard"'),
+    );
+
+    const claudeReg = join(tmp(), "scheduled-tasks.json");
+    writeFileSync(
+      claudeReg,
+      JSON.stringify({
+        scheduledTasks: [
+          { id: "db-perf-guard", enabled: true, cronExpression: "30 1 * * *", cwd: "/w", filePath: "/skills/db-perf-guard/SKILL.md" },
+        ],
+      }),
+    );
+
+    expect(planImport({ codexDir, claudeRegistry: null }).candidates[0]!.timeoutMin).toBe(60);
+    expect(readClaudeTasks(claudeReg, "sonnet").candidates[0]!.timeoutMin).toBe(60);
+  });
 });
 
 describe("renderToml round-trips through the real registry parser", () => {
