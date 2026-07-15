@@ -27,7 +27,7 @@ import { registryDir, routinesHome, runsDir } from "./paths.ts";
 import { runRoutine } from "./runner.ts";
 import { startServer } from "./server.ts";
 import { loadProjectConfig } from "./project-config.ts";
-import { publishFleetStatus } from "./publish-status.ts";
+import { deliverFleetStatus, publishFleetStatus, type DeliveryRecipient } from "./publish-status.ts";
 import { initRoutinesSentry } from "./observability.ts";
 
 const HELP = `routines ${pkg.version} — one scheduler for agent routines (claude|codex)
@@ -44,6 +44,7 @@ Commands:
   route <id> --harness X --model Y   change a routine's harness and/or model
   logs <id>                   show recent runs for a routine (--json, --path, --tail)
   publish-status              write slim fleet status records to LastDB (--json)
+  deliver-status              publish + stage a fleet-status delivery; --approve sends it
   import                      import legacy schedulers into the registry (dry-run;
                               --write to apply). See --help notes below.
   migrate-kanban-ids          one-time last-stack-fkanban-* → last-stack-kanban-*
@@ -104,6 +105,8 @@ async function main(argv: string[]): Promise<number> {
       return cmdLogs(rest);
     case "publish-status":
       return await cmdPublishStatus(rest);
+    case "deliver-status":
+      return await cmdDeliverStatus(rest);
     case "web":
       return cmdWeb(rest);
     case "doctor":
@@ -386,6 +389,98 @@ async function cmdPublishStatus(rest: string[]): Promise<number> {
     `schemas snapshot=${result.schemaHashes.snapshot} status=${result.schemaHashes.status} run_summary=${result.schemaHashes.runSummary}`,
   );
   return 0;
+}
+
+async function cmdDeliverStatus(rest: string[]): Promise<number> {
+  const { values } = parseArgs({
+    args: rest,
+    options: {
+      json: { type: "boolean" },
+      "dry-run": { type: "boolean" },
+      approve: { type: "boolean" },
+      runs: { type: "string" },
+      "tail-bytes": { type: "string" },
+      "max-records": { type: "string" },
+      "recipient-pubkey": { type: "string" },
+      "recipient-name": { type: "string" },
+      "messaging-public-key": { type: "string" },
+      "messaging-pseudonym": { type: "string" },
+    },
+    allowPositionals: true,
+  });
+  const runLimit = parsePositiveIntFlag(values.runs, "--runs");
+  if (runLimit instanceof Error) return badFlag(runLimit);
+  const logTailBytes = parsePositiveIntFlag(values["tail-bytes"], "--tail-bytes");
+  if (logTailBytes instanceof Error) return badFlag(logTailBytes);
+  const maxRecords = parsePositiveIntFlag(values["max-records"], "--max-records");
+  if (maxRecords instanceof Error) return badFlag(maxRecords);
+
+  const recipient: DeliveryRecipient = {
+    recipientPubkey: firstString(values["recipient-pubkey"], process.env.ROUTINES_ADMIN_RECIPIENT_PUBKEY),
+    messagingPublicKey: firstString(values["messaging-public-key"], process.env.ROUTINES_ADMIN_MESSAGING_PUBLIC_KEY),
+    messagingPseudonym: firstString(values["messaging-pseudonym"], process.env.ROUTINES_ADMIN_MESSAGING_PSEUDONYM),
+    recipientDisplayName: firstString(values["recipient-name"], process.env.ROUTINES_ADMIN_RECIPIENT_NAME),
+  };
+  const missing = [
+    ["--recipient-pubkey", recipient.recipientPubkey],
+    ["--messaging-public-key", recipient.messagingPublicKey],
+    ["--messaging-pseudonym", recipient.messagingPseudonym],
+  ].filter(([, value]) => !value);
+  if (missing.length > 0) {
+    console.error(
+      `missing ${missing.map(([flag]) => flag).join(", ")} (or ROUTINES_ADMIN_RECIPIENT_PUBKEY / ROUTINES_ADMIN_MESSAGING_PUBLIC_KEY / ROUTINES_ADMIN_MESSAGING_PSEUDONYM)`,
+    );
+    return 2;
+  }
+
+  const result = await deliverFleetStatus({
+    recipient,
+    approve: values.approve === true,
+    dryRun: values["dry-run"] === true,
+    runLimit,
+    logTailBytes,
+    maxRecords,
+  });
+  if (values.json) {
+    console.log(JSON.stringify(result, null, 2));
+    return 0;
+  }
+  if (result.dryRun) {
+    console.log(`DRY-RUN routines fleet delivery rows=${result.rows.length} max_records=${result.deliveryRequest.max_records}`);
+    console.log(`schemas snapshot=${result.schemaHashes.snapshot} status=${result.schemaHashes.status}`);
+    return 0;
+  }
+  if (!result.staged) {
+    console.error("delivery stage returned no result");
+    return 1;
+  }
+  if (result.approved) {
+    console.log(
+      `DELIVERED routines fleet status delivery_id=${result.approved.deliveryId} shared=${result.approved.shared} message_type=${result.approved.messageType}`,
+    );
+  } else {
+    console.log(
+      `STAGED routines fleet status delivery_id=${result.staged.deliveryId} records=${result.staged.recordCount}; re-run with --approve to send`,
+    );
+  }
+  console.log(`schemas snapshot=${result.schemaHashes.snapshot} status=${result.schemaHashes.status}`);
+  return 0;
+}
+
+function parsePositiveIntFlag(value: string | undefined, name: string): number | undefined | Error {
+  if (value === undefined) return undefined;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1) return new Error(`invalid ${name} ${value}`);
+  return parsed;
+}
+
+function badFlag(err: Error): number {
+  console.error(err.message);
+  return 2;
+}
+
+function firstString(...values: Array<string | undefined>): string {
+  return values.find((value) => value && value.trim())?.trim() ?? "";
 }
 
 function cmdLogs(rest: string[]): number {
