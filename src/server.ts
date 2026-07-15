@@ -9,6 +9,7 @@ import { collectStatus } from "./status.ts";
 import { listRuns, readRun } from "./runs.ts";
 import { routeRoutine, setStatus, startRunNow, ActionError } from "./actions.ts";
 import { PAGE } from "./page.ts";
+import { captureRoutinesException } from "./observability.ts";
 
 export interface ServerOptions {
   /** Port to bind (0 = ephemeral, useful for tests). Default 4778. */
@@ -116,7 +117,16 @@ export function startServer(opts: ServerOptions = {}): ServerHandle {
     hostname: host,
     port,
     fetch: (req) =>
-      handle(req).catch((err) => json({ error: err instanceof Error ? err.message : String(err) }, 500)),
+      handle(req).catch((err) => {
+        captureRoutinesException(err, {
+          tags: {
+            service: "routines-web",
+            method: req.method,
+            route: new URL(req.url).pathname,
+          },
+        });
+        return json({ error: err instanceof Error ? err.message : String(err) }, 500);
+      }),
   });
   const actualPort = server.port ?? port;
   return {

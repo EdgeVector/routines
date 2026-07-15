@@ -128,6 +128,18 @@ routines install-daemon                          # bootstrap under launchd
 routines daemon --once --catchup 60              # single evaluation pass (testing / e2e)
 ```
 
+`routines install-daemon` also enables Sentry for the launchd-managed daemon by
+setting `OBS_SENTRY_DSN=lastsecrets://obs-sentry-dsn-routines`,
+`OBS_SENTRY_ENVIRONMENT=production`, and an `OBS_SENTRY_RELEASE` tag in the
+plist. At process startup, routines resolves the locator with `lastsecrets get`
+and initializes the shared Last Stack Bun/TypeScript Sentry helper from
+`$LAST_STACK_ROOT/lib/observability/sentry.ts` (default `~/.last-stack`). If the
+locator, helper, or `@sentry/node` dependency is unavailable, Sentry stays off
+and the daemon/web process continues. Reported events include uncaught process
+errors, daemon tick/dispatch exceptions, non-zero routine run exits tagged by
+routine id/harness/model, and dashboard handler exceptions; prompt text and log
+bodies are not sent.
+
 ## Forge
 
 This repo merges through **LastGit-native change requests**, not GitHub PRs

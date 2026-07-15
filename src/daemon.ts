@@ -28,6 +28,7 @@ import { nextAfter } from "./rrule.ts";
 import { patchState, readState } from "./state.ts";
 import { runRoutine, type RunResult } from "./runner.ts";
 import { loadProjectConfig } from "./project-config.ts";
+import { captureRoutineRunFailure, captureRoutinesException } from "./observability.ts";
 
 export interface DaemonOptions {
   once?: boolean;
@@ -183,7 +184,16 @@ function tryDispatch(entry: RoutineEntry, occ: Date, deps: DispatchDeps): void {
         id: entry.id,
         detail: `exit=${result.exitCode} run=${result.runDir}`,
       });
+      if (result.exitCode !== 0 || result.outcome.kind === "error") {
+        captureRoutineRunFailure(entry, result);
+      }
       return result;
+    })
+    .catch((err) => {
+      captureRoutinesException(err, {
+        tags: { service: "routinesd", routine_id: entry.id, phase: "dispatch" },
+      });
+      throw err;
     })
     .finally(() => {
       inFlight.delete(entry.id);
@@ -245,6 +255,7 @@ export function startDaemon(opts: DaemonOptions = {}): DaemonHandle {
       try {
         await evaluateOnce(opts);
       } catch (err) {
+        captureRoutinesException(err, { tags: { service: "routinesd", phase: "tick" } });
         (opts.log ?? defaultLog)({
           ts: new Date().toISOString(),
           kind: "registry-error",
