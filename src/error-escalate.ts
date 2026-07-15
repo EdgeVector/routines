@@ -295,7 +295,8 @@ failed. Your only job is to figure out WHY and make the failure stop recurring.
 - Prefer a durable fix (prompt / registry / last-stack / product code) + MERGED PR
   via the correct venue (last-stack-pr-venue).
 - If you cannot fix in this session: update card ${cardSlugName} with root cause +
-  next steps; leave it P0 in todo/review as appropriate.
+  next steps; leave it P0 in todo/review as appropriate. Use result=blocked when
+  waiting on an external gate; use result=needs-human when Tom must decide.
 - If this "error" was an intentional heartbeat about an external blocker and a
   card already tracks it, reclassify: document that the routine should heartbeat
   ok/noop after filing, and fix the prompt so soft blockers are not "error".
@@ -305,8 +306,13 @@ failed. Your only job is to figure out WHY and make the failure stop recurring.
 2. Identify root cause class: missing binary, PATH, prompt bug, timeout, API,
    real world blocker already carded, or product regression.
 3. Fix or file precisely. Drive a small PR if code/prompt change is clear.
-4. Heartbeat one line:
-   routine-error-triage <ISO> ok|error failed=${entry.id} result=fixed|card-updated|blocked detail=...
+4. Write a structured verdict for the dashboard (required):
+   path: ${result.runDir}/triage-result.json
+   JSON shape:
+   {"finishedAt":"<ISO>","result":"fixed|card-updated|blocked|needs-human","needsHuman":true|false,"detail":"<one line>","rootCause":"<short>"}
+   Set needsHuman=true for blocked / needs-human / anything Tom must act on.
+5. Heartbeat one line:
+   routine-error-triage <ISO> ok|error failed=${entry.id} result=fixed|card-updated|blocked|needs-human detail=...
 
 Then exit.
 `;
@@ -317,7 +323,7 @@ function dispatchTriageAgent(
   result: RunResult,
   cardSlugName: string,
   opts: EscalateOptions,
-): { ok: boolean; detail: string } {
+): { ok: boolean; detail: string; triageDir?: string; triagePid?: number | null } {
   if (opts.dispatchAgent === false) {
     return { ok: true, detail: "agent dispatch disabled" };
   }
@@ -391,6 +397,7 @@ function dispatchTriageAgent(
       child.stdin?.end();
     }
     child.unref();
+    const pid = child.pid ?? null;
     writeFileSync(
       join(triageDir, "meta.json"),
       JSON.stringify(
@@ -402,14 +409,19 @@ function dispatchTriageAgent(
           startedAt: new Date().toISOString(),
           harness,
           model: entry.model,
-          pid: child.pid ?? null,
+          pid,
           command: [bin, ...args.filter((a) => a !== prompt), prompt.length > 80 ? "<prompt>" : prompt].join(" "),
         },
         null,
         2,
       ) + "\n",
     );
-    return { ok: true, detail: `dispatched pid=${child.pid ?? "?"} dir=${triageDir}` };
+    return {
+      ok: true,
+      detail: `dispatched pid=${pid ?? "?"} dir=${triageDir}`,
+      triageDir,
+      triagePid: pid,
+    };
   } catch (err) {
     return { ok: false, detail: `spawn triage: ${(err as Error).message}` };
   }
@@ -437,6 +449,9 @@ export function escalateRoutineError(
     logLine(opts.quiet, `card ${card.slug}: ${card.ok ? "ok" : "FAIL"} ${card.detail}`);
 
     let agentDetail = "skipped";
+    let triageDir: string | undefined;
+    let triagePid: number | null | undefined;
+    let agentDispatched = false;
     const lastAgent = prev?.lastAgentDispatchedAt
       ? Date.parse(prev.lastAgentDispatchedAt)
       : 0;
@@ -446,7 +461,13 @@ export function escalateRoutineError(
     if (allowAgent) {
       const agent = dispatchTriageAgent(entry, result, card.slug, opts);
       agentDetail = agent.detail;
+      triageDir = agent.triageDir;
+      triagePid = agent.triagePid;
+      agentDispatched = agent.ok && Boolean(agent.triageDir || /\bdispatched\b/i.test(agent.detail));
       logLine(opts.quiet, `agent: ${agent.detail}`);
+    } else if (opts.dispatchAgent === false) {
+      agentDetail = "agent dispatch disabled";
+      logLine(opts.quiet, `agent: ${agentDetail}`);
     } else {
       agentDetail = `cooldown (${cooldown}ms) since ${prev?.lastAgentDispatchedAt ?? "never"}`;
       logLine(opts.quiet, `agent: ${agentDetail}`);
@@ -458,13 +479,13 @@ export function escalateRoutineError(
       lastCardSlug: card.slug,
       lastExit: result.exitCode,
       lastOutcome: result.outcome.kind,
-      lastAgentDispatchedAt: allowAgent
+      lastAgentDispatchedAt: allowAgent && agentDispatched
         ? new Date(nowMs).toISOString()
         : prev?.lastAgentDispatchedAt,
     };
     writeState(entry.id, st);
 
-    // Also append a one-line breadcrumb on the failed run dir.
+    // Structured breadcrumb on the failed run dir (dashboard escalate chips).
     try {
       writeFileSync(
         join(result.runDir, "error-escalated.json"),
@@ -473,7 +494,11 @@ export function escalateRoutineError(
             at: st.lastEscalatedAt,
             cardSlug: card.slug,
             cardOk: card.ok,
+            cardDetail: card.ok ? null : card.detail,
             agent: agentDetail,
+            agentDispatched,
+            triageDir: triageDir ?? null,
+            triagePid: triagePid ?? null,
           },
           null,
           2,

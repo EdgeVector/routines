@@ -56,6 +56,28 @@ export const PAGE = `<!doctype html>
   .badge.muted { background: var(--chip); color: var(--chip-fg); }
   .badge.noop { background: color-mix(in srgb, var(--aqua) 18%, transparent); color: var(--aqua); }
   .badge.useful { background: color-mix(in srgb, var(--ok) 18%, transparent); color: var(--ok); }
+  .badge.triage { background: color-mix(in srgb, var(--purple) 20%, transparent); color: var(--purple); }
+  .badge.triage-run { background: color-mix(in srgb, var(--purple) 28%, transparent); color: var(--purple); }
+  .badge.human { background: color-mix(in srgb, var(--orange) 22%, transparent); color: var(--orange); }
+  .badge.card-fail { background: color-mix(in srgb, var(--bad) 14%, transparent); color: var(--bad); }
+  .esc-chips { display: inline-flex; flex-wrap: wrap; gap: 4px; align-items: center; margin-left: 4px; }
+  .esc-panel {
+    margin: 10px 0 0; padding: 12px 14px; border-radius: 9px;
+    border: 1px solid color-mix(in srgb, var(--purple) 35%, var(--line));
+    background: color-mix(in srgb, var(--purple) 8%, var(--panel));
+  }
+  .esc-panel.needs-human {
+    border-color: color-mix(in srgb, var(--orange) 50%, var(--line));
+    background: color-mix(in srgb, var(--orange) 10%, var(--panel));
+  }
+  .esc-panel .esc-label {
+    font-size: 11px; text-transform: uppercase; letter-spacing: .06em;
+    color: var(--purple); font-weight: 700; margin-bottom: 6px;
+  }
+  .esc-panel.needs-human .esc-label { color: var(--orange); }
+  .esc-panel .esc-row { margin: 3px 0; font-size: 12.5px; }
+  .esc-panel .esc-k { color: var(--muted); display: inline-block; min-width: 88px; }
+  .esc-panel .esc-v { word-break: break-word; }
   main { padding: 18px 22px 60px; max-width: 1280px; margin: 0 auto; }
   .wrap { overflow-x: hidden; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); }
   table { border-collapse: collapse; width: 100%; min-width: 0; table-layout: fixed; }
@@ -417,6 +439,103 @@ function outcomeBadge(kind, detail) {
   return '<span class="badge muted">' + esc(kind) + "</span>";
 }
 
+/** Compact chips for error-escalate / triage state on a run row. */
+function escalateChipsHtml(e) {
+  if (!e || !e.escalated) return "";
+  var chips = [];
+  var st = e.triageStatus || "unknown";
+  var stTitle = e.triageDetail || e.agentDetail || st;
+  if (st === "running") {
+    chips.push('<span class="badge triage-run" title="' + esc(stTitle) + '">triage running</span>');
+  } else if (st === "fixed") {
+    chips.push('<span class="badge ok" title="' + esc(stTitle) + '">triage fixed</span>');
+  } else if (st === "card-updated") {
+    chips.push('<span class="badge triage" title="' + esc(stTitle) + '">triage carded</span>');
+  } else if (st === "blocked") {
+    chips.push('<span class="badge warn" title="' + esc(stTitle) + '">triage blocked</span>');
+  } else if (st === "needs-human") {
+    chips.push('<span class="badge human" title="' + esc(stTitle) + '">triage needs human</span>');
+  } else if (st === "cooldown") {
+    chips.push('<span class="badge muted" title="' + esc(stTitle) + '">triage cooldown</span>');
+  } else if (st === "dispatch-failed" || st === "disabled" || st === "not-dispatched") {
+    chips.push('<span class="badge muted" title="' + esc(stTitle) + '">no triage</span>');
+  } else {
+    chips.push('<span class="badge triage" title="' + esc(stTitle) + '">triaged</span>');
+  }
+  if (e.cardOk === false) {
+    chips.push('<span class="badge card-fail" title="' + esc(e.cardDetail || e.cardSlug || "card not filed") + '">card failed</span>');
+  } else if (e.cardSlug) {
+    chips.push('<span class="badge muted" title="board card ' + esc(e.cardSlug) + '">card</span>');
+  }
+  if (e.needsHuman) {
+    chips.push('<span class="badge human" title="' + esc(e.needsHumanReason || "needs human attention") + '">needs human</span>');
+  }
+  return '<span class="esc-chips">' + chips.join("") + "</span>";
+}
+
+function escalatePanelHtml(e) {
+  if (!e || !e.escalated) return "";
+  var cls = "esc-panel" + (e.needsHuman ? " needs-human" : "");
+  var rows = [];
+  rows.push(
+    '<div class="esc-row"><span class="esc-k">Triage</span><span class="esc-v">' +
+    esc(e.triageStatus || "unknown") +
+    (e.triageRunning ? " (live)" : "") +
+    (e.triageDetail ? " — " + esc(e.triageDetail) : "") +
+    "</span></div>"
+  );
+  if (e.cardSlug) {
+    rows.push(
+      '<div class="esc-row"><span class="esc-k">Card</span><span class="esc-v mono">' +
+      esc(e.cardSlug) +
+      (e.cardOk === false
+        ? ' <span class="badge card-fail">not filed</span>'
+        : e.cardOk === true
+          ? ' <span class="badge ok">filed</span>'
+          : "") +
+      (e.cardDetail ? " — " + esc(e.cardDetail) : "") +
+      "</span></div>"
+    );
+  }
+  if (e.needsHuman) {
+    rows.push(
+      '<div class="esc-row"><span class="esc-k">Needs human</span><span class="esc-v">' +
+      esc(e.needsHumanReason || "yes") +
+      "</span></div>"
+    );
+  } else if (e.triageRunning) {
+    rows.push(
+      '<div class="esc-row"><span class="esc-k">Attention</span><span class="esc-v muted">agent working — no human action yet</span></div>'
+    );
+  } else if (e.triageStatus === "fixed" || e.triageStatus === "card-updated") {
+    rows.push(
+      '<div class="esc-row"><span class="esc-k">Attention</span><span class="esc-v">handled by triage</span></div>'
+    );
+  }
+  if (e.triageDir) {
+    rows.push(
+      '<div class="esc-row"><span class="esc-k">Triage dir</span><span class="esc-v mono">' +
+      esc(e.triageDir) +
+      "</span></div>"
+    );
+  }
+  if (e.at) {
+    rows.push(
+      '<div class="esc-row"><span class="esc-k">Escalated</span><span class="esc-v mono">' +
+      esc(e.at) +
+      "</span></div>"
+    );
+  }
+  return (
+    '<div class="' + cls + '">' +
+    '<div class="esc-label">' +
+    (e.needsHuman ? "Escalation — needs human" : "Escalation / triage") +
+    "</div>" +
+    rows.join("") +
+    "</div>"
+  );
+}
+
 function noopRateHtml(r) {
   var clean = (r.outcomeOk || 0) + (r.outcomeNoop || 0);
   var total = clean + (r.outcomeError || 0) + (r.outcomeUnknown || 0);
@@ -504,6 +623,7 @@ function runsListHtml(id) {
       '<div class="runrow" data-act="showrun" data-id="' + esc(id) + '" data-stamp="' + esc(run.stamp) + '">' +
       exitBadge(run.exitCode) +
       outcomeBadge(run.outcome, run.outcomeDetail) +
+      escalateChipsHtml(run.escalate) +
       '<span class="mono">' + esc(run.stamp) + "</span>" +
       '<span class="muted">' + meta + "</span>" +
       "</div>"
@@ -635,6 +755,7 @@ function showRun(id, stamp) {
     var out = (d.stdoutTail || "").trim() || "(no stdout captured)";
     var err = (d.stderrTail || "").trim();
     var html = '<div class="muted mono" style="margin-top:8px">' + esc(d.dir) + "</div>";
+    html += escalatePanelHtml(d.escalate);
     // Prefer a clean "result" panel over the stream-json blob.
     if (d.summary) {
       var srcLabel = d.summarySource ? String(d.summarySource).replace(/_/g, " ") : "extracted";
