@@ -90,7 +90,10 @@ export function shouldEscalate(result: RunResult): boolean {
   if (!enabled()) return false;
   if (isTriageRoutine(result.id)) return false;
 
-  if (result.timedOut) return true;
+  if (result.timedOut) {
+    if (isCompletedTimeout(result)) return false;
+    return true;
+  }
   if (result.exitCode !== null && result.exitCode !== 0) return true;
   if (result.outcome.kind === "error") return true;
   // Spawn failures record exitCode null with stderr "spawn error:"
@@ -99,6 +102,14 @@ export function shouldEscalate(result: RunResult): boolean {
     if (result.outcome.kind === "unknown" && result.durationMs < 2_000) return true;
   }
   return false;
+}
+
+function isCompletedTimeout(result: RunResult): boolean {
+  return (
+    result.exitCode === 0 &&
+    (result.outcome.kind === "ok" || result.outcome.kind === "noop") &&
+    (result.outcome.source === "heartbeat" || result.outcome.source === "routine_result")
+  );
 }
 
 function defaultRepo(routineId: string): string {
