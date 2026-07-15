@@ -16,6 +16,7 @@ export type OutcomeKind = "ok" | "noop" | "error" | "unknown";
 export type OutcomeSource =
   | "routine_result" // explicit ROUTINE_RESULT trailer
   | "heartbeat" // ok|noop|error line / append-heartbeat --line
+  | "safe_skip" // known successful skip transcript from a bounded maintenance routine
   | "exit" // inferred from non-zero exit / timeout only
   | "none";
 
@@ -254,6 +255,9 @@ export function parseOutcome(
     }
   }
 
+  const safeSkip = parseKnownSafeSkip(routineId, text, opts);
+  if (safeSkip) return safeSkip;
+
   // Exit-based fallback — only for hard failures. Exit 0 alone is unknown
   // (could be useful or noop; we refuse to guess).
   if (opts.timedOut) {
@@ -268,6 +272,32 @@ export function parseOutcome(
   }
 
   return { kind: "unknown", detail: null, source: "none" };
+}
+
+function parseKnownSafeSkip(
+  routineId: string,
+  text: string,
+  opts: { exitCode?: number | null; timedOut?: boolean },
+): RunOutcome | null {
+  if (routineId !== "codex-stale-agent-memory-cleanup") return null;
+  if (opts.timedOut) return null;
+  if (opts.exitCode !== undefined && opts.exitCode !== null && opts.exitCode !== 0) return null;
+
+  const lower = text.toLowerCase();
+  if (!lower.includes("cleanup pass completed")) return null;
+  if (!lower.includes("terminated pids/processes: none")) return null;
+  if (
+    !lower.includes("process enumeration was blocked") &&
+    !lower.includes("cannot get process list")
+  ) {
+    return null;
+  }
+
+  return {
+    kind: "noop",
+    detail: "process-enumeration-blocked terminated=0",
+    source: "safe_skip",
+  };
 }
 
 function isFalsePositiveName(name: string): boolean {
@@ -359,6 +389,7 @@ export function outcomeFromMeta(meta: Record<string, unknown>): RunOutcome {
   const source: OutcomeSource =
     sourceRaw === "routine_result" ||
     sourceRaw === "heartbeat" ||
+    sourceRaw === "safe_skip" ||
     sourceRaw === "exit" ||
     sourceRaw === "none"
       ? sourceRaw
