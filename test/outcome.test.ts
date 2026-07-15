@@ -140,6 +140,32 @@ appended heartbeat to routine-heartbeats
     expect(o.kind).toBe("ok");
     expect(o.detail).toContain("closed-review-1");
   });
+
+  test("classifies stale-agent cleanup blocked enumeration as safe noop", () => {
+    const text = `
+Cleanup pass completed.
+
+Terminated PIDs/processes: none.
+
+Skipped: all possible Codex agents, because process enumeration was blocked by sandbox/system policy. \`ps\` returned \`operation not permitted\`; \`pgrep -afil codex\` returned \`Cannot get process list\` / \`sysmond service not found\`.
+`;
+    const o = parseOutcome("codex-stale-agent-memory-cleanup", text, { exitCode: 0 });
+    expect(o.kind).toBe("noop");
+    expect(o.source).toBe("safe_skip");
+    expect(o.detail).toBe("process-enumeration-blocked terminated=0");
+  });
+
+  test("does not mask failed stale-agent cleanup exits as safe noop", () => {
+    const text = `
+Cleanup pass completed.
+Terminated PIDs/processes: none.
+Process enumeration was blocked by sandbox/system policy.
+`;
+    const o = parseOutcome("codex-stale-agent-memory-cleanup", text, { exitCode: 2 });
+    expect(o.kind).toBe("error");
+    expect(o.source).toBe("exit");
+    expect(o.detail).toBe("exit 2");
+  });
 });
 
 describe("aggregateOutcomes", () => {
