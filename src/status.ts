@@ -81,15 +81,17 @@ export function collectStatus(now: Date = new Date()): StatusSnapshot {
       })),
     );
     const latest = recent[0];
-    const lastOutcome: OutcomeKind | null =
+    const stateOutcome: OutcomeKind | null =
       st.lastOutcome === "ok" ||
       st.lastOutcome === "noop" ||
       st.lastOutcome === "error" ||
       st.lastOutcome === "unknown"
         ? st.lastOutcome
-        : (latest?.outcome ?? null);
+        : null;
+    const lastOutcome: OutcomeKind | null =
+      latest?.outcome ?? stateOutcome;
     const lastOutcomeDetail =
-      st.lastOutcomeDetail ?? latest?.outcomeDetail ?? null;
+      latest?.outcomeDetail ?? st.lastOutcomeDetail ?? null;
 
     return {
       id: e.id,
