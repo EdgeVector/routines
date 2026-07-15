@@ -42,6 +42,58 @@ export interface LastDbPublisherClient {
   mutate(opts: { schemaHash: string; keyHash: string; fields: FieldMap; mutationType: "create" | "update" }): Promise<void>;
 }
 
+export interface LastDbDeliveryClient {
+  stageDelivery(request: DeliveryStageRequest): Promise<DeliveryStageResult>;
+  approveDelivery(deliveryId: string): Promise<DeliveryApproveResult>;
+}
+
+export interface DeliveryRecipient {
+  recipientPubkey: string;
+  messagingPublicKey: string;
+  messagingPseudonym: string;
+  recipientDisplayName?: string;
+}
+
+export interface DeliverStatusOptions extends PublishStatusOptions {
+  recipient: DeliveryRecipient;
+  maxRecords?: number;
+  approve?: boolean;
+  deliveryClient?: LastDbDeliveryClient;
+}
+
+export interface DeliverStatusResult extends PublishStatusResult {
+  deliveryRequest: DeliveryStageRequest;
+  staged: DeliveryStageResult | null;
+  approved: DeliveryApproveResult | null;
+}
+
+export interface DeliveryStageRequest {
+  recipient_pubkey: string;
+  recipient_display_name?: string;
+  messaging_public_key: string;
+  messaging_pseudonym: string;
+  mode: "snapshot";
+  max_records: number;
+  legs: Array<{
+    schema_name: string;
+    fields: string[];
+    hash_keys?: string[];
+  }>;
+}
+
+export interface DeliveryStageResult {
+  deliveryId: string;
+  recordCount: number;
+  fields: string[];
+  note: string;
+}
+
+export interface DeliveryApproveResult {
+  deliveryId: string;
+  shared: number;
+  messageType: string;
+}
+
 type SchemaKey = "snapshot" | "status" | "runSummary";
 type FieldType = "String" | { Array: "String" };
 
@@ -176,6 +228,51 @@ export async function publishFleetStatus(options: PublishStatusOptions = {}): Pr
   };
 }
 
+export async function deliverFleetStatus(options: DeliverStatusOptions): Promise<DeliverStatusResult> {
+  const publication = await publishFleetStatus(options);
+  const deliveryRequest = buildDeliveryStageRequest({
+    schemaHashes: publication.schemaHashes,
+    recipient: options.recipient,
+    maxRecords: options.maxRecords,
+  });
+
+  if (options.dryRun) {
+    return { ...publication, deliveryRequest, staged: null, approved: null };
+  }
+
+  const client = options.deliveryClient ?? newLastDbDeliveryClient();
+  const staged = await client.stageDelivery(deliveryRequest);
+  const approved = options.approve ? await client.approveDelivery(staged.deliveryId) : null;
+  return { ...publication, deliveryRequest, staged, approved };
+}
+
+export function buildDeliveryStageRequest(opts: {
+  schemaHashes: Record<SchemaKey, string>;
+  recipient: DeliveryRecipient;
+  maxRecords?: number;
+}): DeliveryStageRequest {
+  const maxRecords = positiveInt(opts.maxRecords, 20);
+  return {
+    recipient_pubkey: opts.recipient.recipientPubkey,
+    ...(opts.recipient.recipientDisplayName ? { recipient_display_name: opts.recipient.recipientDisplayName } : {}),
+    messaging_public_key: opts.recipient.messagingPublicKey,
+    messaging_pseudonym: opts.recipient.messagingPseudonym,
+    mode: "snapshot",
+    max_records: maxRecords,
+    legs: [
+      {
+        schema_name: opts.schemaHashes.snapshot,
+        fields: [...SNAPSHOT_FIELDS],
+        hash_keys: ["fleet-latest"],
+      },
+      {
+        schema_name: opts.schemaHashes.status,
+        fields: [...STATUS_FIELDS],
+      },
+    ],
+  };
+}
+
 async function declareSchemas(client: LastDbPublisherClient): Promise<Record<SchemaKey, string>> {
   await client.autoIdentity();
   const out = {} as Record<SchemaKey, string>;
@@ -303,11 +400,84 @@ export class LastDbPublishError extends Error {
 type FetchInit = RequestInit & { unix?: string };
 
 export function newLastDbPublisherClient(opts: { socketPath?: string; nodeUrl?: string } = {}): LastDbPublisherClient {
-  const socketPath = resolveSocketPath(opts.socketPath);
-  const nodeUrl = (opts.nodeUrl ?? process.env.ROUTINES_LASTDB_NODE_URL ?? "http://localhost:9001").replace(/\/+$/, "");
+  const callJson = newLastDbJsonCaller(opts);
   let userHash = "";
 
-  async function callJson(method: "GET" | "POST", path: string, body?: unknown): Promise<unknown> {
+  return {
+    async autoIdentity() {
+      const body = await callJson("GET", "/api/system/auto-identity", undefined, userHash);
+      const hash = objectString(body, "user_hash");
+      if (!hash) throw new LastDbPublishError("auto_identity_bad_response", "LastDB auto-identity returned no user_hash.");
+      userHash = hash;
+      return { userHash };
+    },
+    async declareAppSchema(appId, schemaDef) {
+      const body = await callJson("POST", "/api/apps/declare-schema", { app_id: appId, schema: schemaDef }, userHash);
+      const canonical = objectString(body, "canonical") || objectString((body as Record<string, unknown>)?.data, "canonical");
+      const schemaName = objectString(body, "schema") || `${appId}/${schemaDef.name}`;
+      if (!canonical) {
+        throw new LastDbPublishError("schema_declare_bad_response", `LastDB returned no canonical hash for ${appId}/${schemaDef.name}.`);
+      }
+      return { canonical, schemaName };
+    },
+    async queryByKey({ schemaHash, keyHash, fields }) {
+      const body = await callJson("POST", "/api/query", {
+        schema_name: schemaHash,
+        fields,
+        filter: { HashKey: keyHash },
+        limit: 1,
+        offset: 0,
+      }, userHash);
+      const rows = queryRows(body);
+      return rows.find((row) => row.key.hash === keyHash)?.fields ?? null;
+    },
+    async mutate({ schemaHash, keyHash, fields, mutationType }) {
+      await callJson("POST", "/api/mutation", {
+        type: "mutation",
+        schema: schemaHash,
+        fields_and_values: fields,
+        key_value: { hash: keyHash, range: null },
+        mutation_type: mutationType,
+      }, userHash);
+    },
+  };
+}
+
+export function newLastDbDeliveryClient(opts: { socketPath?: string; nodeUrl?: string } = {}): LastDbDeliveryClient {
+  const callJson = newLastDbJsonCaller(opts);
+  return {
+    async stageDelivery(request) {
+      const body = await callJson("POST", "/api/sharing/deliver", request);
+      const data = dataObject(body);
+      const delivery = dataObject(data.delivery);
+      const preview = dataObject(delivery.preview);
+      const deliveryId = objectString(delivery, "delivery_id");
+      if (!deliveryId) {
+        throw new LastDbPublishError("delivery_stage_bad_response", "LastDB deliver stage returned no delivery_id.");
+      }
+      return {
+        deliveryId,
+        recordCount: objectNumber(preview, "record_count"),
+        fields: objectStringArray(preview, "fields"),
+        note: objectString(data, "note"),
+      };
+    },
+    async approveDelivery(deliveryId) {
+      const body = await callJson("POST", `/api/sharing/deliveries/${encodeURIComponent(deliveryId)}/approve`);
+      const data = dataObject(body);
+      return {
+        deliveryId: objectString(data, "delivery_id") || deliveryId,
+        shared: objectNumber(data, "shared"),
+        messageType: objectString(data, "message_type"),
+      };
+    },
+  };
+}
+
+function newLastDbJsonCaller(opts: { socketPath?: string; nodeUrl?: string } = {}) {
+  const socketPath = resolveSocketPath(opts.socketPath);
+  const nodeUrl = (opts.nodeUrl ?? process.env.ROUTINES_LASTDB_NODE_URL ?? "http://localhost:9001").replace(/\/+$/, "");
+  return async function callJson(method: "GET" | "POST", path: string, body?: unknown, userHash = ""): Promise<unknown> {
     const headers: Record<string, string> = {};
     if (userHash) headers["X-User-Hash"] = userHash;
     let requestBody: string | undefined;
@@ -336,45 +506,6 @@ export function newLastDbPublisherClient(opts: { socketPath?: string; nodeUrl?: 
       throw new LastDbPublishError(`lastdb_http_${res.status}`, `LastDB ${method} ${path} returned ${res.status}: ${messageFor(parsed)}`);
     }
     return parsed;
-  }
-
-  return {
-    async autoIdentity() {
-      const body = await callJson("GET", "/api/system/auto-identity");
-      const hash = objectString(body, "user_hash");
-      if (!hash) throw new LastDbPublishError("auto_identity_bad_response", "LastDB auto-identity returned no user_hash.");
-      userHash = hash;
-      return { userHash };
-    },
-    async declareAppSchema(appId, schemaDef) {
-      const body = await callJson("POST", "/api/apps/declare-schema", { app_id: appId, schema: schemaDef });
-      const canonical = objectString(body, "canonical") || objectString((body as Record<string, unknown>)?.data, "canonical");
-      const schemaName = objectString(body, "schema") || `${appId}/${schemaDef.name}`;
-      if (!canonical) {
-        throw new LastDbPublishError("schema_declare_bad_response", `LastDB returned no canonical hash for ${appId}/${schemaDef.name}.`);
-      }
-      return { canonical, schemaName };
-    },
-    async queryByKey({ schemaHash, keyHash, fields }) {
-      const body = await callJson("POST", "/api/query", {
-        schema_name: schemaHash,
-        fields,
-        filter: { HashKey: keyHash },
-        limit: 1,
-        offset: 0,
-      });
-      const rows = queryRows(body);
-      return rows.find((row) => row.key.hash === keyHash)?.fields ?? null;
-    },
-    async mutate({ schemaHash, keyHash, fields, mutationType }) {
-      await callJson("POST", "/api/mutation", {
-        type: "mutation",
-        schema: schemaHash,
-        fields_and_values: fields,
-        key_value: { hash: keyHash, range: null },
-        mutation_type: mutationType,
-      });
-    },
   };
 }
 
@@ -416,6 +547,25 @@ function objectString(value: unknown, key: string): string {
   if (!value || typeof value !== "object" || Array.isArray(value)) return "";
   const raw = (value as Record<string, unknown>)[key];
   return typeof raw === "string" ? raw : "";
+}
+
+function objectNumber(value: unknown, key: string): number {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return 0;
+  const raw = (value as Record<string, unknown>)[key];
+  return typeof raw === "number" && Number.isFinite(raw) ? raw : 0;
+}
+
+function objectStringArray(value: unknown, key: string): string[] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+  const raw = (value as Record<string, unknown>)[key];
+  return Array.isArray(raw) ? raw.filter((item): item is string => typeof item === "string") : [];
+}
+
+function dataObject(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const obj = value as Record<string, unknown>;
+  const nested = obj.data;
+  return nested && typeof nested === "object" && !Array.isArray(nested) ? (nested as Record<string, unknown>) : obj;
 }
 
 function messageFor(body: unknown): string {

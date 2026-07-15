@@ -54,6 +54,7 @@ routines route <id> --harness codex --model gpt-5.5
 routines route <id> --harness grok --model grok-4.5
 routines logs <id>            # recent runs (--path, --tail, --json)
 routines publish-status       # publish slim fleet status + recent run summaries to LastDB
+routines deliver-status       # publish + stage/admin-approve a fleet-status delivery
 routines import               # import the legacy schedulers into the registry (dry-run)
 routines web                  # serve the local dashboard (localhost); --port, --host
 routines doctor               # validate registry + environment (+ configurations project-config)
@@ -105,6 +106,35 @@ routines publish-status --json
 routines publish-status --runs 5 --tail-bytes 2048
 routines publish-status --dry-run --json
 ```
+
+## Admin fleet status deliver
+
+`routines deliver-status` dogfoods LastDB Mini deliver for the routines fleet
+slice. It first runs the same publisher as `routines publish-status`, then
+stages a `lastdb.slice.v1` delivery with two legs:
+
+- `routines/RoutineFleetSnapshot` key `fleet-latest`
+- a capped `routines/RoutineStatus` sample (`--max-records`, default 20)
+
+Recipient keys are operational inputs, not repository config. Pass them as
+flags or environment variables; do not commit them:
+
+```sh
+export ROUTINES_ADMIN_RECIPIENT_PUBKEY=...
+export ROUTINES_ADMIN_MESSAGING_PUBLIC_KEY=...
+export ROUTINES_ADMIN_MESSAGING_PSEUDONYM=...
+
+routines deliver-status --dry-run --json
+routines deliver-status --max-records 20
+routines deliver-status --approve --max-records 20
+```
+
+Without `--approve`, the command stages only and prints the pending
+`delivery_id`; with `--approve`, Mini seals and sends a `delivery_slice` through
+Exemem messaging and prints non-secret evidence (`delivery_id`, shared count,
+message type, schema hashes). Mailbox polling/decryption is intentionally left
+to the receiving admin consumer tooling because the send path and read path are
+owned by different apps.
 
 ## Daemon
 

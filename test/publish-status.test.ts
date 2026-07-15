@@ -4,8 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
+  buildDeliveryStageRequest,
   buildFleetPublication,
+  deliverFleetStatus,
   publishFleetStatus,
+  type LastDbDeliveryClient,
   type LastDbPublisherClient,
 } from "../src/publish-status.ts";
 
@@ -109,6 +112,65 @@ test("publishFleetStatus declares schemas and upserts snapshot, rows, and run su
   ]);
 });
 
+test("buildDeliveryStageRequest targets snapshot plus capped routine status rows", () => {
+  const req = buildDeliveryStageRequest({
+    schemaHashes: {
+      snapshot: "hash-RoutineFleetSnapshot",
+      status: "hash-RoutineStatus",
+      runSummary: "hash-RoutineRunSummary",
+    },
+    recipient: {
+      recipientPubkey: "recipient-ed25519",
+      messagingPublicKey: "messaging-x25519",
+      messagingPseudonym: "00000000-0000-0000-0000-000000000001",
+      recipientDisplayName: "admin",
+    },
+    maxRecords: 7,
+  });
+
+  expect(req).toMatchObject({
+    recipient_pubkey: "recipient-ed25519",
+    recipient_display_name: "admin",
+    messaging_public_key: "messaging-x25519",
+    messaging_pseudonym: "00000000-0000-0000-0000-000000000001",
+    mode: "snapshot",
+    max_records: 7,
+  });
+  expect(req.legs).toHaveLength(2);
+  expect(req.legs[0]).toMatchObject({
+    schema_name: "hash-RoutineFleetSnapshot",
+    hash_keys: ["fleet-latest"],
+  });
+  expect(req.legs[0]!.fields).toContain("schema_hashes_json");
+  expect(req.legs[1]).toMatchObject({ schema_name: "hash-RoutineStatus" });
+  expect(req.legs[1]!.fields).toContain("last_outcome");
+});
+
+test("deliverFleetStatus publishes, stages, and optionally approves", async () => {
+  const publisher = new FakeClient();
+  const delivery = new FakeDeliveryClient();
+  const result = await deliverFleetStatus({
+    client: publisher,
+    deliveryClient: delivery,
+    now: new Date("2026-07-15T02:00:00.000Z"),
+    runLimit: 1,
+    maxRecords: 3,
+    approve: true,
+    recipient: {
+      recipientPubkey: "recipient-ed25519",
+      messagingPublicKey: "messaging-x25519",
+      messagingPseudonym: "00000000-0000-0000-0000-000000000001",
+    },
+  });
+
+  expect(publisher.writes.map((w) => w.schemaHash)).toContain("hash-RoutineStatus");
+  expect(delivery.stagedRequests).toHaveLength(1);
+  expect(delivery.stagedRequests[0]!.max_records).toBe(3);
+  expect(delivery.approvedIds).toEqual(["delivery-1"]);
+  expect(result.staged?.deliveryId).toBe("delivery-1");
+  expect(result.approved?.shared).toBe(2);
+});
+
 class FakeClient implements LastDbPublisherClient {
   declared: string[] = [];
   writes: Array<{ schemaHash: string; keyHash: string; mutationType: "create" | "update" }> = [];
@@ -135,5 +197,29 @@ class FakeClient implements LastDbPublisherClient {
     mutationType: "create" | "update";
   }): Promise<void> {
     this.writes.push(opts);
+  }
+}
+
+class FakeDeliveryClient implements LastDbDeliveryClient {
+  stagedRequests: Array<Parameters<LastDbDeliveryClient["stageDelivery"]>[0]> = [];
+  approvedIds: string[] = [];
+
+  async stageDelivery(request: Parameters<LastDbDeliveryClient["stageDelivery"]>[0]) {
+    this.stagedRequests.push(request);
+    return {
+      deliveryId: "delivery-1",
+      recordCount: 2,
+      fields: ["id", "status"],
+      note: "staged only",
+    };
+  }
+
+  async approveDelivery(deliveryId: string) {
+    this.approvedIds.push(deliveryId);
+    return {
+      deliveryId,
+      shared: 2,
+      messageType: "delivery_slice",
+    };
   }
 }
