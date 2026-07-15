@@ -33,6 +33,14 @@ export interface RunDetail extends RunSummary {
   dir: string;
   stdoutTail: string;
   stderrTail: string;
+  /**
+   * Best-effort human summary pulled out of harness noise (Claude stream-json
+   * final result, ROUTINE_RESULT trailer, RESULT: line). Empty when we only
+   * have raw logs. Dashboard shows this above the blob.
+   */
+  summary: string | null;
+  /** Where summary came from (for UI badges). */
+  summarySource: "routine_result" | "claude_result" | "result_colon" | "outcome_detail" | null;
 }
 
 function runDirFor(id: string): string {
@@ -98,12 +106,24 @@ function summarize(id: string, stamp: string, runDir: string, meta: Record<strin
   };
 }
 
+/** True when a run dir never finished (e.g. web/daemon restart mid-run). */
+function isCompleteRunDir(runDir: string, meta: Record<string, unknown>): boolean {
+  if (!existsSync(join(runDir, "meta.json"))) return false;
+  // meta must have an exitCode field (null is ok for spawn fail) OR finishedAt
+  if (typeof meta.finishedAt === "string") return true;
+  if ("exitCode" in meta) return true;
+  return false;
+}
+
 /** List a routine's runs, most recent first (run-dir stamps sort chronologically). */
 export function listRuns(id: string, limit = 20): RunSummary[] {
   const dir = runDirFor(id);
   if (!existsSync(dir)) return [];
   const stamps = readdirSync(dir)
-    .filter((s) => existsSync(join(dir, s, "meta.json")) || existsSync(join(dir, s)))
+    .filter((s) => {
+      const rd = join(dir, s);
+      return isCompleteRunDir(rd, readMeta(rd));
+    })
     .sort()
     .reverse()
     .slice(0, limit);
@@ -136,15 +156,102 @@ export function readRun(id: string, stamp?: string, tailBytes = 8000): RunDetail
   const runDir = join(dir, target!);
   if (!existsSync(runDir)) return null;
   const meta = readMeta(runDir);
-  const stdout = readTail(join(runDir, "stdout.log"), tailBytes);
+  // Prefer fuller stdout for summary extraction (result is usually near the end).
+  // Still cap so huge logs don't blow memory.
+  const fullStdout = readTail(join(runDir, "stdout.log"), Math.max(tailBytes, 200_000));
+  const stdout =
+    fullStdout.length <= tailBytes ? fullStdout : fullStdout.slice(fullStdout.length - tailBytes);
   const stderr = readTail(join(runDir, "stderr.log"), tailBytes);
+  const summaryRow = summarize(id, target!, runDir, meta);
+  const summary = extractRunSummary(fullStdout, summaryRow);
   return {
-    ...summarize(id, target!, runDir, meta),
+    ...summaryRow,
     id,
     dir: runDir,
     stdoutTail: stdout,
     stderrTail: stderr,
+    summary: summary.text,
+    summarySource: summary.source,
   };
+}
+
+/**
+ * Pull a human-readable "what happened" string out of harness output.
+ * Best-effort, never throws. Prefer machine trailers, then Claude final result.
+ */
+export function extractRunSummary(
+  text: string,
+  outcome?: RunSummary | null,
+): { text: string | null; source: RunDetail["summarySource"] } {
+  if (!text && outcome?.outcomeDetail) {
+    return { text: outcome.outcomeDetail, source: "outcome_detail" };
+  }
+  if (!text) return { text: null, source: null };
+
+  // 1) ROUTINE_RESULT outcome=ok detail=...
+  const rr = [...text.matchAll(/ROUTINE_RESULT\s+outcome\s*=\s*(ok|noop|error)\b([^\n\r]*)/gi)];
+  if (rr.length > 0) {
+    const m = rr[rr.length - 1]!;
+    const kind = m[1]!;
+    const rest = (m[2] ?? "").trim();
+    const detailM = rest.match(/\bdetail\s*=\s*(.+)$/i);
+    const detail = (detailM ? detailM[1]! : rest).trim();
+    const line = detail ? `${kind}: ${detail}` : kind;
+    return { text: clipSummary(line), source: "routine_result" };
+  }
+
+  // 2) Claude stream-json final result envelope
+  // Prefer last {"type":"result",...} with a string "result":"..."
+  let lastClaudeResult: string | null = null;
+  for (const m of text.matchAll(/"type"\s*:\s*"result"[\s\S]{0,8000}?"result"\s*:\s*"((?:\\.|[^"\\])*)"/g)) {
+    lastClaudeResult = m[1] ?? null;
+  }
+  // Also try standalone last "result":"..." near end if type:result matched loosely
+  if (!lastClaudeResult) {
+    const tail = text.slice(Math.max(0, text.length - 30_000));
+    if (/"type"\s*:\s*"result"/.test(tail) && /"subtype"\s*:\s*"success"/.test(tail)) {
+      const m = [...tail.matchAll(/"result"\s*:\s*"((?:\\.|[^"\\])*)"/g)].pop();
+      if (m) lastClaudeResult = m[1] ?? null;
+    }
+  }
+  if (lastClaudeResult) {
+    let decoded = lastClaudeResult;
+    try {
+      decoded = JSON.parse(`"${lastClaudeResult}"`);
+    } catch {
+      decoded = lastClaudeResult
+        .split("\\n")
+        .join("\n")
+        .split("\\t")
+        .join("\t")
+        .split('\\"')
+        .join('"');
+    }
+    decoded = decoded.trim();
+    if (decoded.length > 0) {
+      return { text: clipSummary(decoded, 4000), source: "claude_result" };
+    }
+  }
+
+  // 3) RESULT: ok ...
+  const rc = [...text.matchAll(/\bRESULT:\s*(ok|noop|error)\b([^\n\r]*)/gi)];
+  if (rc.length > 0) {
+    const m = rc[rc.length - 1]!;
+    const line = `${m[1]}${(m[2] ?? "").trim() ? ":" + m[2] : ""}`.trim();
+    return { text: clipSummary(line), source: "result_colon" };
+  }
+
+  // 4) Fall back to classified outcome detail (already cleaned-ish)
+  if (outcome?.outcomeDetail) {
+    return { text: outcome.outcomeDetail, source: "outcome_detail" };
+  }
+  return { text: null, source: null };
+}
+
+function clipSummary(s: string, max = 2000): string {
+  const t = s.trim();
+  if (t.length <= max) return t;
+  return t.slice(0, max - 1) + "…";
 }
 
 function readTail(path: string, n: number): string {

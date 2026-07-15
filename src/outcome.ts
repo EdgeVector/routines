@@ -70,6 +70,9 @@ const ALIAS_TO_CANONICAL: Record<string, string> = {
   "disk-reclaim": "last-stack-disk-reclaim",
   "worktree-cleanup": "last-stack-worktree-cleanup",
   "clean-up-stale-worktrees": "last-stack-worktree-cleanup",
+  "pipeline-health": "last-stack-pipeline-health",
+  "daily-retro": "daily-retro-prevention",
+  "retro-prevention": "daily-retro-prevention",
 };
 
 /** Alternate names that should count as matching `routineId`. */
@@ -102,6 +105,14 @@ function asKind(raw: string): OutcomeKind | null {
 /** Explicit machine trailer (strongest). */
 const ROUTINE_RESULT_RE =
   /ROUTINE_RESULT\s+outcome\s*=\s*(ok|noop|error)\b([^;\n\r]*)/gi;
+
+/**
+ * Compact agent trailer used by some project prompts:
+ *   RESULT: noop reason=DASHBOARD_SKIP ...
+ *   RESULT: ok filed=1
+ */
+const RESULT_COLON_RE =
+  /\bRESULT:\s*(ok|noop|error)\b([^\n\r]*)/gi;
 
 /**
  * Heartbeat-style lines, including:
@@ -155,6 +166,19 @@ export function parseOutcome(
     });
   }
 
+  for (const m of text.matchAll(RESULT_COLON_RE)) {
+    const kind = asKind(m[1]!);
+    if (!kind) continue;
+    const rest = clip(m[2] ?? "");
+    candidates.push({
+      kind,
+      detail: rest || null,
+      source: "routine_result",
+      score: 95,
+      index: m.index ?? 0,
+    });
+  }
+
   for (const m of text.matchAll(APPEND_LINE_RE)) {
     const inner = m[1] ?? "";
     const parsed = parseHeartbeatPhrase(inner, routineId);
@@ -175,14 +199,14 @@ export function parseOutcome(
     // reject common false positives
     if (isFalsePositiveName(name)) continue;
     const detail = clip(m[3] ?? "") || null;
-    const matched = nameMatchesRoutine(name, routineId);
-    // require match OR name looks like a routine slug (contains hyphen)
-    if (!matched && !name.includes("-")) continue;
+    // ONLY accept heartbeats that name THIS routine. Transcripts (esp. retros)
+    // quote other routines' ok/error lines; those must not steal the outcome.
+    if (!nameMatchesRoutine(name, routineId)) continue;
     candidates.push({
       kind,
       detail,
       source: "heartbeat",
-      score: matched ? 80 : 40,
+      score: 80,
       index: m.index ?? 0,
     });
   }
@@ -203,6 +227,31 @@ export function parseOutcome(
       detail: clip(`SMOKE_OK${harness}`),
       source: "heartbeat",
     };
+  }
+
+  // Claude Code stream-json final event (when the agent forgot a heartbeat line).
+  // Last {"type":"result","subtype":"success","is_error":false,...} wins.
+  if (opts.exitCode === 0 || opts.exitCode === undefined) {
+    let lastClaude: { ok: boolean; detail: string | null } | null = null;
+    const re =
+      /"type"\s*:\s*"result"[\s\S]{0,1200}?"subtype"\s*:\s*"(success|error)"[\s\S]{0,400}?"is_error"\s*:\s*(true|false)/g;
+    for (const m of text.matchAll(re)) {
+      const ok = m[1] === "success" && m[2] === "false";
+      lastClaude = { ok, detail: ok ? "claude stream-json success" : "claude stream-json error" };
+    }
+    if (lastClaude?.ok) {
+      // Optional: pull a short prose summary from the last "result":"..." string.
+      const tail = text.slice(Math.max(0, text.length - 12000));
+      const resultM = [...tail.matchAll(/"result"\s*:\s*"((?:\\.|[^"\\]){0,200})"/g)].pop();
+      if (resultM) {
+        try {
+          lastClaude.detail = clip(JSON.parse(`"${resultM[1]}"`));
+        } catch {
+          lastClaude.detail = clip(resultM[1]!.split("\\n").join(" "));
+        }
+      }
+      return { kind: "ok", detail: lastClaude.detail, source: "heartbeat" };
+    }
   }
 
   // Exit-based fallback — only for hard failures. Exit 0 alone is unknown
@@ -263,10 +312,13 @@ function parseHeartbeatPhrase(
   if (!kind) return null;
   const detail = clip(m[3] ?? "") || null;
   const matched = nameMatchesRoutine(name, routineId);
+  // Unmatched names inside --line are still suspicious (wrong copy-paste); only
+  // accept a weak score when the name at least looks like a routine slug.
+  if (!matched && !name.includes("-")) return null;
   return {
     kind,
     detail,
-    score: matched ? 85 : 50,
+    score: matched ? 85 : 45,
   };
 }
 
