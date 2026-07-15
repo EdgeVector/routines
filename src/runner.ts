@@ -67,16 +67,19 @@ export function runRoutine(entry: RoutineEntry, opts: RunOptions = {}): Promise<
     const child = spawn(invocation.bin, invocation.args, {
       cwd,
       env: childEnv,
+      detached: true,
       stdio: [invocation.stdin !== undefined ? "pipe" : "ignore", "pipe", "pipe"],
     });
 
     let timedOut = false;
+    let killTimer: ReturnType<typeof setTimeout> | null = null;
     const timeoutMs = entry.timeoutMin * 60_000;
     const timer = setTimeout(() => {
       timedOut = true;
-      child.kill("SIGTERM");
+      killChildGroup(child, "SIGTERM");
       // Escalate if it ignores SIGTERM.
-      setTimeout(() => child.kill("SIGKILL"), 5_000).unref();
+      killTimer = setTimeout(() => killChildGroup(child, "SIGKILL"), sigkillGraceMs());
+      killTimer.unref();
     }, timeoutMs);
 
     if (invocation.stdin !== undefined) {
@@ -102,11 +105,12 @@ export function runRoutine(entry: RoutineEntry, opts: RunOptions = {}): Promise<
     });
 
     child.on("close", (code, signal) => {
-      finalize(code, signal);
+      setImmediate(() => finalize(code, signal));
     });
 
     function finalize(code: number | null, signal: NodeJS.Signals | null): void {
       clearTimeout(timer);
+      if (killTimer) clearTimeout(killTimer);
       const finishedAt = new Date();
       const stdout = stdoutChunks.join("");
       const stderr = stderrChunks.join("");
@@ -202,6 +206,25 @@ function completedExitCode(
     return 0;
   }
   return rawExitCode;
+}
+
+function killChildGroup(child: ReturnType<typeof spawn>, signal: NodeJS.Signals): void {
+  if (child.pid) {
+    try {
+      process.kill(-child.pid, signal);
+      return;
+    } catch {
+      // Fall through to the direct child as a portability fallback.
+    }
+  }
+  child.kill(signal);
+}
+
+function sigkillGraceMs(): number {
+  const raw = process.env.ROUTINES_SIGKILL_GRACE_MS;
+  if (!raw) return 5_000;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : 5_000;
 }
 
 function tail(s: string, n: number): string {
