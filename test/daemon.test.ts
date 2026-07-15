@@ -198,6 +198,7 @@ describe("daemon evaluateOnce", () => {
     writeRoutine("socket-env", "codex");
 
     const [result] = await evaluateOnce({ once: true, catchupMs: 60_000, log: () => {} });
+    if (!result) throw new Error("expected socket-env routine to dispatch");
     const stdout = readFileSync(join(result.runDir, "stdout.log"), "utf8");
 
     expect(stdout).toContain(`FOLDDB_SOCKET_PATH=${socket}`);
