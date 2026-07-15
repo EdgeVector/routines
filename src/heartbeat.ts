@@ -46,7 +46,7 @@ export function writeHeartbeat(entry: RoutineEntry, result: RunResult): Heartbea
   });
   if (res.error) return { attempted: true, ok: false, line, error: `${bin}: ${res.error.message}` };
   if (typeof res.status === "number" && res.status !== 0) {
-    const detail = res.stderr?.trim() || res.stdout?.trim();
+    const detail = [res.stderr?.trim(), res.stdout?.trim()].filter(Boolean).join("\n");
     return {
       attempted: true,
       ok: false,
