@@ -18,7 +18,7 @@ import {
   type ImportPlan,
 } from "./import.ts";
 import { migrateKanbanIds } from "./kanban-id-migration.ts";
-import { evaluateOnce, startDaemon } from "./daemon.ts";
+import { acquireLock, evaluateOnce, isLocked, releaseLock, startDaemon } from "./daemon.ts";
 import { installDaemon, plistPath, renderPlist, uninstallDaemon } from "./launchd.ts";
 import { loadActiveSituations } from "./situations.ts";
 import { loadAll, loadEntry, resolvePrompt, type RoutineEntry } from "./registry.ts";
@@ -208,12 +208,23 @@ async function cmdRun(rest: string[]): Promise<number> {
     return 2;
   }
   const entry = loadEntry(id);
-  const result = await runRoutine(entry, { quiet: values.quiet === true });
-  console.error(
-    `run ${id}: exit=${result.exitCode} dur=${(result.durationMs / 1000).toFixed(1)}s log=${result.runDir}` +
-      (result.heartbeat.attempted ? ` heartbeat=${result.heartbeat.ok ? "ok" : "FAILED"}` : ""),
-  );
-  return result.exitCode === 0 ? 0 : 1;
+  // Share single-flight with the daemon + dashboard run-now. Without this,
+  // `routines run` can overlap a scheduled fire for the same id (two agents
+  // thrash one card: move to done, then the twin re-claims doing).
+  if (isLocked(entry.id) || !acquireLock(entry.id)) {
+    console.error(`run ${id}: already running (single-flight lock held)`);
+    return 3;
+  }
+  try {
+    const result = await runRoutine(entry, { quiet: values.quiet === true });
+    console.error(
+      `run ${id}: exit=${result.exitCode} dur=${(result.durationMs / 1000).toFixed(1)}s log=${result.runDir}` +
+        (result.heartbeat.attempted ? ` heartbeat=${result.heartbeat.ok ? "ok" : "FAILED"}` : ""),
+    );
+    return result.exitCode === 0 ? 0 : 1;
+  } finally {
+    releaseLock(entry.id);
+  }
 }
 
 function cmdSetStatus(rest: string[], status: "active" | "paused"): number {
