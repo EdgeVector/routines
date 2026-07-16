@@ -143,6 +143,89 @@ exit 0
     expect(existsEscalatedJson(r.runDir)).toBe(true);
   });
 
+  test("retries kanban add failures before recording success", () => {
+    const stubDir = join(home, "bin");
+    mkdirSync(stubDir, { recursive: true });
+    const stub = join(stubDir, "kanban-stub");
+    const countFile = join(stubDir, "count");
+    const bodyPrefix = join(stubDir, "body-");
+    writeFileSync(
+      stub,
+      `#!/usr/bin/env bash
+set -euo pipefail
+if [ "\${1:-}" = "rank" ]; then
+  exit 0
+fi
+count_file=${JSON.stringify(countFile)}
+body_prefix=${JSON.stringify(bodyPrefix)}
+n=0
+if [ -f "$count_file" ]; then
+  n=$(cat "$count_file")
+fi
+n=$((n + 1))
+echo "$n" > "$count_file"
+cat > "\${body_prefix}\${n}.md"
+if [ "$n" -lt 3 ]; then
+  echo "temporary 503 attempt $n" >&2
+  exit 1
+fi
+echo "created card $2"
+exit 0
+`,
+    );
+    spawnSyncchmod(stub);
+
+    const r = result({ exitCode: 1 });
+    const out = escalateRoutineError(entry(), r, {
+      kanbanBin: stub,
+      dispatchAgent: false,
+      quiet: true,
+      nowMs: 1_700_000_000_000,
+      cardRetryDelayMs: 0,
+    });
+
+    expect(out.escalated).toBe(true);
+    expect(readFileSync(countFile, "utf8").trim()).toBe("3");
+    const breadcrumb = readEscalatedJson(r.runDir);
+    expect(breadcrumb.cardOk).toBe(true);
+    expect(breadcrumb.cardDetail).toBeNull();
+    expect(readFileSync(join(stubDir, "body-1.md"), "utf8")).toContain(
+      "Root-cause and fix why scheduled routine",
+    );
+    expect(readFileSync(join(stubDir, "body-3.md"), "utf8")).toContain(
+      "Root-cause and fix why scheduled routine",
+    );
+  });
+
+  test("records final kanban stderr when all card retries fail", () => {
+    const stubDir = join(home, "bin");
+    mkdirSync(stubDir, { recursive: true });
+    const stub = join(stubDir, "kanban-stub");
+    writeFileSync(
+      stub,
+      `#!/usr/bin/env bash
+echo "temporary 503 from attempt" >&2
+exit 1
+`,
+    );
+    spawnSyncchmod(stub);
+
+    const r = result({ exitCode: 1 });
+    const out = escalateRoutineError(entry(), r, {
+      kanbanBin: stub,
+      dispatchAgent: false,
+      quiet: true,
+      nowMs: 1_700_000_000_000,
+      cardRetryDelayMs: 0,
+    });
+
+    expect(out.escalated).toBe(true);
+    const breadcrumb = readEscalatedJson(r.runDir);
+    expect(breadcrumb.cardOk).toBe(false);
+    expect(breadcrumb.cardDetail ?? "").toContain("kanban add failed after 3 attempts");
+    expect(breadcrumb.cardDetail ?? "").toContain("temporary 503 from attempt");
+  });
+
   test("rate-limits agent dispatch", () => {
     const stubDir = join(home, "bin");
     mkdirSync(stubDir, { recursive: true });
@@ -186,4 +269,11 @@ function existsEscalatedJson(runDir: string): boolean {
   } catch {
     return false;
   }
+}
+
+function readEscalatedJson(runDir: string): {
+  cardOk: boolean | null;
+  cardDetail: string | null;
+} {
+  return JSON.parse(readFileSync(join(runDir, "error-escalated.json"), "utf8"));
 }

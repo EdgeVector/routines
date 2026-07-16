@@ -35,6 +35,8 @@ import type { RunResult } from "./runner.ts";
 const TRIAGE_ID = "routine-error-triage";
 /** Min gap between triage agent dispatches for the same routine id. */
 const DEFAULT_AGENT_COOLDOWN_MS = 30 * 60 * 1000;
+const CARD_FILE_ATTEMPTS = 3;
+const CARD_RETRY_DELAY_MS = 250;
 /** Card upsert always; agent spawn is rate-limited. */
 const STATE_DIR_NAME = "error-escalate";
 
@@ -55,6 +57,8 @@ export interface EscalateOptions {
   dispatchAgent?: boolean;
   /** Override kanban binary (tests). */
   kanbanBin?: string;
+  /** Override retry delay for tests. */
+  cardRetryDelayMs?: number;
   /** Suppress console noise. */
   quiet?: boolean;
 }
@@ -213,6 +217,19 @@ Auto-filed ${day} by routinesd error-escalate.
 `;
 }
 
+function sleepSync(ms: number): void {
+  if (ms <= 0) return;
+  const arr = new Int32Array(new SharedArrayBuffer(4));
+  Atomics.wait(arr, 0, 0, ms);
+}
+
+function kanbanFailureDetail(res: ReturnType<typeof spawnSync>): string {
+  if (res.error) return `kanban spawn: ${res.error.message}`;
+  const status =
+    res.status === null ? `signal ${res.signal ?? "unknown"}` : `exit ${res.status}`;
+  return `kanban ${status}: ${(res.stderr || res.stdout || "").slice(0, 400)}`;
+}
+
 function fileP0Card(
   entry: RoutineEntry,
   result: RunResult,
@@ -250,31 +267,47 @@ function fileP0Card(
     "north-star-lastgit-native-forge",
   ];
 
-  const res = spawnSync(kanban, args, {
-    input: body,
-    encoding: "utf8",
-    timeout: 60_000,
-    env: process.env,
-  });
-  if (res.error) {
-    return { ok: false, slug, detail: `kanban spawn: ${res.error.message}` };
-  }
-  if (res.status !== 0) {
-    return {
-      ok: false,
-      slug,
-      detail: `kanban exit ${res.status}: ${(res.stderr || res.stdout || "").slice(0, 400)}`,
-    };
+  let lastFailure = "unknown failure";
+  for (let attempt = 1; attempt <= CARD_FILE_ATTEMPTS; attempt += 1) {
+    const res = spawnSync(kanban, args, {
+      input: body,
+      encoding: "utf8",
+      timeout: 60_000,
+      env: process.env,
+    });
+    if (!res.error && res.status === 0) {
+      // Best-effort rank so pickup drains P0 first.
+      spawnSync(kanban, ["rank", "--column", "todo"], {
+        encoding: "utf8",
+        timeout: 60_000,
+        env: process.env,
+      });
+
+      const detail = (res.stdout || "").trim() || "card upserted";
+      return {
+        ok: true,
+        slug,
+        detail: attempt === 1 ? detail : `${detail} after ${attempt} attempts`,
+      };
+    }
+
+    lastFailure = kanbanFailureDetail(res);
+    if (attempt < CARD_FILE_ATTEMPTS) {
+      logLine(
+        opts.quiet,
+        `card ${slug} attempt ${attempt}/${CARD_FILE_ATTEMPTS} failed: ${lastFailure}; retrying`,
+      );
+      const baseDelay = opts.cardRetryDelayMs ?? CARD_RETRY_DELAY_MS;
+      const jitter = opts.nowMs === undefined ? Math.floor(Math.random() * 100) : 0;
+      sleepSync(baseDelay * attempt + jitter);
+    }
   }
 
-  // Best-effort rank so pickup drains P0 first.
-  spawnSync(kanban, ["rank", "--column", "todo"], {
-    encoding: "utf8",
-    timeout: 60_000,
-    env: process.env,
-  });
-
-  return { ok: true, slug, detail: (res.stdout || "").trim() || "card upserted" };
+  return {
+    ok: false,
+    slug,
+    detail: `kanban add failed after ${CARD_FILE_ATTEMPTS} attempts; last: ${lastFailure}`,
+  };
 }
 
 function buildTriagePrompt(entry: RoutineEntry, result: RunResult, cardSlugName: string): string {
