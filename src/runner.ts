@@ -5,14 +5,15 @@
 // Per-run logs land at $ROUTINES_HOME/runs/<id>/<ts>/ containing:
 //   meta.json  — prompt-elided invocation, harness/model, exit code, timing
 //   prompt.txt — the exact prompt dispatched
-//   stdout.log / stderr.log — captured streams
+//   stdout.log / stderr.log — captured streams (appended as data arrives)
 // This is the durable evidence the card's VERIFY asks for.
 
 import { spawn } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { buildInvocation, type HarnessInvocation } from "./adapters.ts";
+import { setLockOwnerPid } from "./daemon.ts";
 import type { RoutineEntry } from "./registry.ts";
 import { buildRoutineAttributionEnv, resolveDispatchPrompt } from "./prompt.ts";
 import { runsDir } from "./paths.ts";
@@ -35,6 +36,8 @@ export interface RunResult {
   durationMs: number;
   heartbeat: HeartbeatOutcome;
   outcome: RunOutcome;
+  /** Live harness process id while running / last known after exit. */
+  harnessPid: number | null;
 }
 
 // Timestamp safe for a directory name (no colons): 2026-07-12T21-05-00-123Z.
@@ -47,6 +50,47 @@ export interface RunOptions {
   quiet?: boolean;
 }
 
+/** Write early meta.json so operators can inspect a live run before exit. */
+export function writeEarlyMeta(args: {
+  runDir: string;
+  id: string;
+  harness: string;
+  model: string;
+  effort: string | null | undefined;
+  cwd: string;
+  command: string;
+  startedAt: string;
+  harnessPid: number | null;
+  status?: "running" | "spawn_failed";
+}): void {
+  writeFileSync(
+    join(args.runDir, "meta.json"),
+    JSON.stringify(
+      {
+        id: args.id,
+        harness: args.harness,
+        model: args.model,
+        effort: args.effort ?? null,
+        cwd: args.cwd,
+        command: args.command,
+        startedAt: args.startedAt,
+        harnessPid: args.harnessPid,
+        daemonPid: process.pid,
+        status: args.status ?? "running",
+        exitCode: null,
+        finishedAt: null,
+      },
+      null,
+      2,
+    ) + "\n",
+  );
+}
+
+/** Append a chunk to a run-dir log file (create on first write). */
+export function appendRunLog(runDir: string, name: "stdout.log" | "stderr.log", chunk: string): void {
+  appendFileSync(join(runDir, name), chunk);
+}
+
 export function runRoutine(entry: RoutineEntry, opts: RunOptions = {}): Promise<RunResult> {
   const startedAt = new Date();
   const runDir = join(runsDir(), entry.id, runStamp(startedAt));
@@ -55,6 +99,9 @@ export function runRoutine(entry: RoutineEntry, opts: RunOptions = {}): Promise<
   const prompt = resolveDispatchPrompt(entry, { runDir });
   const invocation = buildInvocation(entry, prompt);
   writeFileSync(join(runDir, "prompt.txt"), prompt);
+  // Empty logs so mid-flight `tail -f` works even before first chunk.
+  writeFileSync(join(runDir, "stdout.log"), "");
+  writeFileSync(join(runDir, "stderr.log"), "");
 
   const project = loadProjectConfig();
   const cwd = resolveRoutineCwd(entry.cwd, project);
@@ -76,6 +123,25 @@ export function runRoutine(entry: RoutineEntry, opts: RunOptions = {}): Promise<
       stdio: [invocation.stdin !== undefined ? "pipe" : "ignore", "pipe", "pipe"],
     });
 
+    const harnessPid = child.pid ?? null;
+    // Single-flight lock should identify the live harness worker, not only the
+    // long-lived daemon parent, so operators / isLocked can see the real owner.
+    if (harnessPid != null) {
+      setLockOwnerPid(entry.id, harnessPid);
+    }
+
+    writeEarlyMeta({
+      runDir,
+      id: entry.id,
+      harness: entry.harness,
+      model: entry.model,
+      effort: entry.effort,
+      cwd: entry.cwd,
+      command: invocation.display,
+      startedAt: startedAt.toISOString(),
+      harnessPid,
+    });
+
     let timedOut = false;
     let killTimer: ReturnType<typeof setTimeout> | null = null;
     const timeoutMs = entry.timeoutMin * 60_000;
@@ -95,17 +161,33 @@ export function runRoutine(entry: RoutineEntry, opts: RunOptions = {}): Promise<
     child.stdout?.on("data", (d: Buffer) => {
       const s = d.toString();
       stdoutChunks.push(s);
+      appendRunLog(runDir, "stdout.log", s);
       if (!opts.quiet) process.stdout.write(s);
     });
     child.stderr?.on("data", (d: Buffer) => {
       const s = d.toString();
       stderrChunks.push(s);
+      appendRunLog(runDir, "stderr.log", s);
       if (!opts.quiet) process.stderr.write(s);
     });
 
     child.on("error", (err) => {
       // Spawn failure (e.g. binary not found): record as a failed run.
-      stderrChunks.push(`spawn error: ${err.message}\n`);
+      const msg = `spawn error: ${err.message}\n`;
+      stderrChunks.push(msg);
+      appendRunLog(runDir, "stderr.log", msg);
+      writeEarlyMeta({
+        runDir,
+        id: entry.id,
+        harness: entry.harness,
+        model: entry.model,
+        effort: entry.effort,
+        cwd: entry.cwd,
+        command: invocation.display,
+        startedAt: startedAt.toISOString(),
+        harnessPid,
+        status: "spawn_failed",
+      });
       finalize(null, null);
     });
 
@@ -119,6 +201,8 @@ export function runRoutine(entry: RoutineEntry, opts: RunOptions = {}): Promise<
       const finishedAt = new Date();
       const stdout = stdoutChunks.join("");
       const stderr = stderrChunks.join("");
+      // Final rewrite ensures the on-disk logs match memory even if a chunk
+      // handler raced; streaming already wrote the content for mid-flight tail.
       writeFileSync(join(runDir, "stdout.log"), stdout);
       writeFileSync(join(runDir, "stderr.log"), stderr);
 
@@ -142,6 +226,7 @@ export function runRoutine(entry: RoutineEntry, opts: RunOptions = {}): Promise<
         durationMs: finishedAt.getTime() - startedAt.getTime(),
         heartbeat: { attempted: false, ok: true },
         outcome,
+        harnessPid,
       };
 
       result.heartbeat = writeHeartbeat(entry, result);
@@ -162,6 +247,9 @@ export function runRoutine(entry: RoutineEntry, opts: RunOptions = {}): Promise<
             startedAt: result.startedAt,
             finishedAt: result.finishedAt,
             durationMs: result.durationMs,
+            harnessPid: result.harnessPid,
+            daemonPid: process.pid,
+            status: "finished",
             outcome: result.outcome.kind,
             outcomeDetail: result.outcome.detail,
             outcomeSource: result.outcome.source,

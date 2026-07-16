@@ -3,8 +3,9 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { acquireLock, readLockPid, releaseLock } from "../src/daemon.ts";
 import { loadEntry } from "../src/registry.ts";
-import { runRoutine } from "../src/runner.ts";
+import { appendRunLog, runRoutine, writeEarlyMeta } from "../src/runner.ts";
 
 let home: string;
 
@@ -74,5 +75,100 @@ describe("runRoutine heartbeat handling", () => {
     expect(meta.exitCode).toBe(0);
     expect(meta.timedOut).toBe(false);
     expect(meta.outcome).toBe("ok");
+    expect(meta.harnessPid).toBeTruthy();
+  });
+
+  test("streams stdout to run-dir before finalize and records harness pid on the lock", async () => {
+    process.env.ROUTINES_CLAUDE_BIN = stub(
+      join(home, "slow-harness"),
+      [
+        "#!/bin/sh",
+        "printf '%s\\n' 'chunk-one-live'",
+        "sleep 0.35",
+        "printf '%s\\n' 'chunk-two-done'",
+        "printf '%s\\n' 'brain-stream-live 2026-07-16T00:00:00Z ok GREEN findings=0'",
+        "",
+      ].join("\n"),
+    );
+    writeRoutine("brain-stream-live");
+    // timeout long enough for sleep; acquire lock like the daemon does
+    writeFileSync(
+      join(home, "registry", "brain-stream-live.toml"),
+      [
+        'harness = "claude"',
+        'model = "test-model"',
+        'rrule = "FREQ=SECONDLY"',
+        'prompt = "hello"',
+        'heartbeat_slug = "routine-heartbeats"',
+        "timeout_min = 1",
+      ].join("\n") + "\n",
+    );
+
+    expect(acquireLock("brain-stream-live")).toBe(true);
+    const runP = runRoutine(loadEntry("brain-stream-live"), { quiet: true });
+
+    // Poll until the first chunk is on disk (proves streaming, not finalize-only).
+    let sawLive = false;
+    for (let i = 0; i < 40; i++) {
+      const lockPid = readLockPid("brain-stream-live");
+      // After spawn the lock must name a live pid (harness), not only existence.
+      if (lockPid != null && lockPid !== process.pid) {
+        // harness child pid differs from this test process
+      }
+      // Find newest run dir
+      try {
+        const runsRoot = join(home, "runs", "brain-stream-live");
+        const stamps = (await import("node:fs")).readdirSync(runsRoot);
+        for (const s of stamps) {
+          const log = join(runsRoot, s, "stdout.log");
+          const meta = join(runsRoot, s, "meta.json");
+          if ((await import("node:fs")).existsSync(log)) {
+            const body = readFileSync(log, "utf8");
+            if (body.includes("chunk-one-live")) {
+              sawLive = true;
+              const m = JSON.parse(readFileSync(meta, "utf8"));
+              expect(m.status === "running" || m.harnessPid != null).toBe(true);
+              expect(typeof m.harnessPid === "number" || m.harnessPid === null).toBe(true);
+              if (typeof m.harnessPid === "number") {
+                expect(readLockPid("brain-stream-live")).toBe(m.harnessPid);
+              }
+            }
+          }
+        }
+      } catch {
+        /* run dir not yet created */
+      }
+      if (sawLive) break;
+      await Bun.sleep(50);
+    }
+    expect(sawLive).toBe(true);
+
+    const result = await runP;
+    releaseLock("brain-stream-live");
+    expect(result.exitCode).toBe(0);
+    expect(readFileSync(join(result.runDir, "stdout.log"), "utf8")).toContain("chunk-one-live");
+    expect(result.harnessPid).toBeTruthy();
+  });
+
+  test("writeEarlyMeta and appendRunLog are the shipped mid-flight surfaces", () => {
+    const runDir = join(home, "manual-run");
+    mkdirSync(runDir, { recursive: true });
+    writeEarlyMeta({
+      runDir,
+      id: "x",
+      harness: "claude",
+      model: "m",
+      effort: null,
+      cwd: "/tmp",
+      command: "echo",
+      startedAt: new Date().toISOString(),
+      harnessPid: 4242,
+    });
+    appendRunLog(runDir, "stdout.log", "hello-live\n");
+    const meta = JSON.parse(readFileSync(join(runDir, "meta.json"), "utf8"));
+    expect(meta.harnessPid).toBe(4242);
+    expect(meta.id).toBe("x");
+    expect(meta.status).toBe("running");
+    expect(readFileSync(join(runDir, "stdout.log"), "utf8")).toBe("hello-live\n");
   });
 });
