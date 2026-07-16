@@ -216,11 +216,11 @@ bun run typecheck   # tsc --noEmit
 bun run e2e         # full both-adapter dispatch e2e on a throwaway ROUTINES_HOME
 ```
 
-The e2e stubs the leaf `claude`/`codex`/`fsituations`/`fbrain` binaries via env
-overrides (`ROUTINES_CLAUDE_BIN`, `ROUTINES_CODEX_BIN`,
-`ROUTINES_FSITUATIONS_BIN`, `ROUTINES_FBRAIN_BIN`) so it is hermetic and spends
-no API credits while exercising the full dispatch → spawn → log → heartbeat
-path that routines owns.
+The e2e stubs the leaf `claude`/`codex`/`grok` binaries by setting
+`ROUTINES_ALLOW_HARNESS_BIN_OVERRIDES=1` plus the relevant `ROUTINES_*_BIN`
+values. It also stubs `fsituations`/`fbrain` via `ROUTINES_FSITUATIONS_BIN` and
+`ROUTINES_FBRAIN_BIN`, so it is hermetic and spends no API credits while
+exercising the full dispatch → spawn → log → heartbeat path that routines owns.
 
 ## Migration (one-time cutover)
 

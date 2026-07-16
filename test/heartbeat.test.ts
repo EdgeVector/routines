@@ -41,6 +41,7 @@ function makeResult(): RunResult {
     durationMs: 1000,
     heartbeat: { attempted: false, ok: true },
     outcome: { kind: "ok", detail: null, source: "exit" },
+    harnessPid: null,
   };
 }
 

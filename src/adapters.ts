@@ -3,10 +3,10 @@
 // more `case`.
 //
 // The leaf binary is overridable via env (ROUTINES_CLAUDE_BIN /
-// ROUTINES_CODEX_BIN). Real defaults are `claude` and `codex` on PATH; the
-// override exists so the e2e can point at a stub that echoes and exits without
-// spending real API credits, while still exercising the full dispatch → spawn →
-// log → heartbeat code path that routines actually owns.
+// ROUTINES_CODEX_BIN) only when ROUTINES_ALLOW_HARNESS_BIN_OVERRIDES=1.
+// The override exists so tests can point at a stub that echoes and exits without
+// spending real API credits, but production daemons must not inherit a temp
+// harness from a previous test shell.
 
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -30,16 +30,22 @@ export interface HarnessInvocation {
 export function harnessBinary(harness: Harness): string {
   switch (harness) {
     case "claude":
-      return process.env.ROUTINES_CLAUDE_BIN ?? "claude";
+      return harnessOverride("ROUTINES_CLAUDE_BIN") ?? "claude";
     case "codex":
-      return process.env.ROUTINES_CODEX_BIN ?? "codex";
+      return harnessOverride("ROUTINES_CODEX_BIN") ?? "codex";
     case "grok":
-      return process.env.ROUTINES_GROK_BIN ?? "grok";
+      return harnessOverride("ROUTINES_GROK_BIN") ?? "grok";
     default: {
       const never: never = harness;
       throw new Error(`unknown harness: ${String(never)}`);
     }
   }
+}
+
+function harnessOverride(envKey: string): string | undefined {
+  if (process.env.ROUTINES_ALLOW_HARNESS_BIN_OVERRIDES !== "1") return undefined;
+  const value = process.env[envKey];
+  return value && value.length > 0 ? value : undefined;
 }
 
 export function buildInvocation(entry: RoutineEntry, prompt: string): HarnessInvocation {

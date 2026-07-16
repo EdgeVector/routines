@@ -21,6 +21,7 @@ beforeEach(() => {
   process.env = { ...savedEnv };
   home = mkdtempSync(join(tmpdir(), "routines-runner-"));
   process.env.ROUTINES_HOME = home;
+  process.env.ROUTINES_ALLOW_HARNESS_BIN_OVERRIDES = "1";
   process.env.ROUTINES_SIGKILL_GRACE_MS = "50";
   mkdirSync(join(home, "registry"), { recursive: true });
 

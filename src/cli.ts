@@ -77,9 +77,11 @@ Commands:
 
 Environment:
   ROUTINES_HOME               state root (default ~/.routines)
-  ROUTINES_CLAUDE_BIN         claude binary (default: claude)
-  ROUTINES_CODEX_BIN          codex binary (default: codex)
-  ROUTINES_GROK_BIN           grok binary (default: grok)
+  ROUTINES_ALLOW_HARNESS_BIN_OVERRIDES=1
+                              allow ROUTINES_*_BIN harness overrides
+  ROUTINES_CLAUDE_BIN         claude binary override when explicitly allowed
+  ROUTINES_CODEX_BIN          codex binary override when explicitly allowed
+  ROUTINES_GROK_BIN           grok binary override when explicitly allowed
   ROUTINES_FSITUATIONS_BIN    fsituations binary (default: fsituations)
   ROUTINES_FBRAIN_BIN         fbrain binary for heartbeats (default: fbrain)
 

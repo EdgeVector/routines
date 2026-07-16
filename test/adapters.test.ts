@@ -11,6 +11,7 @@ function entry(harness: string, extra = "") {
 }
 
 afterEach(() => {
+  delete process.env.ROUTINES_ALLOW_HARNESS_BIN_OVERRIDES;
   delete process.env.ROUTINES_CLAUDE_BIN;
   delete process.env.ROUTINES_CODEX_BIN;
 });
@@ -91,11 +92,20 @@ describe("buildInvocation", () => {
   });
 
   test("binary override via env", () => {
+    process.env.ROUTINES_ALLOW_HARNESS_BIN_OVERRIDES = "1";
     process.env.ROUTINES_CLAUDE_BIN = "/tmp/stub-claude";
     process.env.ROUTINES_GROK_BIN = "/tmp/stub-grok";
     expect(harnessBinary("claude")).toBe("/tmp/stub-claude");
     expect(harnessBinary("grok")).toBe("/tmp/stub-grok");
     expect(buildInvocation(entry("claude"), "hello").bin).toBe("/tmp/stub-claude");
+  });
+
+  test("binary override requires explicit opt-in", () => {
+    process.env.ROUTINES_CLAUDE_BIN = "/tmp/stub-claude";
+    process.env.ROUTINES_GROK_BIN = "/tmp/stub-grok";
+    expect(harnessBinary("claude")).toBe("claude");
+    expect(harnessBinary("grok")).toBe("grok");
+    expect(buildInvocation(entry("claude"), "hello").bin).toBe("claude");
   });
 
   test("large prompt is elided in display", () => {
