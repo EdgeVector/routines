@@ -53,13 +53,15 @@ export interface RunNowStart {
 /** Fire a routine now, sharing the daemon's per-routine single-flight lock so a
  * human-triggered run never overlaps a scheduled one (or another manual run).
  * The run executes through the same `runRoutine` the scheduler uses — same
- * spawn, same per-run log dir, same heartbeat. Non-blocking: returns as soon as
- * the run is spawned; callers observe completion via the run's state/logs. */
+ * spawn, same per-run log dir, same heartbeat. It is marked manual so a local
+ * verification harness failure does not overwrite scheduled fleet status or
+ * auto-file routine-error cards. Non-blocking: returns as soon as the run is
+ * spawned; callers observe completion via the run's state/logs. */
 export function startRunNow(entry: RoutineEntry): RunNowStart {
   if (isLocked(entry.id) || !acquireLock(entry.id)) {
     return { started: false, reason: "already running" };
   }
-  const promise = runRoutine(entry, { quiet: true }).finally(() => {
+  const promise = runRoutine(entry, { quiet: true, trigger: "manual" }).finally(() => {
     releaseLock(entry.id);
   });
   // Swallow rejections here so an unobserved promise never crashes the server;

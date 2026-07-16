@@ -136,6 +136,13 @@ Allowed, when the evidence clearly supports it:
 `service_timeout` / "node did not respond within Nms" / "too many concurrent
 reads" = the node is BUSY, not down. Retry reads; never restart anything.
 If load looks bad, name the offender first: `lastdb status` / `lastdb ops`.
+After `routines status --json` has produced a valid snapshot, a later
+board/brain write failure is **transport backpressure**, not a routine red. If
+`reds=0` and all remaining work is "update/close/file a board or brain record",
+write the deferred action to automation memory when possible and heartbeat
+`noop` (no fixes) or `ok` (fixes/closeouts already performed) with
+`board_write_deferred=<n>` / `brain_write_deferred=<n>`. Do not turn a healthy
+fleet red solely because LastDB disappeared while recording follow-up evidence.
 
 Verify every fix the same pass. A fix you can't verify is a finding — escalate.
 
@@ -196,12 +203,14 @@ Heartbeat LAST (always, even on error):
 ```
 routine-fleet-health <ISO-ts-Z> <ok|noop|error> reds=<n> open_error_cards=<n> closed=<n> timeout_bumps=<n> findings=<n> fixed=<n> filed=<n> updated=<n> needs_tom=<n> <one-line highlights>
 ```
-- `noop` — fleet clean, nothing done (including no closeouts needed).
-- `ok` — pass completed with closeouts, fixes, filings, or escalations.
-- `error` — the check itself could not run (routines CLI down, true fleet state
-  unknown, or board/brain unreachable after retries with no matching recent
-  Situations notice). Still try one heartbeat via
-  `last-stack-brain-append-heartbeat` if brain works.
+- `noop` — fleet clean, nothing done (including no closeouts needed), or the
+  health snapshot was clean and only board/brain follow-up writes were deferred.
+- `ok` — pass completed with closeouts, fixes, filings, escalations, or safe
+  ops fixes even if final board/brain evidence writes were deferred.
+- `error` — the check itself could not run (for example routines CLI down, or
+  board/brain unavailable before any reliable health snapshot or dedupe read).
+  Still try one heartbeat via `last-stack-brain-append-heartbeat` if brain
+  works.
 
 ## Out of scope
 - Shipping code fixes yourself (cards → pickup fleet)

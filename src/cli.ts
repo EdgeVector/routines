@@ -253,7 +253,7 @@ async function cmdRun(rest: string[]): Promise<number> {
     return 3;
   }
   try {
-    const result = await runRoutine(entry, { quiet: values.quiet === true });
+    const result = await runRoutine(entry, { quiet: values.quiet === true, trigger: "manual" });
     console.error(
       `run ${id}: exit=${result.exitCode} dur=${(result.durationMs / 1000).toFixed(1)}s log=${result.runDir}` +
         (result.heartbeat.attempted ? ` heartbeat=${result.heartbeat.ok ? "ok" : "FAILED"}` : ""),

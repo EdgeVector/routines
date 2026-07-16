@@ -48,12 +48,20 @@ function runStamp(d: Date): string {
 export interface RunOptions {
   /** Suppress live streaming to the parent's stdout/stderr (default: stream). */
   quiet?: boolean;
+  /**
+   * Scheduled daemon fires own fleet health state. Manual run-now is a
+   * foreground verification path; it writes run logs but must not make the
+   * scheduler look red or auto-file routine-error cards when the caller's local
+   * harness environment is the only thing broken.
+   */
+  trigger?: "scheduled" | "manual";
 }
 
 /** Write early meta.json so operators can inspect a live run before exit. */
 export function writeEarlyMeta(args: {
   runDir: string;
   id: string;
+  trigger: "scheduled" | "manual";
   harness: string;
   model: string;
   effort: string | null | undefined;
@@ -68,6 +76,7 @@ export function writeEarlyMeta(args: {
     JSON.stringify(
       {
         id: args.id,
+        trigger: args.trigger,
         harness: args.harness,
         model: args.model,
         effort: args.effort ?? null,
@@ -92,6 +101,7 @@ export function appendRunLog(runDir: string, name: "stdout.log" | "stderr.log", 
 }
 
 export function runRoutine(entry: RoutineEntry, opts: RunOptions = {}): Promise<RunResult> {
+  const trigger = opts.trigger ?? "scheduled";
   const startedAt = new Date();
   const runDir = join(runsDir(), entry.id, runStamp(startedAt));
   mkdirSync(runDir, { recursive: true });
@@ -133,6 +143,7 @@ export function runRoutine(entry: RoutineEntry, opts: RunOptions = {}): Promise<
     writeEarlyMeta({
       runDir,
       id: entry.id,
+      trigger,
       harness: entry.harness,
       model: entry.model,
       effort: entry.effort,
@@ -236,6 +247,7 @@ export function runRoutine(entry: RoutineEntry, opts: RunOptions = {}): Promise<
         JSON.stringify(
           {
             id: entry.id,
+            trigger,
             harness: entry.harness,
             model: entry.model,
             effort: entry.effort ?? null,
@@ -262,17 +274,19 @@ export function runRoutine(entry: RoutineEntry, opts: RunOptions = {}): Promise<
         ) + "\n",
       );
 
-      patchState(entry.id, {
-        lastRun: result.finishedAt,
-        lastExit: result.exitCode,
-        lastRunDir: runDir,
-        lastOutcome: result.outcome.kind,
-        lastOutcomeDetail: result.outcome.detail ?? undefined,
-      });
+      if (trigger === "scheduled") {
+        patchState(entry.id, {
+          lastRun: result.finishedAt,
+          lastExit: result.exitCode,
+          lastRunDir: runDir,
+          lastOutcome: result.outcome.kind,
+          lastOutcomeDetail: result.outcome.detail ?? undefined,
+        });
+      }
 
       // P0 fleet rule: every error run gets a board card + (rate-limited) triage
       // agent. Never await — must not stall the scheduler or re-throw.
-      if (shouldEscalate(result)) {
+      if (trigger === "scheduled" && shouldEscalate(result)) {
         try {
           escalateRoutineError(entry, result, { quiet: opts.quiet });
         } catch {

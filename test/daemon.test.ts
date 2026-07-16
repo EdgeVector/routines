@@ -11,6 +11,8 @@ import {
   startDaemon,
 } from "../src/daemon.ts";
 import { loadEntry } from "../src/registry.ts";
+import { runRoutine } from "../src/runner.ts";
+import { readState, writeState } from "../src/state.ts";
 
 let home: string;
 let heartbeatOut: string;
@@ -118,6 +120,37 @@ describe("daemon evaluateOnce", () => {
     const hb = readFileSync(heartbeatOut, "utf8").trim().split("\n");
     expect(hb.length).toBe(2);
     expect(hb.every((l) => l.includes("ok") && l.includes("harness="))).toBe(true);
+  });
+
+  test("manual run-now failure does not overwrite scheduled status or escalate", async () => {
+    const failingHarness = stub(
+      join(home, "failing-harness"),
+      '#!/bin/sh\necho "local codex sandbox failed" >&2\nexit 1\n',
+    );
+    process.env.ROUTINES_CODEX_BIN = failingHarness;
+    writeRoutine("manual-fail", "codex");
+    writeState({
+      id: "manual-fail",
+      lastRun: "2026-07-16T18:00:00.000Z",
+      lastExit: 0,
+      lastRunDir: "/tmp/green-run",
+      lastOutcome: "ok",
+      lastOutcomeDetail: "scheduled green",
+    });
+
+    const entry = loadEntry("manual-fail");
+    const result = await runRoutine(entry, { quiet: true, trigger: "manual" });
+
+    expect(result.exitCode).toBe(1);
+    const meta = JSON.parse(readFileSync(join(result.runDir, "meta.json"), "utf8"));
+    expect(meta.trigger).toBe("manual");
+    expect(readState("manual-fail")).toMatchObject({
+      lastRun: "2026-07-16T18:00:00.000Z",
+      lastExit: 0,
+      lastRunDir: "/tmp/green-run",
+      lastOutcome: "ok",
+    });
+    expect(existsSync(join(home, "error-escalate"))).toBe(false);
   });
 
   test("cron warm-up: a fresh routine with no catch-up does not fire on first sight", () => {
