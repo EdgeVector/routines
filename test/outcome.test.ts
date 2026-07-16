@@ -33,6 +33,20 @@ ROUTINE_RESULT outcome=noop actions=0 detail=queue empty
     expect(o.detail).toContain("queue empty");
   });
 
+  test("ignores ROUTINE_RESULT examples embedded in stream-json content", () => {
+    const text =
+      '{"type":"user","message":{"content":"prompt example: ROUTINE_RESULT outcome=ok detail=bites=<n> cards=<n>"}}\n' +
+      '{"type":"user","message":{"content":"card body says \\nROUTINE_RESULT outcome=noop detail=example only"}}\n' +
+      "kanban-pickup 2026-07-16T13:06:03Z ok cards=1 worked=some-other-card\n";
+    const o = parseOutcome("daily-retro-prevention", text, {
+      exitCode: 124,
+      timedOut: true,
+    });
+    expect(o.kind).toBe("error");
+    expect(o.source).toBe("exit");
+    expect(o.detail).toBe("timed out");
+  });
+
   test("parses heartbeat-style lines with ISO", () => {
     const text = `kanban-pickup 2026-07-13T13:06:03Z ok cards=2 units=2 spawned=2`;
     const o = parseOutcome("last-stack-kanban-pickup", text, { exitCode: 0 });
