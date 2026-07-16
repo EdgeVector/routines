@@ -55,13 +55,34 @@ routines route <id> --harness grok --model grok-4.5
 routines logs <id>            # recent runs (--path, --tail, --json)
 routines publish-status       # publish slim fleet status + recent run summaries to LastDB
 routines deliver-status       # publish + stage/admin-approve a fleet-status delivery
+routines hygiene              # mechanical cleanup (prune runs/memory, daemon check, publish)
+routines hygiene --dry-run    # report only
 routines import               # import the legacy schedulers into the registry (dry-run)
 routines web                  # serve the local dashboard (localhost); --port, --host
 routines doctor               # validate registry + environment (+ configurations project-config)
 routines daemon               # the scheduler loop (launchd entrypoint); --once, --catchup <s>
 routines install-daemon       # install + load the launchd user agent
+routines install-hygiene      # install + load hourly mechanical hygiene launchd agent
 routines print-plist          # preview the launchd plist
 ```
+
+### Fleet hygiene (automatic cleanup)
+
+Two complementary layers:
+
+1. **`routines hygiene`** (mechanical, no LLM) — prunes old run dirs under
+   `~/.routines/runs` (keep last 20 per id **or** last 7 days), truncates
+   `memory.md` files to the last 100 lines, drops stale
+   `error-escalate/*.json`, checks that `com.edgevector.routinesd` is loaded,
+   and runs `publish-status`. Install hourly via `routines install-hygiene`
+   (label `com.edgevector.routines-hygiene`). Shell wrapper:
+   `scripts/routines-hygiene.sh`.
+2. **`routine-fleet-health`** (agent, hourly) — closes healed
+   `routine-error-*` cards, safe registry timeout bumps for chronic 124s,
+   dedupes against error-escalate, files pickup cards only when needed.
+   Canonical prompt: `prompts/routine-fleet-health.md` (copy into
+   `~/.routines/prompts/` and/or last-stack as needed).
+
 
 ## Web dashboard
 
