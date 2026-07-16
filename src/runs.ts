@@ -13,6 +13,10 @@ import {
   type OutcomeStats,
   type RunOutcome,
 } from "./outcome.ts";
+import {
+  resolveEscalateStatus,
+  type EscalateStatus,
+} from "./escalate-status.ts";
 import { runsDir } from "./paths.ts";
 
 export interface RunSummary {
@@ -26,6 +30,8 @@ export interface RunSummary {
   outcome: RunOutcome["kind"];
   outcomeDetail: string | null;
   outcomeSource: RunOutcome["source"];
+  /** Present when error-escalate ran for this run (card + optional triage). */
+  escalate: EscalateStatus | null;
 }
 
 export interface RunDetail extends RunSummary {
@@ -103,6 +109,7 @@ function summarize(id: string, stamp: string, runDir: string, meta: Record<strin
     outcome: outcome.kind,
     outcomeDetail: outcome.detail,
     outcomeSource: outcome.source,
+    escalate: resolveEscalateStatus(runDir),
   };
 }
 
