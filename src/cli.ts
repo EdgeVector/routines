@@ -27,6 +27,12 @@ import {
   startDaemon,
 } from "./daemon.ts";
 import { installDaemon, plistPath, renderPlist, uninstallDaemon } from "./launchd.ts";
+import {
+  installHygieneDaemon,
+  runHygiene,
+  uninstallHygieneDaemon,
+  type HygieneResult,
+} from "./hygiene.ts";
 import { loadActiveSituations } from "./situations.ts";
 import { loadAll, loadEntry, resolvePrompt, type RoutineEntry } from "./registry.ts";
 import { collectStatus } from "./status.ts";
@@ -52,6 +58,8 @@ Commands:
   logs <id>                   show recent runs for a routine (--json, --path, --tail)
   publish-status              write slim fleet status records to LastDB (--json)
   deliver-status              publish + stage a fleet-status delivery; --approve sends it
+  hygiene                     mechanical cleanup (prune runs/memory, daemon check,
+                              publish-status). No LLM. See --help notes below.
   import                      import legacy schedulers into the registry (dry-run;
                               --write to apply). See --help notes below.
   migrate-kanban-ids          one-time last-stack-fkanban-* → last-stack-kanban-*
@@ -61,6 +69,8 @@ Commands:
   daemon                      run the scheduler loop (launchd entrypoint); --once, --catchup <s>
   install-daemon              install + load the launchd user agent
   uninstall-daemon            unload + remove the launchd user agent
+  install-hygiene             install + load hourly mechanical hygiene launchd agent
+  uninstall-hygiene           unload the hygiene launchd agent
   print-plist                 print the launchd plist that install-daemon would write
   version                     print version
   help                        print this help
@@ -76,7 +86,19 @@ Environment:
 Import:
   --force                     refresh existing registry files
   --replace-routing           with --force, also replace existing harness/model
-                              instead of preserving local route edits`;
+                              instead of preserving local route edits
+
+Hygiene:
+  --dry-run                   report only; do not delete/truncate
+  --json                      machine-readable summary
+  --no-publish                skip routines publish-status
+  --ff-install                if CLI checkout is a clean git tree behind
+                              lastgit/main, fast-forward only (never on dirty trees)
+  --no-restart                with --ff-install, skip routinesd kickstart
+  --keep-runs N               keep last N run dirs per id (default 20)
+  --keep-days N               also keep runs finished within N days (default 7)
+  --memory-lines N            truncate memory.md to last N lines (default 100)
+  --escalate-days N           drop error-escalate/*.json older than N days (default 14)`;
 
 async function main(argv: string[]): Promise<number> {
   const [command, ...rest] = argv;
@@ -114,6 +136,8 @@ async function main(argv: string[]): Promise<number> {
       return await cmdPublishStatus(rest);
     case "deliver-status":
       return await cmdDeliverStatus(rest);
+    case "hygiene":
+      return cmdHygiene(rest);
     case "web":
       return cmdWeb(rest);
     case "doctor":
@@ -124,6 +148,10 @@ async function main(argv: string[]): Promise<number> {
       return cmdInstallDaemon();
     case "uninstall-daemon":
       return cmdUninstallDaemon();
+    case "install-hygiene":
+      return cmdInstallHygiene();
+    case "uninstall-hygiene":
+      return cmdUninstallHygiene();
     case "print-plist":
       return cmdPrintPlist();
     default:
@@ -656,7 +684,7 @@ function selfProgram(): string {
   return process.argv[1] ?? join(import.meta.dir ?? ".", "cli.ts");
 }
 
-function cmdInstallDaemon(): number {
+function launchdEnv(): Record<string, string> {
   const env: Record<string, string> = {};
   if (process.env.LASTGIT_SOCKET) env.LASTGIT_SOCKET = process.env.LASTGIT_SOCKET;
   // launchd's default PATH is /usr/bin:/bin:/usr/sbin:/sbin — no homebrew,
@@ -685,7 +713,11 @@ function cmdInstallDaemon(): number {
   env.OBS_SENTRY_DSN = process.env.OBS_SENTRY_DSN ?? "lastsecrets://obs-sentry-dsn-routines";
   env.OBS_SENTRY_ENVIRONMENT = process.env.OBS_SENTRY_ENVIRONMENT ?? "production";
   env.OBS_SENTRY_RELEASE = process.env.OBS_SENTRY_RELEASE ?? `routines@${pkg.version}`;
-  const res = installDaemon({ program: selfProgram(), env });
+  return env;
+}
+
+function cmdInstallDaemon(): number {
+  const res = installDaemon({ program: selfProgram(), env: launchdEnv() });
   console.log(`plist: ${res.plistPath}`);
   console.log(res.message);
   return res.loaded ? 0 : 1;
@@ -695,6 +727,83 @@ function cmdUninstallDaemon(): number {
   const res = uninstallDaemon();
   console.log(res.message);
   return 0;
+}
+
+function cmdInstallHygiene(): number {
+  const res = installHygieneDaemon({ program: selfProgram(), env: launchdEnv() });
+  console.log(`plist: ${res.plistPath}`);
+  console.log(res.message);
+  return res.loaded ? 0 : 1;
+}
+
+function cmdUninstallHygiene(): number {
+  const res = uninstallHygieneDaemon();
+  console.log(res.message);
+  return 0;
+}
+
+function cmdHygiene(rest: string[]): number {
+  const { values } = parseArgs({
+    args: rest,
+    options: {
+      "dry-run": { type: "boolean" },
+      json: { type: "boolean" },
+      "no-publish": { type: "boolean" },
+      "ff-install": { type: "boolean" },
+      "no-restart": { type: "boolean" },
+      "keep-runs": { type: "string" },
+      "keep-days": { type: "string" },
+      "memory-lines": { type: "string" },
+      "escalate-days": { type: "string" },
+    },
+    allowPositionals: true,
+  });
+  const num = (raw: string | undefined, fallback: number): number => {
+    if (raw == null || raw === "") return fallback;
+    const n = Number(raw);
+    return Number.isFinite(n) && n >= 0 ? n : fallback;
+  };
+  const result = runHygiene({
+    dryRun: values["dry-run"] === true,
+    publishStatus: values["no-publish"] !== true,
+    ffInstall: values["ff-install"] === true,
+    restartDaemonAfterFf: values["no-restart"] !== true,
+    keepRunsPerId: num(values["keep-runs"], 20),
+    keepDays: num(values["keep-days"], 7),
+    memoryMaxLines: num(values["memory-lines"], 100),
+    escalateMaxAgeDays: num(values["escalate-days"], 14),
+  });
+  if (values.json) {
+    console.log(JSON.stringify(result, null, 2));
+  } else {
+    printHygieneHuman(result);
+  }
+  // Non-zero only when publish or install-ff hard-failed, or daemon missing.
+  if (!result.daemon.loaded) return 1;
+  if (result.publish.attempted && !result.publish.ok) return 1;
+  if (result.installFf.attempted && !result.installFf.ok) return 1;
+  return 0;
+}
+
+function printHygieneHuman(r: HygieneResult): void {
+  const mode = r.dryRun ? "DRY-RUN" : "APPLIED";
+  console.log(`routines hygiene ${mode}  home=${r.home}`);
+  console.log(
+    `  pruned_runs=${r.prunedRuns} truncated_memories=${r.truncatedMemories} pruned_escalate=${r.prunedEscalate} ~bytes_freed=${r.bytesFreedEstimate}`,
+  );
+  console.log(`  daemon: ${r.daemon.detail}`);
+  console.log(`  publish: ${r.publish.detail}`);
+  console.log(`  install_ff: ${r.installFf.detail}`);
+  if (r.warnings.length > 0) {
+    console.log("  warnings:");
+    for (const w of r.warnings) console.log(`    - ${w}`);
+  }
+  if (r.items.length > 0 && r.items.length <= 30) {
+    console.log("  items:");
+    for (const it of r.items) console.log(`    [${it.kind}] ${it.path} — ${it.detail}`);
+  } else if (r.items.length > 30) {
+    console.log(`  items: ${r.items.length} (use --json for full list)`);
+  }
 }
 
 function cmdPrintPlist(): number {
