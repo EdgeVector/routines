@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -82,6 +82,20 @@ describe("dispatch prompt envelope", () => {
     });
     expect(env).toContain("[upgrade] LastDB upgraded");
     expect(env.indexOf("Situations notices")).toBeLessThan(env.indexOf("---"));
+  });
+});
+
+describe("routine-fleet-health prompt", () => {
+  test("keeps transport-only board write failures non-red after a healthy snapshot", () => {
+    const prompt = readFileSync(
+      new URL("../prompts/routine-fleet-health.md", import.meta.url),
+      "utf8",
+    );
+
+    expect(prompt).toContain("board/brain write failure is **transport backpressure**");
+    expect(prompt).toContain("board_write_deferred=<n>");
+    expect(prompt).toContain("Do not turn a healthy");
+    expect(prompt).toContain("only board/brain follow-up writes were deferred");
   });
 });
 
