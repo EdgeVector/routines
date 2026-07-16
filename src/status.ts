@@ -7,15 +7,17 @@
 // computation the daemon's dispatch loop uses (rrule nextAfter, the Situation
 // fence, the per-routine single-flight lock, on-disk run state).
 
-import { isLocked } from "./daemon.ts";
+import { isLocked, readLockPid } from "./daemon.ts";
 import { compareGrouped, groupForId } from "./groups.ts";
 import { aggregateOutcomes, type OutcomeKind } from "./outcome.ts";
 import { fenceFor, loadActiveSituations } from "./situations.ts";
 import { loadAll, type Harness, type Status } from "./registry.ts";
 import { listRuns, type RunSummary } from "./runs.ts";
-import { routinesHome } from "./paths.ts";
+import { routinesHome, runsDir } from "./paths.ts";
 import { nextAfter } from "./rrule.ts";
 import { readState } from "./state.ts";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 
 /** How many recent runs feed the rolling noop/useful rates. */
 const OUTCOME_WINDOW = 10;
@@ -27,6 +29,22 @@ function latestRunIsCompleted(latest: RunSummary | undefined): boolean {
 function isCurrentlyRunning(id: string, latest: RunSummary | undefined): boolean {
   if (!isLocked(id)) return false;
   return !latestRunIsCompleted(latest);
+}
+
+/** Prefer lock file pid; fall back to early meta.harnessPid in the latest run dir. */
+function resolveHarnessPid(id: string, latest: RunSummary | undefined): number | null {
+  const lockPid = readLockPid(id);
+  if (lockPid != null) return lockPid;
+  if (!latest?.stamp) return null;
+  const metaPath = join(runsDir(), id, latest.stamp, "meta.json");
+  if (!existsSync(metaPath)) return null;
+  try {
+    const meta = JSON.parse(readFileSync(metaPath, "utf8")) as { harnessPid?: unknown };
+    const n = Number(meta.harnessPid);
+    return Number.isFinite(n) ? n : null;
+  } catch {
+    return null;
+  }
 }
 
 export interface StatusRow {
@@ -42,6 +60,11 @@ export interface StatusRow {
   lastExit: number | null;
   lastRunDir: string | null;
   running: boolean;
+  /**
+   * Pid of the live harness worker when `running` is true (from the
+   * single-flight lock / early meta). null when not running.
+   */
+  harnessPid: number | null;
   /** false, or the slug of the active Situation whose scope_routines matches. */
   fenced: string | boolean;
   /** Display group id (board | brain | dogfood | …). */
@@ -90,6 +113,8 @@ export function collectStatus(now: Date = new Date()): StatusSnapshot {
       })),
     );
     const latest = recent[0];
+    const running = isCurrentlyRunning(e.id, latest);
+    const harnessPid = running ? resolveHarnessPid(e.id, latest) : null;
     const stateOutcome: OutcomeKind | null =
       st.lastOutcome === "ok" ||
       st.lastOutcome === "noop" ||
@@ -114,7 +139,8 @@ export function collectStatus(now: Date = new Date()): StatusSnapshot {
       lastRun: st.lastRun ?? null,
       lastExit: st.lastExit ?? null,
       lastRunDir: st.lastRunDir ?? null,
-      running: isCurrentlyRunning(e.id, latest),
+      running,
+      harnessPid,
       fenced: fence.fenced ? (fence.situationSlug ?? true) : false,
       groupId: group.id,
       groupLabel: group.label,

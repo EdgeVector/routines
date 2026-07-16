@@ -81,17 +81,46 @@ function pidAlive(pid: number): boolean {
 // it. Steals a lock whose owning pid is dead (crashed daemon). Exported so the
 // web dashboard's run-now can share the daemon's single-flight discipline — a
 // routine never overlaps itself, whether fired by the scheduler or a human.
+/**
+ * Read the pid recorded in a routine's single-flight lock file, or null if
+ * missing/unparseable. The lock holds the live harness worker pid once the
+ * child has spawned (via setLockOwnerPid); before that it holds the daemon pid
+ * that acquired the lock.
+ */
+export function readLockPid(id: string): number | null {
+  const p = lockPath(id);
+  if (!existsSync(p)) return null;
+  const raw = readFileSync(p, "utf8").trim();
+  // Accept plain pid or JSON {"pid":N,...} for forward compatibility.
+  if (raw.startsWith("{")) {
+    try {
+      const j = JSON.parse(raw) as { pid?: unknown; harnessPid?: unknown };
+      const n = Number(j.harnessPid ?? j.pid);
+      return Number.isFinite(n) ? n : null;
+    } catch {
+      return null;
+    }
+  }
+  const pid = Number(raw);
+  return Number.isFinite(pid) ? pid : null;
+}
+
 export function acquireLock(id: string): boolean {
   mkdirSync(locksDir(), { recursive: true });
   const p = lockPath(id);
   if (existsSync(p)) {
-    const raw = readFileSync(p, "utf8").trim();
-    const pid = Number(raw);
-    if (Number.isFinite(pid) && pidAlive(pid)) return false;
+    const pid = readLockPid(id);
+    if (pid != null && pidAlive(pid)) return false;
     // stale lock: fall through and overwrite
   }
   writeFileSync(p, String(process.pid));
   return true;
+}
+
+/** Update the lock owner to the live harness worker after spawn. */
+export function setLockOwnerPid(id: string, pid: number): void {
+  mkdirSync(locksDir(), { recursive: true });
+  writeFileSync(lockPath(id), String(pid));
 }
 
 export function releaseLock(id: string): void {
@@ -104,10 +133,8 @@ export function releaseLock(id: string): void {
 }
 
 export function isLocked(id: string): boolean {
-  const p = lockPath(id);
-  if (!existsSync(p)) return false;
-  const pid = Number(readFileSync(p, "utf8").trim());
-  return Number.isFinite(pid) && pidAlive(pid);
+  const pid = readLockPid(id);
+  return pid != null && pidAlive(pid);
 }
 
 /** Decide whether a routine is due at `now`, and (as a side effect) write a
