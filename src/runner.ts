@@ -14,7 +14,7 @@ import { join } from "node:path";
 
 import { buildInvocation, type HarnessInvocation } from "./adapters.ts";
 import type { RoutineEntry } from "./registry.ts";
-import { resolveDispatchPrompt } from "./prompt.ts";
+import { buildRoutineAttributionEnv, resolveDispatchPrompt } from "./prompt.ts";
 import { runsDir } from "./paths.ts";
 import { writeHeartbeat, type HeartbeatOutcome } from "./heartbeat.ts";
 import { parseOutcome, type RunOutcome } from "./outcome.ts";
@@ -48,17 +48,22 @@ export interface RunOptions {
 }
 
 export function runRoutine(entry: RoutineEntry, opts: RunOptions = {}): Promise<RunResult> {
-  const prompt = resolveDispatchPrompt(entry);
-  const invocation = buildInvocation(entry, prompt);
   const startedAt = new Date();
   const runDir = join(runsDir(), entry.id, runStamp(startedAt));
   mkdirSync(runDir, { recursive: true });
+  // Prompt after runDir so the envelope can name Run directory / Run-Id trailers.
+  const prompt = resolveDispatchPrompt(entry, { runDir });
+  const invocation = buildInvocation(entry, prompt);
   writeFileSync(join(runDir, "prompt.txt"), prompt);
 
   const project = loadProjectConfig();
   const cwd = resolveRoutineCwd(entry.cwd, project);
   const configuredEnv = { ...process.env, ...envFromProjectConfig(project) };
-  const childEnv = { ...configuredEnv, ...discoveredRoutineSocketEnv(configuredEnv) };
+  const childEnv = {
+    ...configuredEnv,
+    ...discoveredRoutineSocketEnv(configuredEnv),
+    ...buildRoutineAttributionEnv(entry.id, runDir),
+  };
 
   const stdoutChunks: string[] = [];
   const stderrChunks: string[] = [];

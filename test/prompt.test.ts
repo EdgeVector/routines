@@ -4,7 +4,14 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { parseEntry } from "../src/registry.ts";
-import { buildDispatchEnvelope, ensureMemoryPath, resolveDispatchPrompt } from "../src/prompt.ts";
+import {
+  buildDispatchEnvelope,
+  buildRoutineAttributionEnv,
+  ensureMemoryPath,
+  formatAttributionTrailers,
+  resolveDispatchPrompt,
+  routineActor,
+} from "../src/prompt.ts";
 
 const prevHome = process.env.ROUTINES_HOME;
 let tmp: string | undefined;
@@ -42,7 +49,20 @@ describe("dispatch prompt envelope", () => {
     );
     expect(text).toContain("Do work.");
     expect(text).toContain("Situations notices");
+    expect(text).toContain("Driven-By: routine");
+    expect(text).toContain("Automation-Id: last-stack-fkanban-pickup");
+    expect(text).toContain("Attribution (required");
     expect(text.indexOf("Dispatch envelope")).toBeLessThan(text.indexOf("Do work."));
+  });
+
+  test("envelope includes run directory and Run-Id when provided", () => {
+    const runDir = "/tmp/runs/last-stack-fkanban-pickup/2026-07-16T12-00-00-000Z";
+    const env = buildDispatchEnvelope({ id: "last-stack-fkanban-pickup" } as never, "/tmp/m.md", {
+      noticesBanner: "## Situations notices (FYI, non-blocking)\n\nNo notices.\n",
+      runDir,
+    });
+    expect(env).toContain(`Run directory: ${runDir}`);
+    expect(env).toContain("Run-Id: 2026-07-16T12-00-00-000Z");
   });
 
   test("envelope names the memory path agents must use", () => {
@@ -62,5 +82,32 @@ describe("dispatch prompt envelope", () => {
     });
     expect(env).toContain("[upgrade] LastDB upgraded");
     expect(env.indexOf("Situations notices")).toBeLessThan(env.indexOf("---"));
+  });
+});
+
+describe("routine attribution env + trailers", () => {
+  test("routineActor prefixes id", () => {
+    expect(routineActor("last-stack-fkanban-pickup")).toBe("routine:last-stack-fkanban-pickup");
+  });
+
+  test("buildRoutineAttributionEnv sets LastGit actor and driven-by", () => {
+    const env = buildRoutineAttributionEnv(
+      "last-stack-fkanban-pickup",
+      "/home/t/.routines/runs/last-stack-fkanban-pickup/2026-07-16T12-00-00-000Z",
+    );
+    expect(env.DRIVEN_BY).toBe("routine");
+    expect(env.AUTOMATION_ID).toBe("last-stack-fkanban-pickup");
+    expect(env.LASTGIT_ACTOR).toBe("routine:last-stack-fkanban-pickup");
+    expect(env.ROUTINES_RUN_DIR).toContain("last-stack-fkanban-pickup");
+    expect(env.ROUTINES_RUN_ID).toBe("2026-07-16T12-00-00-000Z");
+  });
+
+  test("formatAttributionTrailers is stable machine text", () => {
+    expect(formatAttributionTrailers({ automationId: "x", runId: "rid" })).toBe(
+      ["Driven-By: routine", "Automation-Id: x", "Run-Id: rid"].join("\n"),
+    );
+    expect(formatAttributionTrailers({ automationId: "x" })).toBe(
+      ["Driven-By: routine", "Automation-Id: x"].join("\n"),
+    );
   });
 });
