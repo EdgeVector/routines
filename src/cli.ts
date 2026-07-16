@@ -18,7 +18,14 @@ import {
   type ImportPlan,
 } from "./import.ts";
 import { migrateKanbanIds } from "./kanban-id-migration.ts";
-import { acquireLock, evaluateOnce, isLocked, releaseLock, startDaemon } from "./daemon.ts";
+import {
+  acquireLock,
+  evaluateOnce,
+  formatConcurrency,
+  isLocked,
+  releaseLock,
+  startDaemon,
+} from "./daemon.ts";
 import { installDaemon, plistPath, renderPlist, uninstallDaemon } from "./launchd.ts";
 import { loadActiveSituations } from "./situations.ts";
 import { loadAll, loadEntry, resolvePrompt, type RoutineEntry } from "./registry.ts";
@@ -620,12 +627,15 @@ async function cmdDaemon(rest: string[]): Promise<number> {
     allowPositionals: true,
   });
   const catchupMs = values.catchup ? Number(values.catchup) * 1000 : 0;
-  const concurrency = values.concurrency ? Number(values.concurrency) : 4;
+  // Default 0 = unlimited free-slot pool. Positive N is an optional hard cap.
+  // Explicit --concurrency 0 also means unlimited (not "run nothing").
+  const concurrency = values.concurrency !== undefined ? Number(values.concurrency) : 0;
   await initRoutinesSentry({ service: "routinesd" });
+  const capLabel = formatConcurrency(concurrency);
 
   if (values.once) {
     const results = await evaluateOnce({ once: true, catchupMs, concurrency });
-    console.error(`daemon --once: dispatched ${results.length} run(s)`);
+    console.error(`daemon --once: dispatched ${results.length} run(s) concurrency=${capLabel}`);
     return 0;
   }
 
@@ -634,7 +644,9 @@ async function cmdDaemon(rest: string[]): Promise<number> {
   const stop = () => handle.stop();
   process.on("SIGTERM", stop);
   process.on("SIGINT", stop);
-  console.error(`routinesd started (tick=${tickMs}ms concurrency=${concurrency} home=${routinesHome()})`);
+  console.error(
+    `routinesd started (tick=${tickMs}ms concurrency=${capLabel} free-slot-pool=on home=${routinesHome()})`,
+  );
   await handle.done;
   return 0;
 }

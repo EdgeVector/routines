@@ -3,7 +3,13 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { dueOccurrence, evaluateOnce } from "../src/daemon.ts";
+import {
+  dueOccurrence,
+  evaluateOnce,
+  formatConcurrency,
+  normalizeConcurrency,
+  startDaemon,
+} from "../src/daemon.ts";
 import { loadEntry } from "../src/registry.ts";
 
 let home: string;
@@ -205,5 +211,106 @@ describe("daemon evaluateOnce", () => {
     expect(stdout).toContain(`FBRAIN_FOLDDB_SOCKET=${socket}`);
     expect(stdout).toContain(`LASTGIT_SOCKET=${socket}`);
     expect(stdout).toContain(`LASTDB_SOCKET_PATH=${socket}`);
+  });
+
+  test("default concurrency is unlimited (no skip-cap when many are due)", async () => {
+    for (const id of ["u1", "u2", "u3", "u4", "u5"]) {
+      writeRoutine(id, "claude");
+    }
+    const events: string[] = [];
+    const results = await evaluateOnce({
+      once: true,
+      catchupMs: 60_000,
+      // omit concurrency → unlimited
+      log: (e) => events.push(`${e.kind}:${e.id ?? e.detail ?? ""}`),
+    });
+    expect(results.map((r) => r.id).sort()).toEqual(["u1", "u2", "u3", "u4", "u5"]);
+    expect(events.some((e) => e.startsWith("skip-cap:"))).toBe(false);
+    expect(events.some((e) => e.includes("concurrency=unlimited"))).toBe(true);
+  });
+
+  test("positive concurrency still skip-caps when full (evaluateOnce)", async () => {
+    writeRoutine("c1", "claude");
+    writeRoutine("c2", "claude");
+    writeRoutine("c3", "claude");
+    const events: string[] = [];
+    const results = await evaluateOnce({
+      once: true,
+      catchupMs: 60_000,
+      concurrency: 1,
+      log: (e) => events.push(`${e.kind}:${e.id ?? ""}`),
+    });
+    // Alphabetical: c1 starts; c2 and c3 skip-cap in the same pass.
+    expect(results.map((r) => r.id)).toEqual(["c1"]);
+    expect(events.filter((e) => e.startsWith("skip-cap:")).length).toBeGreaterThanOrEqual(2);
+  });
+});
+
+describe("normalizeConcurrency / formatConcurrency", () => {
+  test("0 / unset / negative mean unlimited", () => {
+    expect(normalizeConcurrency(undefined)).toBe(0);
+    expect(normalizeConcurrency(0)).toBe(0);
+    expect(normalizeConcurrency(-1)).toBe(0);
+    expect(normalizeConcurrency(NaN)).toBe(0);
+    expect(formatConcurrency(0)).toBe("unlimited");
+    expect(formatConcurrency(10)).toBe("10");
+  });
+});
+
+describe("daemon free-slot pool", () => {
+  test("when a slot frees, the next due routine starts without waiting for the whole batch", async () => {
+    // Slow harness (~200ms). HOURLY rrule so a completed routine is not
+    // immediately due again; free-slot + fair order must then drain b and c.
+    const slow = stub(
+      join(home, "slow-harness"),
+      "#!/bin/sh\nsleep 0.2\necho SLOW-OK\nexit 0\n",
+    );
+    process.env.ROUTINES_CLAUDE_BIN = slow;
+    process.env.ROUTINES_CODEX_BIN = slow;
+
+    for (const id of ["fs-a", "fs-b", "fs-c"]) {
+      writeFileSync(
+        join(home, "registry", `${id}.toml`),
+        [
+          'harness = "claude"',
+          'model = "test-model"',
+          'rrule = "FREQ=HOURLY"',
+          `prompt = "hello from ${id}"`,
+          'heartbeat_slug = "routine-heartbeats"',
+        ].join("\n") + "\n",
+      );
+    }
+
+    const events: { t: number; kind: string; id?: string }[] = [];
+    const t0 = Date.now();
+    const handle = startDaemon({
+      tickMs: 40,
+      concurrency: 1,
+      catchupMs: 3_600_000, // one hourly occurrence due
+      log: (e) => events.push({ t: Date.now() - t0, kind: e.kind, id: e.id }),
+    });
+
+    const deadline = Date.now() + 5000;
+    while (Date.now() < deadline) {
+      const doneIds = new Set(events.filter((e) => e.kind === "complete").map((e) => e.id));
+      if (doneIds.size >= 3) break;
+      await new Promise((r) => setTimeout(r, 40));
+    }
+    handle.stop();
+    await handle.done;
+
+    const dispatches = events.filter((e) => e.kind === "dispatch").map((e) => e.id);
+    const completes = events.filter((e) => e.kind === "complete").map((e) => e.id);
+    expect(new Set(dispatches)).toEqual(new Set(["fs-a", "fs-b", "fs-c"]));
+    expect(new Set(completes)).toEqual(new Set(["fs-a", "fs-b", "fs-c"]));
+
+    // Free-slot: after first complete, another dispatch happens (not batch-wait).
+    const timeline = events.filter((e) => e.kind === "dispatch" || e.kind === "complete");
+    const firstCompleteIdx = timeline.findIndex((e) => e.kind === "complete");
+    expect(firstCompleteIdx).toBeGreaterThanOrEqual(0);
+    expect(timeline.slice(firstCompleteIdx + 1).some((e) => e.kind === "dispatch")).toBe(true);
+
+    // Under concurrency=1 the other due routines skip-cap until a slot frees.
+    expect(events.some((e) => e.kind === "skip-cap")).toBe(true);
   });
 });

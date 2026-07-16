@@ -72,7 +72,9 @@ if [ -z "\${ROUTINES_CLI:-}" ]; then
 fi
 ROUTINES_CLI="\${ROUTINES_CLI:-$cli_entry}"
 BUN_BIN="\${ROUTINES_BUN_BIN:-\$HOME/.bun/bin/bun}"
-CONCURRENCY="\${ROUTINES_CONCURRENCY:-20}"
+# 0 = unlimited free-slot pool (default). Set ROUTINES_CONCURRENCY to a positive
+# integer only if you intentionally want a hard global cap.
+CONCURRENCY="\${ROUTINES_CONCURRENCY:-0}"
 
 exec "\$BUN_BIN" "\$ROUTINES_CLI" daemon --concurrency "\$CONCURRENCY"
 EOF

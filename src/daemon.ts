@@ -1,16 +1,20 @@
 // routinesd — the single scheduler/dispatcher.
 //
-// Each tick it loads the on-disk registry, computes which active routines are
-// due (per their rrule and last-fire state), and dispatches them subject to:
-//   - per-routine single-flight (a lock file; a routine never overlaps itself),
-//   - a global concurrency cap,
-//   - the dispatch-time Situation fence (skip a run whose id matches an active
-//     Situation's scope_routines glob, and log why).
+// Free-slot pool (not batch-wait):
+//   Each tick (and every time a run completes) the daemon loads the registry,
+//   finds due routines, and starts as many as capacity allows. Completing a
+//   run frees its slot immediately and the next due routine is admitted —
+//   the scheduler never blocks on Promise.all of a whole batch.
 //
-// `--once` runs a single evaluation pass (used by the e2e and for testing);
-// the default loop runs until signalled. The daemon loop legitimately uses
-// timers between ticks — that is a long-lived supervised process, not an agent
-// "sleep-to-wait".
+// Dispatch constraints:
+//   - per-routine single-flight (lock file; a routine never overlaps itself)
+//   - optional global concurrency (0 / unset = unlimited — registry schedules
+//     define what runs; no silent skip-cap starvation by default)
+//   - per-run timeout_min (runner kills that process only)
+//   - dispatch-time Situation fence
+//
+// `--once` runs a single evaluation pass and waits for the jobs it started
+// (used by e2e/tests). The default loop runs until signalled.
 
 import {
   existsSync,
@@ -34,7 +38,10 @@ export interface DaemonOptions {
   once?: boolean;
   /** ms between ticks in loop mode (default 15s). */
   tickMs?: number;
-  /** Max concurrently-running routines (default 4). */
+  /**
+   * Max concurrently-running routines.
+   * `0` or unset = unlimited (default). Positive N = hard cap (optional).
+   */
   concurrency?: number;
   /** Consider a never-fired routine due if it has an occurrence within this
    * window (ms) before now. 0 = cron semantics (warm up, no catch-up). The e2e
@@ -62,6 +69,21 @@ export interface DaemonEvent {
 
 function defaultLog(event: DaemonEvent): void {
   process.stderr.write(JSON.stringify(event) + "\n");
+}
+
+/**
+ * Normalize concurrency: `0` / negative / non-finite / undefined → unlimited (0).
+ * Positive integers are a hard cap.
+ */
+export function normalizeConcurrency(raw: number | undefined | null): number {
+  if (raw == null || !Number.isFinite(raw) || raw <= 0) return 0;
+  return Math.floor(raw);
+}
+
+/** Human-readable concurrency for logs (`unlimited` or a number). */
+export function formatConcurrency(n: number): string {
+  const c = normalizeConcurrency(n);
+  return c <= 0 ? "unlimited" : String(c);
 }
 
 function lockPath(id: string): string {
@@ -163,17 +185,36 @@ export function dueOccurrence(
   return occ;
 }
 
+
+/** Prefer never-fired, then oldest lastFire, so skip-capped work is not starved
+ * by a just-completed (or catch-up) routine that sorts first alphabetically. */
+function lastFireSortKey(id: string): number {
+  const st = readState(id);
+  if (!st.lastFire) return Number.NEGATIVE_INFINITY;
+  const t = new Date(st.lastFire).getTime();
+  return Number.isFinite(t) ? t : Number.NEGATIVE_INFINITY;
+}
+
 interface DispatchDeps {
   now: Date;
   situations: ActiveSituation[];
   inFlight: Set<string>;
+  /** 0 = unlimited. */
   concurrency: number;
   log: (e: DaemonEvent) => void;
   running: Promise<RunResult>[];
+  /** Free-slot pool: called after a run releases its slot. */
+  onSlotFree?: () => void;
 }
 
 function tryDispatch(entry: RoutineEntry, occ: Date, deps: DispatchDeps): void {
   const { now, situations, inFlight, concurrency, log } = deps;
+
+  // Already tracked as running in this daemon process.
+  if (inFlight.has(entry.id)) {
+    log({ ts: now.toISOString(), kind: "skip-single-flight", id: entry.id });
+    return;
+  }
 
   // Situation fence — check first so a fenced routine is never dispatched, and
   // advance its last-fire so we don't re-evaluate the same instant every tick.
@@ -189,9 +230,15 @@ function tryDispatch(entry: RoutineEntry, occ: Date, deps: DispatchDeps): void {
     return;
   }
 
-  if (inFlight.size >= concurrency) {
-    log({ ts: now.toISOString(), kind: "skip-cap", id: entry.id, detail: `at cap ${concurrency}` });
-    return; // leave lastFire unchanged — retry next tick
+  // Optional hard cap only when concurrency > 0. Unlimited (0) never skip-caps.
+  if (concurrency > 0 && inFlight.size >= concurrency) {
+    log({
+      ts: now.toISOString(),
+      kind: "skip-cap",
+      id: entry.id,
+      detail: `at cap ${concurrency}`,
+    });
+    return; // leave lastFire unchanged — free-slot pool retries when a slot frees
   }
 
   if (isLocked(entry.id) || !acquireLock(entry.id)) {
@@ -201,7 +248,12 @@ function tryDispatch(entry: RoutineEntry, occ: Date, deps: DispatchDeps): void {
 
   patchState(entry.id, { lastFire: occ.toISOString() });
   inFlight.add(entry.id);
-  log({ ts: now.toISOString(), kind: "dispatch", id: entry.id, detail: `${entry.harness}/${entry.model}` });
+  log({
+    ts: now.toISOString(),
+    kind: "dispatch",
+    id: entry.id,
+    detail: `${entry.harness}/${entry.model}`,
+  });
 
   const p = runRoutine(entry, { quiet: true })
     .then((result) => {
@@ -225,16 +277,35 @@ function tryDispatch(entry: RoutineEntry, occ: Date, deps: DispatchDeps): void {
     .finally(() => {
       inFlight.delete(entry.id);
       releaseLock(entry.id);
+      // Defer refill so we never re-enter the admit loop mid-dispatch scan.
+      if (deps.onSlotFree) {
+        queueMicrotask(() => deps.onSlotFree?.());
+      }
     });
   deps.running.push(p);
 }
 
-/** One evaluation pass. Returns the promises of any runs it dispatched. */
-export async function evaluateOnce(opts: DaemonOptions = {}): Promise<RunResult[]> {
+export interface DispatchPassOptions extends DaemonOptions {
+  /** Shared in-flight set (daemon loop). Fresh set per call if omitted. */
+  inFlight?: Set<string>;
+  /** Free-slot pool callback when any started run completes. */
+  onSlotFree?: () => void;
+  /** When false, do not emit a tick log line (internal refills). Default true. */
+  emitTick?: boolean;
+}
+
+/**
+ * Scan the registry and start every due routine that fits capacity.
+ * Returns promises for runs *started this pass* (not all in-flight).
+ * Does not await them — caller decides (evaluateOnce waits; startDaemon does not).
+ */
+export function dispatchDue(opts: DispatchPassOptions = {}): Promise<RunResult>[] {
   const log = opts.log ?? defaultLog;
-  const concurrency = opts.concurrency ?? 4;
+  const concurrency = normalizeConcurrency(opts.concurrency);
   const catchupMs = opts.catchupMs ?? 0;
   const now = new Date();
+  const inFlight = opts.inFlight ?? new Set<string>();
+  const emitTick = opts.emitTick !== false;
 
   const { entries, errors } = loadAll();
   for (const e of errors) {
@@ -249,20 +320,51 @@ export async function evaluateOnce(opts: DaemonOptions = {}): Promise<RunResult[
     log({ ts: now.toISOString(), kind: "situations-degraded", detail: check.error });
   }
 
-  const inFlight = new Set<string>();
   const running: Promise<RunResult>[] = [];
-  const deps: DispatchDeps = { now, situations: check.situations, inFlight, concurrency, log, running };
+  const deps: DispatchDeps = {
+    now,
+    situations: check.situations,
+    inFlight,
+    concurrency,
+    log,
+    running,
+    onSlotFree: opts.onSlotFree,
+  };
 
-  log({ ts: now.toISOString(), kind: "tick", detail: `${entries.length} routines` });
+  if (emitTick) {
+    const cap = formatConcurrency(concurrency);
+    log({
+      ts: now.toISOString(),
+      kind: "tick",
+      detail: `${entries.length} routines in_flight=${inFlight.size} concurrency=${cap}`,
+    });
+  }
 
+  // Collect due work first, then admit in fair order (never-fired / oldest lastFire).
+  const due: { entry: (typeof entries)[number]; occ: Date }[] = [];
   for (const entry of entries) {
     if (entry.status !== "active") continue;
     const occ = dueOccurrence(entry, now, catchupMs, log);
     if (!occ) continue;
+    due.push({ entry, occ });
+  }
+  due.sort((a, b) => {
+    const ka = lastFireSortKey(a.entry.id);
+    const kb = lastFireSortKey(b.entry.id);
+    if (ka !== kb) return ka - kb;
+    return a.entry.id.localeCompare(b.entry.id);
+  });
+  for (const { entry, occ } of due) {
     tryDispatch(entry, occ, deps);
   }
 
-  return Promise.all(running);
+  return running;
+}
+
+/** One evaluation pass. Waits for every run started in this pass (tests / --once). */
+export async function evaluateOnce(opts: DaemonOptions = {}): Promise<RunResult[]> {
+  const started = dispatchDue(opts);
+  return Promise.all(started);
 }
 
 export interface DaemonHandle {
@@ -270,20 +372,76 @@ export interface DaemonHandle {
   done: Promise<void>;
 }
 
-/** Run the scheduler loop until stop() is called. */
+/**
+ * Run the scheduler as a free-slot pool until stop() is called.
+ *
+ * - Periodic ticks re-scan due work.
+ * - When any run completes, a refill pass admits the next due routine immediately
+ *   (does not wait for the rest of an artificial "batch" to finish).
+ * - Default concurrency is unlimited; optional positive cap still works.
+ */
 export function startDaemon(opts: DaemonOptions = {}): DaemonHandle {
   const tickMs = opts.tickMs ?? 15_000;
+  const concurrency = normalizeConcurrency(opts.concurrency);
+  const catchupMs = opts.catchupMs ?? 0;
+  const log = opts.log ?? defaultLog;
+
   let stopped = false;
   let resolveDone!: () => void;
   const done = new Promise<void>((r) => (resolveDone = r));
 
+  /** Persistent across ticks — the free-slot pool membership. */
+  const inFlight = new Set<string>();
+
+  // Serialize admit passes; queue another if a slot frees mid-scan.
+  let admitting = false;
+  let admitAgain = false;
+
+  const admitDue = (): void => {
+    if (stopped) return;
+    if (admitting) {
+      admitAgain = true;
+      return;
+    }
+    admitting = true;
+    try {
+      do {
+        admitAgain = false;
+        // Fire-and-forget: do not await started runs (that was the batch freeze).
+        dispatchDue({
+          concurrency,
+          catchupMs,
+          log,
+          inFlight,
+          emitTick: true,
+          onSlotFree: () => {
+            if (!stopped) admitDue();
+          },
+        });
+      } while (admitAgain && !stopped);
+    } catch (err) {
+      captureRoutinesException(err, { tags: { service: "routinesd", phase: "admit" } });
+      log({
+        ts: new Date().toISOString(),
+        kind: "registry-error",
+        detail: `admit failed: ${(err as Error).message}`,
+      });
+    } finally {
+      admitting = false;
+      if (admitAgain && !stopped) {
+        // A completion arrived during finally — run one more pass.
+        voidPromiseThen(() => admitDue());
+      }
+    }
+  };
+
   const loop = async () => {
     while (!stopped) {
       try {
-        await evaluateOnce(opts);
+        admitDue();
       } catch (err) {
         captureRoutinesException(err, { tags: { service: "routinesd", phase: "tick" } });
-        (opts.log ?? defaultLog)({
+        log({
           ts: new Date().toISOString(),
           kind: "registry-error",
           detail: `tick failed: ${(err as Error).message}`,
@@ -294,7 +452,10 @@ export function startDaemon(opts: DaemonOptions = {}): DaemonHandle {
     }
     resolveDone();
   };
-  void loop();
+  // Start the loop without blocking the caller.
+  loop().catch((err) => {
+    captureRoutinesException(err, { tags: { service: "routinesd", phase: "loop" } });
+  });
 
   return {
     stop: () => {
@@ -311,4 +472,9 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
+}
+
+/** Schedule fn on the next microtask without using the `void` operator (bun parse). */
+function voidPromiseThen(fn: () => void): void {
+  Promise.resolve().then(fn);
 }
