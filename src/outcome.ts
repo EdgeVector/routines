@@ -64,6 +64,7 @@ const ALIAS_TO_CANONICAL: Record<string, string> = {
   "drain-open-prs": "last-stack-drain-open-prs",
   "consolidate-brain": "last-stack-consolidate-brain",
   "consolidate-fbrain": "last-stack-consolidate-brain",
+  "north-star-rollup": "last-stack-north-star-rollup",
   "morning-sync": "last-stack-morning-sync",
   "papercut-sweep": "last-stack-papercut-sweep",
   "daily-agent-papercut-sweep": "last-stack-papercut-sweep",
@@ -418,9 +419,10 @@ function parseHeartbeatPhrase(
   phrase: string,
   routineId: string,
 ): Omit<Candidate, "source" | "index"> | null {
-  // "name ISO ok detail" or "name ok detail"
+  // "name ISO ok detail", "name $iso_ts ok detail", or "name ok detail".
+  // The append-line scanner sees the shell command before variable expansion.
   const m = phrase.match(
-    /^\s*([A-Za-z][A-Za-z0-9._-]{2,80})\s+(?:\d{4}-\d{2}-\d{2}T\S+\s+)?(ok|noop|error)\b(.*)$/i,
+    /^\s*([A-Za-z][A-Za-z0-9._-]{2,80})\s+(?:(?!ok\b|noop\b|error\b)\S+\s+)?(ok|noop|error)\b(.*)$/i,
   );
   if (!m) return null;
   const name = m[1]!;

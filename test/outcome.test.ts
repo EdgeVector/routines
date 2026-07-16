@@ -118,6 +118,21 @@ daily-retro-prevention 2026-07-14T13:33:00Z ok bites=5 cards=2
     expect(timedOut.detail).toBe("timed out");
   });
 
+  test("north-star-rollup heartbeat wins over post-heartbeat timeout", () => {
+    const text = `
+/bin/zsh -lc 'last-stack-brain-append-heartbeat --line "north-star-rollup $iso_ts ok active_ns=8 top_live=north-star-storage-metering-correctness:9,north-star-lastdb-deliver-data-slices:8,north-star-lastgit-native-forge:7 unattributed_live=9 orphan_live=0 html=/Users/tomtang/code/edgevector/north-star-dashboard.html"'
+succeeded in 5072ms:
+appended heartbeat to routine-heartbeats
+`;
+    const o = parseOutcome("last-stack-north-star-rollup", text, {
+      exitCode: 124,
+      timedOut: true,
+    });
+    expect(o.kind).toBe("ok");
+    expect(o.source).toBe("heartbeat");
+    expect(o.detail).toContain("active_ns=8");
+  });
+
   test("exit 0 with no signal is unknown (not guessed as noop)", () => {
     const o = parseOutcome("last-stack-groom-board", "Board groom complete.\nCounts: ...", { exitCode: 0 });
     // Prose without explicit ok|noop|error token near a name may still miss —
