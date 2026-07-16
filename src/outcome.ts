@@ -16,6 +16,7 @@ export type OutcomeKind = "ok" | "noop" | "error" | "unknown";
 export type OutcomeSource =
   | "routine_result" // explicit ROUTINE_RESULT trailer
   | "heartbeat" // ok|noop|error line / append-heartbeat --line
+  | "useful_work" // routine-specific concrete work evidence in the transcript
   | "safe_skip" // known successful skip transcript from a bounded maintenance routine
   | "exit" // inferred from non-zero exit / timeout only
   | "none";
@@ -216,6 +217,8 @@ export function parseOutcome(
   if (candidates.length > 0) {
     candidates.sort((a, b) => b.score - a.score || b.index - a.index);
     const best = candidates[0]!;
+    const diskReclaimUsefulWork = parseDiskReclaimUsefulWork(routineId, text, opts, best);
+    if (diskReclaimUsefulWork) return diskReclaimUsefulWork;
     return { kind: best.kind, detail: best.detail, source: best.source };
   }
 
@@ -272,6 +275,89 @@ export function parseOutcome(
   }
 
   return { kind: "unknown", detail: null, source: "none" };
+}
+
+function parseDiskReclaimUsefulWork(
+  routineId: string,
+  text: string,
+  opts: { exitCode?: number | null; timedOut?: boolean },
+  best: Candidate,
+): RunOutcome | null {
+  if (!nameMatchesRoutine("disk-reclaim", routineId)) return null;
+  if (best.kind !== "noop") return null;
+  if (opts.timedOut) return null;
+  if (opts.exitCode !== undefined && opts.exitCode !== null && opts.exitCode !== 0) return null;
+
+  const evidence = diskReclaimEvidence(text);
+  if (!evidence) return null;
+
+  const prior = best.detail ? `; prior-noop=${best.detail}` : "";
+  return {
+    kind: "ok",
+    detail: clip(`disk-reclaim useful-work: ${evidence}${prior}`),
+    source: "useful_work",
+  };
+}
+
+function diskReclaimEvidence(text: string): string | null {
+  const completion = text.search(/\bdisk reclaim completed\b/i);
+  const nextCompletion =
+    completion >= 0
+      ? text.slice(completion + 1).search(/\bdisk reclaim completed\b/i)
+      : -1;
+  const end =
+    completion >= 0 && nextCompletion >= 0
+      ? completion + 1 + nextCompletion
+      : completion >= 0
+        ? completion + 2_000
+        : text.length;
+  const haystack = completion >= 0 ? text.slice(completion, end) : text;
+  const reclaimed = firstPositiveNumber(
+    haystack,
+    /\breclaimed\s+(?:about\s+)?([0-9]+(?:\.[0-9]+)?)\s*(?:gib|gb|g)\b/gi,
+  );
+  if (reclaimed !== null) return `reclaimed=${formatGiB(reclaimed)}GiB`;
+
+  const raised = firstPositiveDelta(
+    haystack,
+    /\b(?:raised|increased|moved)\b[\s\S]{0,120}?\bfrom\s+`?([0-9]+(?:\.[0-9]+)?)\s*(?:gib|gb|g)\s+free`?\s+\bto\s+`?([0-9]+(?:\.[0-9]+)?)\s*(?:gib|gb|g)\s+free`?/gi,
+  );
+  if (raised !== null) return `free-space-delta=${formatGiB(raised)}GiB`;
+
+  const upFrom = firstPositiveDelta(
+    haystack,
+    /\bfree space\b[\s\S]{0,120}?\b(?:up|raised)\s+from\s+`?([0-9]+(?:\.[0-9]+)?)\s*(?:gib|gb|g)`?[\s\S]{0,80}?\b(?:to|now)\s+`?([0-9]+(?:\.[0-9]+)?)\s*(?:gib|gb|g)`?/gi,
+  );
+  if (upFrom !== null) return `free-space-delta=${formatGiB(upFrom)}GiB`;
+
+  const pruned = firstPositiveNumber(
+    haystack,
+    /\b(?:pruned|removed|deleted)\s+([1-9][0-9]*)\b[^\n\r]{0,120}?\bworktrees?\b/gi,
+  );
+  if (pruned !== null) return `worktrees-removed=${Math.trunc(pruned)}`;
+
+  return null;
+}
+
+function firstPositiveNumber(text: string, re: RegExp): number | null {
+  for (const m of text.matchAll(re)) {
+    const n = Number(m[1]);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return null;
+}
+
+function firstPositiveDelta(text: string, re: RegExp): number | null {
+  for (const m of text.matchAll(re)) {
+    const from = Number(m[1]);
+    const to = Number(m[2]);
+    if (Number.isFinite(from) && Number.isFinite(to) && to > from) return to - from;
+  }
+  return null;
+}
+
+function formatGiB(n: number): string {
+  return Number.isInteger(n) ? String(n) : n.toFixed(1).replace(/\.0$/, "");
 }
 
 function parseKnownSafeSkip(
@@ -389,6 +475,7 @@ export function outcomeFromMeta(meta: Record<string, unknown>): RunOutcome {
   const source: OutcomeSource =
     sourceRaw === "routine_result" ||
     sourceRaw === "heartbeat" ||
+    sourceRaw === "useful_work" ||
     sourceRaw === "safe_skip" ||
     sourceRaw === "exit" ||
     sourceRaw === "none"

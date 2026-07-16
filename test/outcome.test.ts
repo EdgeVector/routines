@@ -166,6 +166,45 @@ Process enumeration was blocked by sandbox/system policy.
     expect(o.source).toBe("exit");
     expect(o.detail).toBe("exit 2");
   });
+
+  test("classifies disk reclaim with concrete reclaimed space as useful work despite noop noise", () => {
+    const text = `
+ROUTINE_RESULT outcome=noop detail=board-read-unavailable
+Disk reclaim completed. Reclaimed about 23 GiB total and raised \`/System/Volumes/Data\` from 9.7 GiB free to 32 GiB free.
+
+Pruned 12 clean, zero-unique, \`done\` F-Kanban worktrees and deleted their local branches.
+`;
+    const o = parseOutcome("last-stack-disk-reclaim", text, { exitCode: 0 });
+    expect(o.kind).toBe("ok");
+    expect(o.source).toBe("useful_work");
+    expect(o.detail).toContain("reclaimed=23GiB");
+    expect(o.detail).toContain("prior-noop=");
+    expect(o.detail).toContain("board-read-unavailable");
+  });
+
+  test("leaves zero-reclaim disk runs as noop when the explicit signal says noop", () => {
+    const text = `
+ROUTINE_RESULT outcome=noop detail=free-space-ok
+Disk reclaim completed. Reclaimed 0 GiB. No worktrees were removed.
+`;
+    const o = parseOutcome("last-stack-disk-reclaim", text, { exitCode: 0 });
+    expect(o.kind).toBe("noop");
+    expect(o.source).toBe("routine_result");
+    expect(o.detail).toContain("free-space-ok");
+  });
+
+  test("does not use historical memory reclaim evidence after the current disk summary", () => {
+    const text = `
+ROUTINE_RESULT outcome=noop detail=free-space-ok
+Disk reclaim completed. Reclaimed 0 GiB. No worktrees were removed.
+
+Prior memory:
+- Yesterday: Disk reclaim completed. Reclaimed about 23 GiB total and pruned 12 worktrees.
+`;
+    const o = parseOutcome("last-stack-disk-reclaim", text, { exitCode: 0 });
+    expect(o.kind).toBe("noop");
+    expect(o.source).toBe("routine_result");
+  });
 });
 
 describe("aggregateOutcomes", () => {
