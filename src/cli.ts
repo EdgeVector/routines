@@ -778,9 +778,9 @@ function cmdHygiene(rest: string[]): number {
   } else {
     printHygieneHuman(result);
   }
-  // Non-zero only when publish or install-ff hard-failed, or daemon missing.
+  // Non-zero only when the daemon is missing or an opted-in install ff failed.
+  // publish-status can fail on missing catalog schemas without blocking prune.
   if (!result.daemon.loaded) return 1;
-  if (result.publish.attempted && !result.publish.ok) return 1;
   if (result.installFf.attempted && !result.installFf.ok) return 1;
   return 0;
 }
