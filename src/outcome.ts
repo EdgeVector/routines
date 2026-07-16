@@ -478,13 +478,11 @@ function parseHeartbeatPhrase(
   if (!kind) return null;
   const detail = clip(m[3] ?? "") || null;
   const matched = nameMatchesRoutine(name, routineId);
-  // Unmatched names inside --line are still suspicious (wrong copy-paste); only
-  // accept a weak score when the name at least looks like a routine slug.
-  if (!matched && !name.includes("-")) return null;
+  if (!matched) return null;
   return {
     kind,
     detail,
-    score: matched ? 85 : 45,
+    score: 85,
   };
 }
 
