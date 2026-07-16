@@ -83,6 +83,54 @@ program-driver 2026-07-13T10:00:00Z ok generated-schema-resolver-local-pack-cons
     expect(o.detail).toContain("generated-schema");
   });
 
+  test("ignores pre-run memory heartbeats when startedAt is set", () => {
+    // Agent dumps memory.md (historical error) then finishes with a fresh ok.
+    const text = `
+merge-babysit 2026-07-15T20:02:59Z error stuck=7 fixed=0 filed=0 reasons=lastgit-write-failed
+merge-babysit 2026-07-16T17:34:22Z ok stuck=0 fixed=0 filed=0 reasons=no-stuck-crs
+`;
+    const o = parseOutcome("last-stack-merge-babysit", text, {
+      exitCode: 0,
+      startedAt: "2026-07-16T17:21:51.929Z",
+    });
+    expect(o.kind).toBe("ok");
+    expect(o.detail).toContain("no-stuck-crs");
+  });
+
+  test("incomplete/live runs do not go red from historical memory dumps", () => {
+    const text = `
+sed -n '1,220p' memory.md
+merge-babysit 2026-07-15T20:02:59Z error stuck=7 fixed=0 filed=0 reasons=lastgit-write-failed
+merge-babysit 2026-07-16T11:03:01Z noop stuck=0 fixed=0 filed=0 reasons=no-stuck-crs
+`;
+    const o = parseOutcome("last-stack-merge-babysit", text, {
+      incomplete: true,
+      startedAt: "2026-07-16T17:42:40.770Z",
+    });
+    expect(o.kind).toBe("unknown");
+    expect(o.source).toBe("none");
+  });
+
+  test("incomplete run still accepts explicit append-heartbeat", () => {
+    const text = `
+merge-babysit 2026-07-15T20:02:59Z error stuck=7
+/Users/tomtang/.last-stack/bin/last-stack-brain-append-heartbeat --line "merge-babysit 2026-07-16T17:50:00Z ok stuck=0 fixed=1 filed=0 reasons=merged"
+`;
+    const o = parseOutcome("last-stack-merge-babysit", text, {
+      incomplete: true,
+      startedAt: "2026-07-16T17:42:40.770Z",
+    });
+    expect(o.kind).toBe("ok");
+    expect(o.source).toBe("heartbeat");
+    expect(o.detail).toContain("merged");
+  });
+
+  test("rejects RESULT: prompt-fixture detail", () => {
+    const text = `RESULT: ok example-from-prompt fixture from the Codex stderr diff`;
+    const o = parseOutcome("last-stack-merge-babysit", text, { exitCode: 0 });
+    expect(o.kind).toBe("unknown");
+  });
+
   test("ignores other routines' error heartbeats quoted in a successful retro", () => {
     // daily-retro transcripts paste incident bodies that quote:
     //   canonicalize-daily 2026-07-13T17:14:57Z error also erroring...
