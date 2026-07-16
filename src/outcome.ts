@@ -140,6 +140,39 @@ interface Candidate {
 }
 
 /**
+ * Stream-json harnesses (Claude) wrap every turn in a JSONL envelope. A
+ * `"type":"user"` line's content is a tool_result — data a prior Bash/kanban/
+ * brain call RETURNED, not anything this run's own agent said. Routines that
+ * research past incidents (daily-retro-prevention, routine-error-triage) very
+ * often `kanban show`/`brain get` a card whose body itself quotes a literal
+ * `ROUTINE_RESULT outcome=ok ...` string as evidence about a DIFFERENT run.
+ * That quoted text must not be readable as *this* run's own result. Lines
+ * that aren't valid single-line JSON (plain-text harnesses, stderr) pass
+ * through unchanged — there's no tool_result structure to strip there.
+ */
+function stripToolResultPayloads(raw: string): string {
+  const out: string[] = [];
+  for (const line of raw.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("{")) {
+      out.push(line);
+      continue;
+    }
+    let obj: unknown;
+    try {
+      obj = JSON.parse(trimmed);
+    } catch {
+      out.push(line);
+      continue;
+    }
+    const type = (obj as { type?: unknown } | null)?.type;
+    if (type === "user") continue; // tool_result envelope — quoted data, not this agent's speech
+    out.push(line);
+  }
+  return out.join("\n");
+}
+
+/**
  * Parse the best outcome signal from combined harness output.
  * @param routineId registry id (used to prefer matching heartbeat names)
  * @param text stdout + stderr (order does not matter; we scan all)
@@ -151,8 +184,12 @@ export function parseOutcome(
   opts: { exitCode?: number | null; timedOut?: boolean } = {},
 ): RunOutcome {
   const candidates: Candidate[] = [];
+  // Highest-confidence, unscoped-by-name signals: only trust these from the
+  // agent's own speech, never from a quoted tool_result (see
+  // stripToolResultPayloads doc comment).
+  const ownText = stripToolResultPayloads(text);
 
-  for (const m of text.matchAll(ROUTINE_RESULT_RE)) {
+  for (const m of ownText.matchAll(ROUTINE_RESULT_RE)) {
     const kind = asKind(m[1]!);
     if (!kind) continue;
     const rest = clip(m[2] ?? "");
@@ -168,7 +205,7 @@ export function parseOutcome(
     });
   }
 
-  for (const m of text.matchAll(RESULT_COLON_RE)) {
+  for (const m of ownText.matchAll(RESULT_COLON_RE)) {
     const kind = asKind(m[1]!);
     if (!kind) continue;
     const rest = clip(m[2] ?? "");

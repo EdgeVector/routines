@@ -83,6 +83,69 @@ kanban-pickup 2026-07-13T17:06:29Z ok cards=1
     expect(o.detail).toMatch(/Retro complete|stream-json success/i);
   });
 
+  test("ignores a ROUTINE_RESULT trailer quoted inside a tool_result (kanban show of a past incident card)", () => {
+    // Reproduces the 2026-07-16 daily-retro-prevention false "ok" escalation:
+    // the retro's own Step 1 evidence-gathering ran `kanban show
+    // routine-error-last-stack-fkanban-watch`, whose card body quotes a PRIOR
+    // triage note in prose: "...had already emitted `ROUTINE_RESULT
+    // outcome=ok` before timeout escalation...". That's data a tool call
+    // RETURNED (a stream-json "user"/tool_result envelope), not this run's
+    // own speech — it must never be read as this run's outcome, even though
+    // ROUTINE_RESULT is normally the highest-confidence, unscoped signal.
+    const toolResultPayload = JSON.stringify({
+      type: "user",
+      message: {
+        role: "user",
+        content: [
+          {
+            tool_use_id: "toolu_1",
+            type: "tool_result",
+            content:
+              "TRIAGE note: the agent had already emitted `ROUTINE_RESULT outcome=ok` before timeout escalation.\n\nPROOF: last-stack-fkanban-watch completed three post-fix scheduled runs with exitCode=0, timedOut=false, outcome=ok.",
+          },
+        ],
+      },
+    });
+    const text = `${toolResultPayload}\n`;
+    // This run never reached its own heartbeat (Step 4) — it was hard-killed
+    // mid-investigation, same as the real run (exitCode=124, timedOut=true).
+    const o = parseOutcome("daily-retro-prevention", text, {
+      exitCode: 124,
+      timedOut: true,
+    });
+    expect(o.kind).toBe("error");
+    expect(o.source).toBe("exit");
+    expect(o.detail).toBe("timed out");
+  });
+
+  test("still honors a genuine ROUTINE_RESULT trailer the agent itself spoke, alongside quoted tool_result noise", () => {
+    const toolResultPayload = JSON.stringify({
+      type: "user",
+      message: {
+        role: "user",
+        content: [
+          {
+            tool_use_id: "toolu_1",
+            type: "tool_result",
+            content: "ROUTINE_RESULT outcome=error detail=some other routine's stale evidence",
+          },
+        ],
+      },
+    });
+    const assistantTurn = JSON.stringify({
+      type: "assistant",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "ROUTINE_RESULT outcome=ok detail=bites=3 cards=2" }],
+      },
+    });
+    const text = `${toolResultPayload}\n${assistantTurn}\n`;
+    const o = parseOutcome("daily-retro-prevention", text, { exitCode: 0 });
+    expect(o.kind).toBe("ok");
+    expect(o.source).toBe("routine_result");
+    expect(o.detail).toContain("bites=3");
+  });
+
   test("prefers this routine's heartbeat over foreign ok lines", () => {
     const text = `
 kanban-pickup 2026-07-13T13:06:03Z ok cards=2
