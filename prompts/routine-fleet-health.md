@@ -49,6 +49,14 @@ Fallback order only when no envelope path is present:
 - Before framing anything as an incident: `situations notices --since 1h` — a
   matching notice (LastDB upgrade, stack upgrade, cutover) means treat symptoms
   as expected fallout unless they outlast the notice window.
+- If `routines doctor` and `routines status --json` complete and show
+  `reds=0`, but board/brain reads or writes later fail while a matching recent
+  Situations notice explains LastDB/routines fallout, do **not** turn the whole
+  pass into an `error`. Record the missed board/brain writeback in memory and
+  heartbeat `ok ... soft_blocker=lastdb_notice board_writeback_skipped` (or the
+  closest specific detail). Only use `error` when the routine fleet itself could
+  not be inspected, there are true red routines, or the board/brain outage is
+  unexplained by notices / persists beyond the notice window.
 - No feature code, no PR merges, no `git reset --hard` on shared dirty trees.
 - Dedupe hard: search the board **and** `$ROUTINES_HOME/error-escalate/*.json`
   before filing; update an open card instead of duplicating.
@@ -190,8 +198,9 @@ routine-fleet-health <ISO-ts-Z> <ok|noop|error> reds=<n> open_error_cards=<n> cl
 ```
 - `noop` — fleet clean, nothing done (including no closeouts needed).
 - `ok` — pass completed with closeouts, fixes, filings, or escalations.
-- `error` — the check itself could not run (routines CLI down, board
-  unreachable after retries). Still try one heartbeat via
+- `error` — the check itself could not run (routines CLI down, true fleet state
+  unknown, or board/brain unreachable after retries with no matching recent
+  Situations notice). Still try one heartbeat via
   `last-stack-brain-append-heartbeat` if brain works.
 
 ## Out of scope
