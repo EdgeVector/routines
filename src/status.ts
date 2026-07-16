@@ -122,10 +122,17 @@ export function collectStatus(now: Date = new Date()): StatusSnapshot {
       st.lastOutcome === "unknown"
         ? st.lastOutcome
         : null;
+    // While a run is in flight, listRuns may only have "unknown" (we refuse to
+    // classify from memory.md dumps mid-run). Prefer the last finished outcome
+    // so the dashboard does not flash red/unknown over a healthy prior run.
+    const displayRun =
+      latest && latest.outcome !== "unknown"
+        ? latest
+        : (recent.find((r) => r.outcome && r.outcome !== "unknown") ?? latest);
     const lastOutcome: OutcomeKind | null =
-      latest?.outcome ?? stateOutcome;
+      displayRun?.outcome ?? stateOutcome;
     const lastOutcomeDetail =
-      latest?.outcomeDetail ?? st.lastOutcomeDetail ?? null;
+      displayRun?.outcomeDetail ?? st.lastOutcomeDetail ?? null;
 
     return {
       id: e.id,

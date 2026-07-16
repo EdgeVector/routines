@@ -134,9 +134,10 @@ const RESULT_COLON_RE =
  *   kanban-pickup 2026-07-13T13:06:03Z noop cards=0
  *   kanban-validate <ISO-ts> noop no-candidates
  * and quoted forms inside --line "..."
+ * Group 2 is the optional ISO timestamp (used to drop pre-run memory dumps).
  */
 const HEARTBEAT_LINE_RE =
-  /(?:^|[\s"'`])([A-Za-z][A-Za-z0-9._-]{2,80})\s+(?:\d{4}-\d{2}-\d{2}T[^\s"']+\s+)?(ok|noop|error)\b([^\n\r"']*)/gim;
+  /(?:^|[\s"'`])([A-Za-z][A-Za-z0-9._-]{2,80})\s+(?:(\d{4}-\d{2}-\d{2}T[^\s"']+)\s+)?(ok|noop|error)\b([^\n\r"']*)/gim;
 
 /** append-heartbeat --line '...'  (line may use double or single quotes). */
 const APPEND_LINE_RE =
@@ -149,6 +150,28 @@ interface Candidate {
   /** Higher wins when scanning multiple matches; later match preferred at same score. */
   score: number;
   index: number;
+  /** Optional ISO timestamp embedded in the heartbeat line (ms since epoch). */
+  tsMs: number | null;
+}
+
+/** Parse a heartbeat ISO stamp into epoch ms, or null if unparseable. */
+function heartbeatTsMs(iso: string | undefined | null): number | null {
+  if (!iso) return null;
+  const t = Date.parse(iso);
+  return Number.isFinite(t) ? t : null;
+}
+
+/**
+ * True when a heartbeat ISO is older than the run's startedAt (with a small
+ * skew allowance). Historical lines dumped from memory.md must not win.
+ */
+function isPreRunHeartbeat(
+  tsMs: number | null,
+  startedAtMs: number | null,
+): boolean {
+  if (tsMs == null || startedAtMs == null) return false;
+  // 2 minutes of clock skew so a heartbeat stamped slightly before meta.startedAt still counts.
+  return tsMs < startedAtMs - 120_000;
 }
 
 /**
@@ -189,13 +212,24 @@ function stripToolResultPayloads(raw: string): string {
  * @param routineId registry id (used to prefer matching heartbeat names)
  * @param text stdout + stderr (order does not matter; we scan all)
  * @param opts.exitCode / timedOut for exit-based fallback
+ * @param opts.startedAt ISO start of this run — heartbeats stamped earlier are ignored
+ * @param opts.incomplete when true (live in-progress run), skip bare heartbeat
+ *   lines that typically come from dumping memory.md; only trust strong trailers
+ *   / explicit append-heartbeat commands so the dashboard cannot go red mid-run
+ *   from historical memory.
  */
 export function parseOutcome(
   routineId: string,
   text: string,
-  opts: { exitCode?: number | null; timedOut?: boolean } = {},
+  opts: {
+    exitCode?: number | null;
+    timedOut?: boolean;
+    startedAt?: string | null;
+    incomplete?: boolean;
+  } = {},
 ): RunOutcome {
   const candidates: Candidate[] = [];
+  const startedAtMs = heartbeatTsMs(opts.startedAt ?? null);
   // Highest-confidence, unscoped-by-name signals: only trust these from the
   // agent's own speech, never from a quoted tool_result (see
   // stripToolResultPayloads doc comment).
@@ -208,12 +242,15 @@ export function parseOutcome(
     // prefer detail=... if present
     const detailM = rest.match(/\bdetail\s*=\s*(.+)$/i);
     const detail = detailM ? clip(detailM[1]!) : rest || null;
+    // Prompt fixtures / prose about the trailer format must not win.
+    if (isPromptFixtureDetail(detail)) continue;
     candidates.push({
       kind,
       detail,
       source: "routine_result",
       score: 100,
       index: m.index ?? 0,
+      tsMs: null,
     });
   }
 
@@ -221,12 +258,14 @@ export function parseOutcome(
     const kind = asKind(m[1]!);
     if (!kind) continue;
     const rest = clip(m[2] ?? "");
+    if (isPromptFixtureDetail(rest)) continue;
     candidates.push({
       kind,
       detail: rest || null,
       source: "routine_result",
       score: 95,
       index: m.index ?? 0,
+      tsMs: null,
     });
   }
 
@@ -234,6 +273,7 @@ export function parseOutcome(
     const inner = m[1] ?? "";
     const parsed = parseHeartbeatPhrase(inner, routineId);
     if (parsed) {
+      if (isPreRunHeartbeat(parsed.tsMs, startedAtMs)) continue;
       candidates.push({
         ...parsed,
         source: "heartbeat",
@@ -243,28 +283,43 @@ export function parseOutcome(
     }
   }
 
-  for (const m of text.matchAll(HEARTBEAT_LINE_RE)) {
-    const name = m[1]!;
-    const kind = asKind(m[2]!);
-    if (!kind) continue;
-    // reject common false positives
-    if (isFalsePositiveName(name)) continue;
-    const detail = clip(m[3] ?? "") || null;
-    // ONLY accept heartbeats that name THIS routine. Transcripts (esp. retros)
-    // quote other routines' ok/error lines; those must not steal the outcome.
-    if (!nameMatchesRoutine(name, routineId)) continue;
-    candidates.push({
-      kind,
-      detail,
-      source: "heartbeat",
-      score: 80,
-      index: m.index ?? 0,
-    });
+  // Incomplete/live runs: agents almost always `sed`/`cat` memory.md first,
+  // which re-injects every historical heartbeat. Do not classify from those
+  // bare lines until the run finishes (meta.outcome) or the agent emits a
+  // strong trailer / append-heartbeat.
+  if (!opts.incomplete) {
+    for (const m of text.matchAll(HEARTBEAT_LINE_RE)) {
+      const name = m[1]!;
+      const tsMs = heartbeatTsMs(m[2] ?? null);
+      const kind = asKind(m[3]!);
+      if (!kind) continue;
+      // reject common false positives
+      if (isFalsePositiveName(name)) continue;
+      const detail = clip(m[4] ?? "") || null;
+      // ONLY accept heartbeats that name THIS routine. Transcripts (esp. retros)
+      // quote other routines' ok/error lines; those must not steal the outcome.
+      if (!nameMatchesRoutine(name, routineId)) continue;
+      if (isPreRunHeartbeat(tsMs, startedAtMs)) continue;
+      candidates.push({
+        kind,
+        detail,
+        source: "heartbeat",
+        // Prefer timestamped heartbeats over bare ones; same-score later uses ts.
+        score: tsMs != null ? 82 : 80,
+        index: m.index ?? 0,
+        tsMs,
+      });
+    }
   }
 
-  // Prefer highest score; tie-break: latest in the log (highest index).
+  // Prefer highest score; tie-break: newest heartbeat ISO, then latest in log.
   if (candidates.length > 0) {
-    candidates.sort((a, b) => b.score - a.score || b.index - a.index);
+    candidates.sort(
+      (a, b) =>
+        b.score - a.score ||
+        (b.tsMs ?? -1) - (a.tsMs ?? -1) ||
+        b.index - a.index,
+    );
     const best = candidates[0]!;
     const diskReclaimUsefulWork = parseDiskReclaimUsefulWork(routineId, text, opts, best);
     if (diskReclaimUsefulWork) return diskReclaimUsefulWork;
@@ -463,6 +518,24 @@ function isFalsePositiveName(name: string): boolean {
   return ban.has(n);
 }
 
+/**
+ * Prompt / docs text that mentions the trailer format without being a real
+ * machine result (e.g. "example-from-prompt fixture from the Codex stderr").
+ */
+function isPromptFixtureDetail(detail: string | null | undefined): boolean {
+  if (!detail) return false;
+  const d = detail.toLowerCase();
+  return (
+    d.includes("example-from-prompt") ||
+    d.includes("example only") ||
+    d.includes("bites=<n>") ||
+    d.includes("cards=<n>") ||
+    /\bplaceholder\b/.test(d) ||
+    /\bprompt fixture\b/.test(d) ||
+    /\bfrom the (codex|claude) stderr diff\b/.test(d)
+  );
+}
+
 function parseHeartbeatPhrase(
   phrase: string,
   routineId: string,
@@ -470,19 +543,23 @@ function parseHeartbeatPhrase(
   // "name ISO ok detail", "name $iso_ts ok detail", or "name ok detail".
   // The append-line scanner sees the shell command before variable expansion.
   const m = phrase.match(
-    /^\s*([A-Za-z][A-Za-z0-9._-]{2,80})\s+(?:(?!ok\b|noop\b|error\b)\S+\s+)?(ok|noop|error)\b(.*)$/i,
+    /^\s*([A-Za-z][A-Za-z0-9._-]{2,80})\s+(?:(?!ok\b|noop\b|error\b)(\S+)\s+)?(ok|noop|error)\b(.*)$/i,
   );
   if (!m) return null;
   const name = m[1]!;
-  const kind = asKind(m[2]!);
+  const maybeIso = m[2] ?? null;
+  const kind = asKind(m[3]!);
   if (!kind) return null;
-  const detail = clip(m[3] ?? "") || null;
+  const detail = clip(m[4] ?? "") || null;
   const matched = nameMatchesRoutine(name, routineId);
   if (!matched) return null;
+  const tsMs =
+    maybeIso && /^\d{4}-\d{2}-\d{2}T/.test(maybeIso) ? heartbeatTsMs(maybeIso) : null;
   return {
     kind,
     detail,
     score: 85,
+    tsMs,
   };
 }
 

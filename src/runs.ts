@@ -93,7 +93,14 @@ export function resolveRunOutcome(id: string, runDir: string, meta: Record<strin
         }`;
   const exitCode = typeof meta.exitCode === "number" ? meta.exitCode : null;
   const timedOut = meta.timedOut === true;
-  return parseOutcome(id, text, { exitCode, timedOut });
+  const startedAt = typeof meta.startedAt === "string" ? meta.startedAt : null;
+  // Live / unfinished runs: meta has no outcome yet. Re-parsing bare
+  // heartbeats is unsafe because agents dump memory.md (full history) into
+  // stderr before emitting their own line — that falsely marks the fleet red.
+  const incomplete =
+    meta.status === "running" ||
+    (typeof meta.finishedAt !== "string" && !("exitCode" in meta));
+  return parseOutcome(id, text, { exitCode, timedOut, startedAt, incomplete });
 }
 
 function summarize(id: string, stamp: string, runDir: string, meta: Record<string, unknown>): RunSummary {
