@@ -145,8 +145,11 @@ it survives session exit. Each tick it:
    still schedule),
 2. computes which active routines are **due** from their rrule + last-fire
    state,
-3. dispatches them subject to **per-routine single-flight** (a lock file), a
-   **global concurrency cap**, and a timeout kill,
+3. dispatches them as a **free-slot pool**: when a run finishes, the next due
+   routine is admitted immediately (the scheduler does **not** wait for a whole
+   batch to finish). Constraints are **per-routine single-flight** (lock file),
+   an optional global concurrency cap (`--concurrency N`; default **unlimited** /
+   `0`), and a per-run **timeout kill**,
 4. enforces the **dispatch-time Situation fence**: a run whose id matches an
    active `fsituations` Situation's `scope_routines` glob is skipped and logged.
 
