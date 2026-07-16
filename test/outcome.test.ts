@@ -106,6 +106,20 @@ daily-retro-prevention 2026-07-14T13:33:00Z ok bites=5 cards=2
     expect(o.detail).toBe("timed out");
   });
 
+  test("does not parse prompt placeholder as ROUTINE_RESULT", () => {
+    const text = `
+> Optional machine trailer (helps the routines dashboard): print a final line
+> \`ROUTINE_RESULT outcome=ok|noop|error detail=...\` before exit.
+`;
+    const o = parseOutcome("last-stack-kanban-pickup", text, {
+      exitCode: 124,
+      timedOut: true,
+    });
+    expect(o.kind).toBe("error");
+    expect(o.source).toBe("exit");
+    expect(o.detail).toBe("timed out");
+  });
+
   test("does not parse Rust test result output as a routine RESULT trailer", () => {
     const text =
       "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 353.65s";

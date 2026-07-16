@@ -106,7 +106,7 @@ function asKind(raw: string): OutcomeKind | null {
 
 /** Explicit machine trailer (strongest). */
 const ROUTINE_RESULT_RE =
-  /ROUTINE_RESULT\s+outcome\s*=\s*(ok|noop|error)\b([^;\n\r]*)/gi;
+  /^[^\S\r\n]*ROUTINE_RESULT\s+outcome\s*=\s*(ok|noop|error)(?=$|[\s;\n\r])([^;\n\r]*)/gim;
 
 /**
  * Compact agent trailer used by some project prompts:
