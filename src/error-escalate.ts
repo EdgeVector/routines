@@ -110,7 +110,6 @@ export function shouldEscalate(result: RunResult): boolean {
 
 function isCompletedTimeout(result: RunResult): boolean {
   return (
-    result.exitCode === 0 &&
     (result.outcome.kind === "ok" || result.outcome.kind === "noop") &&
     (result.outcome.source === "heartbeat" || result.outcome.source === "routine_result")
   );

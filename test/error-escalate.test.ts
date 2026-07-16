@@ -86,6 +86,36 @@ describe("shouldEscalate", () => {
       ),
     ).toBe(false);
   });
+  test("completed ok routine-result timeout with raw 124 is not escalated", () => {
+    expect(
+      shouldEscalate(
+        result({
+          exitCode: 124,
+          timedOut: true,
+          outcome: {
+            kind: "ok",
+            detail: "worked=card result=merged",
+            source: "routine_result",
+          },
+        }),
+      ),
+    ).toBe(false);
+  });
+  test("completed noop routine-result timeout with raw 124 is not escalated", () => {
+    expect(
+      shouldEscalate(
+        result({
+          exitCode: 124,
+          timedOut: true,
+          outcome: {
+            kind: "noop",
+            detail: "idle=nothing-safe",
+            source: "routine_result",
+          },
+        }),
+      ),
+    ).toBe(false);
+  });
   test("soft outcome error with exit 0", () => {
     expect(
       shouldEscalate(
