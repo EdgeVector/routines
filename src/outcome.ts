@@ -105,9 +105,20 @@ function asKind(raw: string): OutcomeKind | null {
   return null;
 }
 
-/** Explicit machine trailer (strongest). */
+/**
+ * Explicit machine trailer (strongest). Deliberately NOT anchored to
+ * start-of-line: under the Claude stream-json harness, an agent's own final
+ * text is a JSON string value ({"type":"assistant",...,"text":"...\nROUTINE_
+ * RESULT outcome=ok..."}) — internal newlines are JSON-escaped as literal
+ * `\n`, not real line breaks, so a genuine trailer almost never sits at a
+ * real line start. Line-anchoring here silently makes every Claude-harness
+ * ROUTINE_RESULT undetectable (falls through to "unknown"). Cross-run
+ * contamination (a tool_result quoting another run's trailer) is guarded by
+ * stripToolResultPayloads() below instead, which is structure-aware rather
+ * than position-aware.
+ */
 const ROUTINE_RESULT_RE =
-  /^[^\S\r\n]*ROUTINE_RESULT\s+outcome\s*=\s*(ok|noop|error)(?=$|[\s;\n\r])([^;\n\r]*)/gim;
+  /ROUTINE_RESULT\s+outcome\s*=\s*(ok|noop|error)(?=$|[\s;\n\r])([^;\n\r]*)/gim;
 
 /**
  * Compact agent trailer used by some project prompts:

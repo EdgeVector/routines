@@ -146,6 +146,33 @@ kanban-pickup 2026-07-13T17:06:29Z ok cards=1
     expect(o.detail).toContain("bites=3");
   });
 
+  test("detects a genuine ROUTINE_RESULT even though it can never sit at a real line start under Claude stream-json", () => {
+    // A real agent's final turn is one JSON object per raw stdout line; the
+    // model's own multi-line prose (concluding summary + heartbeat lines) is
+    // JSON-escaped INSIDE that single line, so "ROUTINE_RESULT" is preceded
+    // by a literal `\n` escape (backslash + n), never a real newline byte.
+    // A start-of-line-anchored regex would never match this — regressing
+    // every Claude-harness routine to "unknown". No tool_result in sight
+    // here at all; this isolates the anchor behavior from the stripping fix.
+    const assistantTurn = JSON.stringify({
+      type: "assistant",
+      message: {
+        role: "assistant",
+        content: [
+          {
+            type: "text",
+            text: "Retro complete: filed 3 cards, wrote 2 SOPs.\ndaily-retro-prevention 2026-07-16T15:00:00Z ok bites=3 cards=2\nROUTINE_RESULT outcome=ok detail=bites=3 cards=2",
+          },
+        ],
+      },
+    });
+    const text = `${assistantTurn}\n`;
+    const o = parseOutcome("daily-retro-prevention", text, { exitCode: 0 });
+    expect(o.kind).toBe("ok");
+    expect(o.source).toBe("routine_result");
+    expect(o.detail).toContain("bites=3");
+  });
+
   test("prefers this routine's heartbeat over foreign ok lines", () => {
     const text = `
 kanban-pickup 2026-07-13T13:06:03Z ok cards=2
