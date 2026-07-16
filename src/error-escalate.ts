@@ -28,6 +28,7 @@ import {
 import { join } from "node:path";
 
 import { harnessBinary } from "./adapters.ts";
+import { buildRoutineAttributionEnv } from "./prompt.ts";
 import type { RoutineEntry } from "./registry.ts";
 import { routinesHome, runsDir } from "./paths.ts";
 import type { RunResult } from "./runner.ts";
@@ -332,6 +333,14 @@ failed. Your only job is to figure out WHY and make the failure stop recurring.
 - If this "error" was an intentional heartbeat about an external blocker and a
   card already tracks it, reclassify: document that the routine should heartbeat
   ok/noop after filing, and fix the prompt so soft blockers are not "error".
+- **Attribution:** you are a scheduled triage agent. Env sets DRIVEN_BY=routine,
+  AUTOMATION_ID=${TRIAGE_ID}, LASTGIT_ACTOR=routine:${TRIAGE_ID}. On every git
+  commit and PR/LastGit CR body, append trailers:
+    Driven-By: routine
+    Automation-Id: ${TRIAGE_ID}
+    Run-Id: <this triage run stamp>
+  Prefer last-stack-git-commit / last-stack-attribution-trailers. Situations
+  notices: actor=routine:${TRIAGE_ID}.
 
 ## Steps
 1. Read ${result.runDir}/meta.json, stdout.log, stderr.log (tails ok if huge).
@@ -420,7 +429,10 @@ function dispatchTriageAgent(
     const stderrFd = openSync(stderrPath, "a");
     const child = spawn(bin, args, {
       cwd: entry.cwd || process.cwd(),
-      env: process.env,
+      env: {
+        ...process.env,
+        ...buildRoutineAttributionEnv(TRIAGE_ID, triageDir),
+      },
       stdio: [stdin !== undefined ? "pipe" : "ignore", stdoutFd, stderrFd],
       detached: true,
     });
