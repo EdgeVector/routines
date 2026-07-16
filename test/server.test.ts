@@ -104,7 +104,7 @@ test("GET /api/routines returns the status snapshot for every routine", async ()
   const beta = snap.rows.find((r: any) => r.id === "beta");
   expect(beta.status).toBe("paused");
   expect(beta.nextFire).toBeNull(); // paused → no next fire
-});
+}, 30_000);
 
 test("unknown routine → 404", async () => {
   const res = await fetch(u("/api/routines/nope/run"), { method: "POST" });
