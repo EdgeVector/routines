@@ -51,6 +51,7 @@ function result(partial: Partial<RunResult> & { id?: string } = {}): RunResult {
       detail: "unit-test failure",
       source: "exit",
     },
+    harnessPid: null,
   };
 }
 

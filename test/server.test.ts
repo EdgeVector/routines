@@ -31,6 +31,7 @@ beforeAll(() => {
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), "routines-srv-"));
   process.env.ROUTINES_HOME = home;
+  process.env.ROUTINES_ALLOW_HARNESS_BIN_OVERRIDES = "1";
   process.env.ROUTINES_CLAUDE_BIN = stubHarness;
   process.env.ROUTINES_CODEX_BIN = stubHarness;
   process.env.ROUTINES_GROK_BIN = stubHarness;
