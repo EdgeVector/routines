@@ -12,13 +12,22 @@ import { compareGrouped, groupForId } from "./groups.ts";
 import { aggregateOutcomes, type OutcomeKind } from "./outcome.ts";
 import { fenceFor, loadActiveSituations } from "./situations.ts";
 import { loadAll, type Harness, type Status } from "./registry.ts";
-import { listRuns } from "./runs.ts";
+import { listRuns, type RunSummary } from "./runs.ts";
 import { routinesHome } from "./paths.ts";
 import { nextAfter } from "./rrule.ts";
 import { readState } from "./state.ts";
 
 /** How many recent runs feed the rolling noop/useful rates. */
 const OUTCOME_WINDOW = 10;
+
+function latestRunIsCompleted(latest: RunSummary | undefined): boolean {
+  return Boolean(latest?.finishedAt && latest.exitCode !== null && latest.timedOut === false);
+}
+
+function isCurrentlyRunning(id: string, latest: RunSummary | undefined): boolean {
+  if (!isLocked(id)) return false;
+  return !latestRunIsCompleted(latest);
+}
 
 export interface StatusRow {
   id: string;
@@ -105,7 +114,7 @@ export function collectStatus(now: Date = new Date()): StatusSnapshot {
       lastRun: st.lastRun ?? null,
       lastExit: st.lastExit ?? null,
       lastRunDir: st.lastRunDir ?? null,
-      running: isLocked(e.id),
+      running: isCurrentlyRunning(e.id, latest),
       fenced: fence.fenced ? (fence.situationSlug ?? true) : false,
       groupId: group.id,
       groupLabel: group.label,

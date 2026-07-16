@@ -16,6 +16,8 @@ beforeEach(() => {
   writeFileSync(situationsBin, "#!/bin/sh\necho '[]'\n");
   chmodSync(situationsBin, 0o755);
   process.env.ROUTINES_FSITUATIONS_BIN = situationsBin;
+
+  mkdirSync(join(home, "registry"), { recursive: true });
 });
 
 afterEach(() => {
@@ -24,8 +26,26 @@ afterEach(() => {
   rmSync(home, { recursive: true, force: true });
 });
 
+function writeRoutine(id: string): void {
+  writeFileSync(
+    join(home, "registry", `${id}.toml`),
+    [
+      'harness = "codex"',
+      'model = "gpt-5"',
+      'rrule = "FREQ=HOURLY"',
+      'prompt = "hello"',
+      `cwd = "${home}"`,
+      "",
+    ].join("\n"),
+  );
+}
+
+function writeLiveLock(id: string): void {
+  mkdirSync(join(home, "locks"), { recursive: true });
+  writeFileSync(join(home, "locks", `${id}.lock`), String(process.pid));
+}
+
 test("status prefers reparsed latest run outcome over persisted unknown state", () => {
-  mkdirSync(join(home, "registry"), { recursive: true });
   writeFileSync(
     join(home, "registry/codex-stale-agent-memory-cleanup.toml"),
     [
@@ -91,4 +111,37 @@ test("status prefers reparsed latest run outcome over persisted unknown state", 
   expect(row.lastOutcomeDetail).toBe("process-enumeration-blocked terminated=0");
   expect(row.outcomeNoop).toBe(1);
   expect(row.outcomeUnknown).toBe(0);
+});
+
+test("completed latest run suppresses stale running lock in status", () => {
+  writeRoutine("done");
+  writeLiveLock("done");
+  const runDir = join(home, "runs", "done", "2026-07-16T15-58-40-903Z");
+  mkdirSync(runDir, { recursive: true });
+  writeFileSync(
+    join(runDir, "meta.json"),
+    JSON.stringify(
+      {
+        finishedAt: "2026-07-16T15:58:40.903Z",
+        exitCode: 0,
+        timedOut: false,
+        outcome: "ok",
+      },
+      null,
+      2,
+    ),
+  );
+
+  const row = collectStatus(new Date("2026-07-16T16:00:00Z")).rows.find((r) => r.id === "done");
+  expect(row?.running).toBe(false);
+  expect(row?.lastOutcome).toBe("ok");
+});
+
+test("live lock still reports running when the latest run has not completed", () => {
+  writeRoutine("live");
+  writeLiveLock("live");
+  mkdirSync(join(home, "runs", "live", "2026-07-16T15-58-40-903Z"), { recursive: true });
+
+  const row = collectStatus(new Date("2026-07-16T16:00:00Z")).rows.find((r) => r.id === "live");
+  expect(row?.running).toBe(true);
 });
