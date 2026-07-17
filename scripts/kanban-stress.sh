@@ -16,7 +16,8 @@
 #   FINDING: <category> | <detail>     ← a real consistency VIOLATION (DB bug)
 #   ERROR:   <detail>                  ← transport/harness problem (not a bug,
 #                                          but file a card if it reproduces)
-#   SUMMARY: findings=<n> errors=<n> board=<b> run=<id>
+#   PARTIAL: <detail>                  ← interrupted before all legs completed
+#   SUMMARY: findings=<n> errors=<n> partial=<0|1> board=<b> run=<id>
 #
 # Exit is ALWAYS 0 — an erroring exit cancels the scheduled-run queue
 # (feedback_no_erroring_commands_cancel_queue). The caller reads the report.
@@ -38,22 +39,47 @@ RUN="kstress-$(date +%s)-$$"
 findings=()
 errors=()
 created=()
+partial=0
+cleaned=0
 
 finding() { findings+=("$1 | $2"); printf 'FINDING: %s | %s\n' "$1" "$2"; }
 errlog()  { errors+=("$1");        printf 'ERROR: %s\n' "$1"; }
+partiallog() { partial=1; printf 'PARTIAL: %s\n' "$1"; }
 
 fkjson() { "$FK" show "$1" --json 2>/dev/null; }            # read-back one card
 field()  { fkjson "$1" | jq -r "$2 // empty" 2>/dev/null; } # one field via jq
 
+cleanup_created() {
+  [ "$cleaned" = 1 ] && return
+  cleaned=1
+  if [ "${#created[@]}" -gt 0 ]; then
+    for s in "${created[@]}"; do "$FK" rm "$s" >/dev/null 2>&1 || true; done
+  fi
+}
+
+summary() {
+  echo "SUMMARY: findings=${#findings[@]} errors=${#errors[@]} partial=$partial board=$BOARD run=$RUN"
+}
+
+interrupted() {
+  partiallog "interrupted before all legs completed; cleanup attempted; caller should treat as noop/partial, not a consistency failure"
+  errlog "harness interrupted before completion"
+  cleanup_created
+  summary
+  exit 0
+}
+
+trap interrupted INT TERM HUP
+
 # ── Preflight ──────────────────────────────────────────────────────────────
 if ! command -v jq >/dev/null 2>&1; then
   echo "ERROR: jq not found — cannot assert JSON read-backs"
-  echo "SUMMARY: findings=0 errors=1 board=$BOARD run=$RUN"
+  echo "SUMMARY: findings=0 errors=1 partial=0 board=$BOARD run=$RUN"
   exit 0
 fi
 if ! "$FK" board list --json >/dev/null 2>&1; then
   echo "ERROR: node/board unreachable — skipping stress run (retries next schedule)"
-  echo "SUMMARY: findings=0 errors=1 board=$BOARD run=$RUN"
+  echo "SUMMARY: findings=0 errors=1 partial=0 board=$BOARD run=$RUN"
   exit 0
 fi
 # Ensure the isolated scratch board exists (no-op if already there).
@@ -256,9 +282,7 @@ for b in "${bd[@]}" zz-kstress-bcburst-0 zz-kstress-bcburst-1 zz-kstress-bcburst
 done
 
 # ── Cleanup: soft-delete everything this run created ────────────────────────
-if [ "${#created[@]}" -gt 0 ]; then
-  for s in "${created[@]}"; do "$FK" rm "$s" >/dev/null 2>&1 || true; done
-fi
+cleanup_created
 
-echo "SUMMARY: findings=${#findings[@]} errors=${#errors[@]} board=$BOARD run=$RUN"
+summary
 exit 0
