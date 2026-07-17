@@ -28,7 +28,9 @@ for f in test/*.test.ts src/*.test.ts; do
   found_tests=1
 done
 if [ "$found_tests" = 1 ]; then
-  bun test
+  # Some daemon/escalation tests exercise real process dispatch and bounded
+  # retry loops; the default 5s Bun test timeout is too tight under CI load.
+  bun test --timeout=30000
 else
   echo "ci: no tests yet (repo skeleton) — gate is syntax + typecheck"
 fi
