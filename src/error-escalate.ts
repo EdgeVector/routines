@@ -25,7 +25,8 @@ import {
   readFileSync,
   writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
 
 import { harnessBinary } from "./adapters.ts";
 import {
@@ -75,6 +76,25 @@ function enabled(): boolean {
   const v = process.env.ROUTINES_ERROR_ESCALATE;
   if (v === "0" || v === "false" || v === "off") return false;
   return true;
+}
+
+function explicitlyEnabled(): boolean {
+  const v = process.env.ROUTINES_ERROR_ESCALATE;
+  return v === "1" || v === "true" || v === "on";
+}
+
+function isCanonicalRoutinesHome(): boolean {
+  return resolve(routinesHome()) === resolve(join(homedir(), ".routines"));
+}
+
+/**
+ * Automatic scheduled-run escalation writes to the real board. Keep it off for
+ * throwaway ROUTINES_HOME test/e2e daemons unless a caller opts in explicitly.
+ */
+export function shouldAutoEscalateScheduledRun(result: RunResult): boolean {
+  if (!shouldEscalate(result)) return false;
+  if (explicitlyEnabled()) return true;
+  return isCanonicalRoutinesHome();
 }
 
 function stateDir(): string {
