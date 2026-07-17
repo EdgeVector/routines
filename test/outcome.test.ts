@@ -252,6 +252,32 @@ daily-retro-prevention 2026-07-14T13:33:00Z ok bites=5 cards=2
     expect(o.detail).toBe("exit 2");
   });
 
+  test("classifies pre-claim Codex model capacity as safe noop", () => {
+    const text = `
+succeeded in 1501ms:
+[]
+
+ERROR: Selected model is at capacity. Please try a different model.
+ERROR: Selected model is at capacity. Please try a different model.
+tokens used
+17,084
+`;
+    const o = parseOutcome("last-stack-fkanban-pickup-w3", text, { exitCode: 1 });
+    expect(o.kind).toBe("noop");
+    expect(o.source).toBe("safe_skip");
+    expect(o.detail).toBe("codex-capacity no_card_claimed");
+  });
+
+  test("does not mask Codex capacity after visible claim evidence", () => {
+    const text = `
+{"claimed":true,"reason":"claimed","card":{"slug":"some-card"}}
+ERROR: Selected model is at capacity. Please try a different model.
+`;
+    const o = parseOutcome("last-stack-fkanban-pickup-w3", text, { exitCode: 1 });
+    expect(o.kind).toBe("error");
+    expect(o.source).toBe("exit");
+  });
+
   test("timeout is error", () => {
     const o = parseOutcome("x", "", { exitCode: null, timedOut: true });
     expect(o.kind).toBe("error");
