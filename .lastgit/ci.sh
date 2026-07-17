@@ -22,6 +22,13 @@ for f in src/*.ts test/*.ts; do
   bun build "$f" --target=bun --outfile=/dev/null
 done
 
+# 2b. whole-program typecheck — per-file `bun build` misses cross-file type
+# errors (e.g. a call site missing a required field of another module's type).
+if [ -f tsconfig.json ]; then
+  echo "bunx tsc --noEmit"
+  bunx tsc --noEmit
+fi
+
 # 3. unit tests, once any exist
 found_tests=0
 for f in test/*.test.ts src/*.test.ts; do

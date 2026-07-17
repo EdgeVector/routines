@@ -157,6 +157,7 @@ describe("runRoutine heartbeat handling", () => {
     writeEarlyMeta({
       runDir,
       id: "x",
+      trigger: "manual",
       harness: "claude",
       model: "m",
       effort: null,
@@ -169,6 +170,7 @@ describe("runRoutine heartbeat handling", () => {
     const meta = JSON.parse(readFileSync(join(runDir, "meta.json"), "utf8"));
     expect(meta.harnessPid).toBe(4242);
     expect(meta.id).toBe("x");
+    expect(meta.trigger).toBe("manual");
     expect(meta.status).toBe("running");
     expect(readFileSync(join(runDir, "stdout.log"), "utf8")).toBe("hello-live\n");
   });
