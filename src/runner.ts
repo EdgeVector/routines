@@ -300,8 +300,11 @@ export function runRoutine(entry: RoutineEntry, opts: RunOptions = {}): Promise<
   });
 }
 
-/** Map timeout exit 124 → 0 when the agent still produced a durable ok/noop outcome. */
-function completedExitCode(
+/**
+ * Map external clean-stop signals to exit 0 so routine status and escalation
+ * agree with the classified outcome.
+ */
+export function completedExitCode(
   rawExitCode: number | null,
   timedOut: boolean,
   outcome: RunOutcome,
@@ -311,6 +314,9 @@ function completedExitCode(
     (outcome.kind === "ok" || outcome.kind === "noop") &&
     (outcome.source === "heartbeat" || outcome.source === "routine_result")
   ) {
+    return 0;
+  }
+  if (!timedOut && outcome.kind === "noop" && outcome.source === "safe_skip") {
     return 0;
   }
   return rawExitCode;

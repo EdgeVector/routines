@@ -469,6 +469,9 @@ function parseKnownSafeSkip(
   text: string,
   opts: { exitCode?: number | null; timedOut?: boolean },
 ): RunOutcome | null {
+  const codexCapacity = parseCodexHarnessCapacitySkip(text, opts);
+  if (codexCapacity) return codexCapacity;
+
   if (routineId !== "codex-stale-agent-memory-cleanup") return null;
   if (opts.timedOut) return null;
   if (opts.exitCode !== undefined && opts.exitCode !== null && opts.exitCode !== 0) return null;
@@ -486,6 +489,40 @@ function parseKnownSafeSkip(
   return {
     kind: "noop",
     detail: "process-enumeration-blocked terminated=0",
+    source: "safe_skip",
+  };
+}
+
+function parseCodexHarnessCapacitySkip(
+  text: string,
+  opts: { exitCode?: number | null; timedOut?: boolean },
+): RunOutcome | null {
+  if (opts.timedOut) return null;
+
+  const lower = text.toLowerCase();
+  const externalBlocker =
+    lower.includes("selected model is at capacity") ||
+    lower.includes("you've hit your usage limit") ||
+    lower.includes("you have hit your usage limit") ||
+    lower.includes("usage limit");
+  if (!externalBlocker) return null;
+
+  // Once a worker has visibly claimed work or published a review artifact,
+  // the routine contract requires normal rollback/handoff handling. Treat the
+  // harness-only capacity path as a clean noop only when there is no durable
+  // evidence that work left the unclaimed state.
+  const claimedOrPublished =
+    /"claimed"\s*:\s*true/i.test(text) ||
+    /\bclaimed=true\b/i.test(text) ||
+    /\breason=claimed\b/i.test(text) ||
+    /\bpr_url\b/i.test(text) ||
+    /\bPR:\s*(?:https?:\/\/|lastgit:\/\/)/i.test(text) ||
+    /\bpr=(?:https?:\/\/|lastgit:\/\/)/i.test(text);
+  if (claimedOrPublished) return null;
+
+  return {
+    kind: "noop",
+    detail: "codex-capacity no_card_claimed",
     source: "safe_skip",
   };
 }

@@ -79,6 +79,33 @@ describe("runRoutine heartbeat handling", () => {
     expect(meta.harnessPid).toBeTruthy();
   });
 
+  test("Codex capacity before claim records clean noop exit", async () => {
+    process.env.ROUTINES_CLAUDE_BIN = stub(
+      join(home, "capacity-harness"),
+      [
+        "#!/bin/sh",
+        "printf '%s\\n' 'ERROR: Selected model is at capacity. Please try a different model.' >&2",
+        "exit 1",
+        "",
+      ].join("\n"),
+    );
+    writeRoutine("last-stack-fkanban-pickup-w3");
+
+    const result = await runRoutine(loadEntry("last-stack-fkanban-pickup-w3"), {
+      quiet: true,
+    });
+
+    expect(result.timedOut).toBe(false);
+    expect(result.outcome.kind).toBe("noop");
+    expect(result.outcome.source).toBe("safe_skip");
+    expect(result.exitCode).toBe(0);
+
+    const meta = JSON.parse(readFileSync(join(result.runDir, "meta.json"), "utf8"));
+    expect(meta.exitCode).toBe(0);
+    expect(meta.outcome).toBe("noop");
+    expect(meta.outcomeDetail).toBe("codex-capacity no_card_claimed");
+  });
+
   test("streams stdout to run-dir before finalize and records harness pid on the lock", async () => {
     process.env.ROUTINES_CLAUDE_BIN = stub(
       join(home, "slow-harness"),
