@@ -17,7 +17,8 @@ import { parseRRule } from "../src/rrule.ts";
 
 const CODEX_LIMIT_LINE =
   "ERROR: You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at Jul 22nd, 2026 10:00 PM.";
-const CODEX_CAPACITY_LINE = "ERROR: Selected model is at capacity. Please try a different model.";
+const CODEX_CAPACITY_LINE =
+  "ERROR: Selected model is at capacity. Please try a different model.";
 
 let home: string;
 const prevHome = process.env.ROUTINES_HOME;
@@ -122,10 +123,11 @@ describe("classifyHarnessOutage", () => {
     expect(out?.kind).toBe("usage-limit");
   });
 
-  test("codex selected-model capacity classifies as usage-limit outage", () => {
+  test("codex selected-model capacity classifies as capacity", () => {
     const out = classifyHarnessOutage(result(CODEX_CAPACITY_LINE));
-    expect(out?.kind).toBe("usage-limit");
-    expect(out?.evidence).toBe(CODEX_CAPACITY_LINE);
+    expect(out?.kind).toBe("capacity");
+    expect(out?.evidence).toContain("Selected model is at capacity");
+    expect(out?.resetAt).toBeNull();
   });
 
   test("invalid api key classifies as auth", () => {
@@ -212,6 +214,43 @@ describe("handleHarnessOutage via escalateRoutineError", () => {
     expect(crumb.cardSlug).toBeNull();
     expect(crumb.agentDispatched).toBe(false);
     expect(crumb.harnessOutage.kind).toBe("usage-limit");
+  });
+
+  test("model capacity: no card, needs-human verdict, situation fence, telegram page", () => {
+    const kanban = stubBin("kanban-stub");
+    const situations = stubBin("situations-stub");
+    const ra = stubBin("ra-stub");
+    writeRegistryEntry("last-stack-fkanban-pickup-w3", "codex");
+
+    const r = result(CODEX_CAPACITY_LINE, "last-stack-fkanban-pickup-w3");
+    const out = escalateRoutineError(entry("last-stack-fkanban-pickup-w3"), r, {
+      kanbanBin: kanban.bin,
+      quiet: true,
+      nowMs: Date.parse("2026-07-17T22:02:33Z"),
+      harnessOutage: { situationsBin: situations.bin, raBin: ra.bin },
+    });
+
+    expect(out.escalated).toBe(true);
+    expect(out.detail).toContain("harness-outage:capacity");
+    expect(existsSync(kanban.argsFile)).toBe(false);
+
+    const verdict = JSON.parse(readFileSync(join(r.runDir, "triage-result.json"), "utf8"));
+    expect(verdict.result).toBe("needs-human");
+    expect(verdict.needsHuman).toBe(true);
+    expect(verdict.rootCause).toBe("harness-outage:capacity");
+
+    const sit = JSON.parse(readFileSync(situations.stdinFile, "utf8"));
+    expect(sit.slug).toBe(outageSituationSlug("codex"));
+    expect(sit.summary).toContain("capacity");
+    expect(sit.scope_routines).toEqual(["last-stack-fkanban-pickup-w3"]);
+
+    const raArgs = readFileSync(ra.argsFile, "utf8");
+    expect(raArgs).toContain("Needs human");
+
+    const crumb = JSON.parse(readFileSync(join(r.runDir, "error-escalated.json"), "utf8"));
+    expect(crumb.cardSlug).toBeNull();
+    expect(crumb.agentDispatched).toBe(false);
+    expect(crumb.harnessOutage.kind).toBe("capacity");
   });
 
   test("second outage within cooldown refreshes nothing and does not re-page", () => {
