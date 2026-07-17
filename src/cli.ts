@@ -121,9 +121,16 @@ function cmdStatus(rest: string[]): number {
   const { values } = parseArgs({ args: rest, options: { json: { type: "boolean" } }, allowPositionals: true });
   const snap = collectStatus();
   if (values.json) {
-    // Preserve the historical CLI JSON shape (situationsOk + rows + errors); the
-    // web API serves the fuller collectStatus() snapshot.
-    console.log(JSON.stringify({ situationsOk: snap.situationsOk, rows: snap.rows, errors: snap.errors }, null, 2));
+    // Preserve the historical CLI JSON shape while keeping stale-but-common
+    // `.entries[]` consumers from null-iterating after the shared status
+    // snapshot renamed routine records to rows.
+    console.log(
+      JSON.stringify(
+        { situationsOk: snap.situationsOk, rows: snap.rows, entries: snap.rows, errors: snap.errors },
+        null,
+        2,
+      ),
+    );
     return 0;
   }
   console.log(`routines @ ${snap.home}  (situations: ${snap.situationsOk ? "ok" : "DEGRADED"})`);
