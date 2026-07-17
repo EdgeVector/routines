@@ -28,6 +28,11 @@ import {
 import { join } from "node:path";
 
 import { harnessBinary } from "./adapters.ts";
+import {
+  classifyHarnessOutage,
+  handleHarnessOutage,
+  type HarnessOutageOptions,
+} from "./harness-outage.ts";
 import { buildRoutineAttributionEnv } from "./prompt.ts";
 import type { RoutineEntry } from "./registry.ts";
 import { routinesHome, runsDir } from "./paths.ts";
@@ -62,6 +67,8 @@ export interface EscalateOptions {
   cardRetryDelayMs?: number;
   /** Suppress console noise. */
   quiet?: boolean;
+  /** Overrides for harness-outage handling (tests). */
+  harnessOutage?: HarnessOutageOptions;
 }
 
 function enabled(): boolean {
@@ -330,6 +337,11 @@ failed. Your only job is to figure out WHY and make the failure stop recurring.
 - If you cannot fix in this session: update card ${cardSlugName} with root cause +
   next steps; leave it P0 in todo/review as appropriate. Use result=blocked when
   waiting on an external gate; use result=needs-human when Tom must decide.
+- Whenever your verdict is needs-human (or needsHuman=true), ALSO page Tom on
+  Telegram — a parked card/verdict alone is not a page:
+    ra notify --priority high "Needs human: routine ${entry.id} — <one line why>"
+  (binary ~/.local/bin/ra; if it is missing or fails, say so in the verdict
+  detail so the dashboard still shows the gap).
 - If this "error" was an intentional heartbeat about an external blocker and a
   card already tracks it, reclassify: document that the routine should heartbeat
   ok/noop after filing, and fix the prompt so soft blockers are not "error".
@@ -483,6 +495,24 @@ export function escalateRoutineError(
   try {
     if (!shouldEscalate(result)) {
       return { escalated: false, detail: "not an error run" };
+    }
+
+    // Harness-level outage (usage limit / dead auth): the harness itself is
+    // out of service, so a per-routine P0 card is board noise and a triage
+    // agent on the same harness cannot even start. Fence the fleet via a
+    // Situation, mark needs-human, and page Tom instead.
+    const outage = classifyHarnessOutage(result, {
+      nowMs: opts.nowMs,
+      ...opts.harnessOutage,
+    });
+    if (outage) {
+      const res = handleHarnessOutage(entry, result, outage, {
+        nowMs: opts.nowMs,
+        quiet: opts.quiet,
+        ...opts.harnessOutage,
+      });
+      logLine(opts.quiet, `harness outage (${outage.kind}): ${res.detail}`);
+      return { escalated: res.escalated, detail: res.detail };
     }
 
     const nowMs = opts.nowMs ?? Date.now();
