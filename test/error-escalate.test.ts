@@ -6,6 +6,7 @@ import { join } from "node:path";
 
 import {
   escalateRoutineError,
+  shouldAutoEscalateScheduledRun,
   shouldEscalate,
 } from "../src/error-escalate.ts";
 import type { RoutineEntry } from "../src/registry.ts";
@@ -145,6 +146,15 @@ describe("shouldEscalate", () => {
   test("disabled via env", () => {
     process.env.ROUTINES_ERROR_ESCALATE = "0";
     expect(shouldEscalate(result({ exitCode: 1 }))).toBe(false);
+  });
+  test("auto scheduled escalation skips throwaway routines homes unless explicitly enabled", () => {
+    const r = result({ exitCode: 1 });
+
+    expect(shouldEscalate(r)).toBe(true);
+    expect(shouldAutoEscalateScheduledRun(r)).toBe(false);
+
+    process.env.ROUTINES_ERROR_ESCALATE = "1";
+    expect(shouldAutoEscalateScheduledRun(r)).toBe(true);
   });
 });
 

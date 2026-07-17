@@ -31,6 +31,14 @@ _resolve_bin() {
   return 1
 }
 
+_slugify_run_id() {
+  local raw="$1" slug
+  slug=$(printf '%s' "$raw" \
+    | tr '[:upper:]' '[:lower:]' \
+    | sed -E 's/^bstress-//; s/[^a-z0-9_-]+/-/g; s/^-+//; s/-+$//')
+  [ -n "$slug" ] && printf '%s\n' "$slug" || printf 'run\n'
+}
+
 _load() {
   [ -f "$STATE" ] && . "$STATE" || true
 }
@@ -38,13 +46,14 @@ _load() {
 _write_state() {
   local tmp="$STATE.tmp.$$"
   {
-    printf 'HOME_DIR=%q\n' "$HOME_DIR"
-    printf 'SOCK=%q\n' "$SOCK"
-    printf 'BIN=%q\n' "$BIN"
-    printf 'LOG=%q\n' "$LOG"
-    printf 'FKCONFIG=%q\n' "$FKCONFIG"
+    printf 'HOME_DIR=%q\n' "${HOME_DIR:-}"
+    printf 'SOCK=%q\n' "${SOCK:-}"
+    printf 'BIN=%q\n' "${BIN:-}"
+    printf 'LOG=%q\n' "${LOG:-}"
+    printf 'FKCONFIG=%q\n' "${FKCONFIG:-}"
     printf 'NODE_PID=%q\n' "${NODE_PID:-}"
     printf 'RUN=%q\n' "${RUN:-}"
+    printf 'SLUG_RUN_ID=%q\n' "${SLUG_RUN_ID:-}"
   } >"$tmp" && mv -f "$tmp" "$STATE"
 }
 
@@ -115,6 +124,7 @@ case "$cmd" in
     LOG="$HOME_DIR/node.log"
     FKCONFIG="$HOME_DIR/kanban-config.json"
     RUN=""
+    SLUG_RUN_ID=""
     mkdir -p "$HOME_DIR/data"
     _launch_proc
     _write_state
@@ -131,8 +141,22 @@ case "$cmd" in
   set-run)
     _load
     RUN="${1:?run-id required}"
+    SLUG_RUN_ID="$(_slugify_run_id "$RUN")"
     _write_state
     echo "bstress: run=$RUN"
+    echo "bstress: slug_run_id=$SLUG_RUN_ID"
+    ;;
+
+  set-slug-run)
+    _load
+    SLUG_RUN_ID="$(_slugify_run_id "${1:?slug run-id required}")"
+    _write_state
+    echo "bstress: slug_run_id=$SLUG_RUN_ID"
+    ;;
+
+  get-slug-run)
+    _load
+    printf '%s\n' "${SLUG_RUN_ID:-}"
     ;;
 
   stop)
@@ -172,7 +196,7 @@ case "$cmd" in
     if [ -S "$HOME/.folddb/data/folddb.sock" ]; then
       echo "bstress: primary_brain=present_untouched"
     else
-      echo "bstress: primary_brain=not_socket"
+      echo "bstress: primary_brain=not_socket(ok if brain not running)"
     fi
     echo "bstress: teardown=done"
     ;;
@@ -185,13 +209,13 @@ case "$cmd" in
 
   env)
     _load
-    for k in HOME_DIR SOCK BIN LOG FKCONFIG NODE_PID RUN; do
+    for k in HOME_DIR SOCK BIN LOG FKCONFIG NODE_PID RUN SLUG_RUN_ID; do
       eval "printf 'export %s=%q\n' \"$k\" \"\${$k:-}\""
     done
     ;;
 
   *)
-    echo "usage: bstress-node.sh {launch|wait-ready [secs]|set-run <id>|stop|relaunch|teardown|statefile|get <KEY>|env}" >&2
+    echo "usage: bstress-node.sh {launch|wait-ready [secs]|set-run <id>|set-slug-run <id>|stop|relaunch|teardown|statefile|get <KEY>|get-slug-run|env}" >&2
     exit 64
     ;;
 esac

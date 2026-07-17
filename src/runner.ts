@@ -22,7 +22,7 @@ import { parseOutcome, type RunOutcome } from "./outcome.ts";
 import { patchState } from "./state.ts";
 import { envFromProjectConfig, loadProjectConfig, resolveRoutineCwd } from "./project-config.ts";
 import { discoveredRoutineSocketEnv } from "./socket-env.ts";
-import { escalateRoutineError, shouldEscalate } from "./error-escalate.ts";
+import { escalateRoutineError, shouldAutoEscalateScheduledRun } from "./error-escalate.ts";
 
 export interface RunResult {
   id: string;
@@ -190,6 +190,7 @@ export function runRoutine(entry: RoutineEntry, opts: RunOptions = {}): Promise<
       writeEarlyMeta({
         runDir,
         id: entry.id,
+        trigger,
         harness: entry.harness,
         model: entry.model,
         effort: entry.effort,
@@ -286,7 +287,7 @@ export function runRoutine(entry: RoutineEntry, opts: RunOptions = {}): Promise<
 
       // P0 fleet rule: every error run gets a board card + (rate-limited) triage
       // agent. Never await — must not stall the scheduler or re-throw.
-      if (trigger === "scheduled" && shouldEscalate(result)) {
+      if (trigger === "scheduled" && shouldAutoEscalateScheduledRun(result)) {
         try {
           escalateRoutineError(entry, result, { quiet: opts.quiet });
         } catch {
