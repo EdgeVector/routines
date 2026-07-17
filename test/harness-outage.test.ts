@@ -17,6 +17,7 @@ import { parseRRule } from "../src/rrule.ts";
 
 const CODEX_LIMIT_LINE =
   "ERROR: You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at Jul 22nd, 2026 10:00 PM.";
+const CODEX_CAPACITY_LINE = "ERROR: Selected model is at capacity. Please try a different model.";
 
 let home: string;
 const prevHome = process.env.ROUTINES_HOME;
@@ -119,6 +120,12 @@ describe("classifyHarnessOutage", () => {
   test("insufficient_quota classifies as usage-limit", () => {
     const out = classifyHarnessOutage(result("openai error: insufficient_quota"));
     expect(out?.kind).toBe("usage-limit");
+  });
+
+  test("codex selected-model capacity classifies as usage-limit outage", () => {
+    const out = classifyHarnessOutage(result(CODEX_CAPACITY_LINE));
+    expect(out?.kind).toBe("usage-limit");
+    expect(out?.evidence).toBe(CODEX_CAPACITY_LINE);
   });
 
   test("invalid api key classifies as auth", () => {

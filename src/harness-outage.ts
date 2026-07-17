@@ -70,6 +70,7 @@ interface OutageState {
 // stderr/stdout tails, which can echo prompt text, so every pattern here must
 // be something no routine prompt plausibly contains as instructions.
 const USAGE_LIMIT_PATTERNS: RegExp[] = [
+  /selected model is at capacity/i,
   /you'?ve hit your usage limit/i,
   /usage limit reached/i,
   /purchase more credits/i,
