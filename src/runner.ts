@@ -190,6 +190,7 @@ export function runRoutine(entry: RoutineEntry, opts: RunOptions = {}): Promise<
       writeEarlyMeta({
         runDir,
         id: entry.id,
+        trigger,
         harness: entry.harness,
         model: entry.model,
         effort: entry.effort,
