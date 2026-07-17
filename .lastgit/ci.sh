@@ -24,7 +24,11 @@ done
 
 # 2b. whole-program typecheck — per-file `bun build` misses cross-file type
 # errors (e.g. a call site missing a required field of another module's type).
+# Fresh clones have no node_modules; install first so @types/bun resolves
+# (bun's global cache keeps this to ~a second).
 if [ -f tsconfig.json ]; then
+  echo "bun install --frozen-lockfile"
+  bun install --frozen-lockfile
   echo "bunx tsc --noEmit"
   bunx tsc --noEmit
 fi
