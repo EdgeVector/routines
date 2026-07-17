@@ -246,12 +246,22 @@ export async function deliverFleetStatus(options: DeliverStatusOptions): Promise
   return { ...publication, deliveryRequest, staged, approved };
 }
 
+/** Snapshot fields safe for the ~64KB sealed-message cap. Exclude rows_json —
+ * the admin tab reconstructs the grid from RoutineStatus rows, and embedding
+ * the full fleet JSON twice is what blew past the Exemem size limit. */
+const SNAPSHOT_DELIVER_FIELDS = SNAPSHOT_FIELDS.filter((f) => f !== "rows_json");
+
+/** Status fields for deliver — drop free-text detail that can dominate size. */
+const STATUS_DELIVER_FIELDS = STATUS_FIELDS.filter((f) => f !== "last_outcome_detail");
+
 export function buildDeliveryStageRequest(opts: {
   schemaHashes: Record<SchemaKey, string>;
   recipient: DeliveryRecipient;
   maxRecords?: number;
 }): DeliveryStageRequest {
-  const maxRecords = positiveInt(opts.maxRecords, 20);
+  // Default 12 status rows + 1 snapshot keeps sealed size under Exemem's 64KB cap
+  // on Tom's full fleet (~50 routines). Override with --max-records when needed.
+  const maxRecords = positiveInt(opts.maxRecords, 12);
   return {
     recipient_pubkey: opts.recipient.recipientPubkey,
     ...(opts.recipient.recipientDisplayName ? { recipient_display_name: opts.recipient.recipientDisplayName } : {}),
@@ -262,12 +272,12 @@ export function buildDeliveryStageRequest(opts: {
     legs: [
       {
         schema_name: opts.schemaHashes.snapshot,
-        fields: [...SNAPSHOT_FIELDS],
+        fields: [...SNAPSHOT_DELIVER_FIELDS],
         hash_keys: ["fleet-latest"],
       },
       {
         schema_name: opts.schemaHashes.status,
-        fields: [...STATUS_FIELDS],
+        fields: [...STATUS_DELIVER_FIELDS],
       },
     ],
   };
