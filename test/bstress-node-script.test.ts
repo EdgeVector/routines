@@ -1,7 +1,7 @@
-import { mkdtemp, rm } from "node:fs/promises";
-import { join } from "node:path";
-import { tmpdir } from "node:os";
 import { execFile } from "node:child_process";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { promisify } from "node:util";
 import { describe, expect, test } from "bun:test";
 
@@ -16,7 +16,28 @@ async function runScript(statePath: string, ...args: string[]) {
   return { stdout, stderr, exitCode: 0 };
 }
 
-describe("bstress node harness", () => {
+describe("bstress node helper", () => {
+  test("prefers current lastdbd binary names before legacy lastdb_server", async () => {
+    const script = await Bun.file(scriptPath).text();
+
+    expect(script).toContain('$FOLD_ROOT/target/release/lastdbd');
+    expect(script).toContain('$FOLD_ROOT/target/debug/lastdbd');
+    expect(script.indexOf('$FOLD_ROOT/target/release/lastdbd')).toBeLessThan(
+      script.indexOf("$DEFAULT_BIN"),
+    );
+    expect(script.indexOf("$DEFAULT_BIN")).toBeLessThan(
+      script.indexOf('$FOLD_ROOT/target/release/lastdb_server'),
+    );
+  });
+
+  test("launch passes the node home as data-dir so socket matches state", async () => {
+    const script = await Bun.file(scriptPath).text();
+
+    expect(script).toContain('SOCK="$HOME_DIR/data/folddb.sock"');
+    expect(script).toContain('nohup "$BIN" --data-dir "$HOME_DIR"');
+    expect(script).not.toContain('nohup "$BIN" --data-dir "$HOME_DIR/data"');
+  });
+
   test("persists a slug-safe run id when set-run rewrites state", async () => {
     const dir = await mkdtemp(join(tmpdir(), "bstress-node-test-"));
     try {

@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
-# bstress-node.sh - ephemeral LastDB node lifecycle for the
-# brain-stress-consistency routine. State is stored in one fixed file and every
-# mutation rewrites the full state set atomically, so a later scheduled turn can
-# source the file after stop/relaunch and recover the same home, socket, PID,
-# run id, and slug-safe run id.
+# Ephemeral LastDB node lifecycle helper for brain stress routines.
+#
+# The helper persists node state in a fixed file so separate harness steps can
+# launch, wait, stop, relaunch, and tear down the same isolated /tmp node.
 
 set -o pipefail
 
@@ -24,7 +23,10 @@ _resolve_bin() {
            "$FOLD_ROOT/target/debug/lastdb_server"; do
     [ -n "$c" ] || continue
     BIN_TRIED="$BIN_TRIED${BIN_TRIED:+, }$c"
-    if [ -x "$c" ]; then echo "$c"; return 0; fi
+    if [ -x "$c" ]; then
+      echo "$c"
+      return 0
+    fi
   done
   return 1
 }
@@ -37,20 +39,22 @@ _slugify_run_id() {
   [ -n "$slug" ] && printf '%s\n' "$slug" || printf 'run\n'
 }
 
-_load() { [ -f "$STATE" ] && . "$STATE" || true; }
+_load() {
+  [ -f "$STATE" ] && . "$STATE" || true
+}
 
 _write_state() {
   local tmp="$STATE.tmp.$$"
   {
     printf 'HOME_DIR=%q\n' "${HOME_DIR:-}"
-    printf 'SOCK=%q\n'     "${SOCK:-}"
-    printf 'BIN=%q\n'      "${BIN:-}"
-    printf 'LOG=%q\n'      "${LOG:-}"
+    printf 'SOCK=%q\n' "${SOCK:-}"
+    printf 'BIN=%q\n' "${BIN:-}"
+    printf 'LOG=%q\n' "${LOG:-}"
     printf 'FKCONFIG=%q\n' "${FKCONFIG:-}"
     printf 'NODE_PID=%q\n' "${NODE_PID:-}"
-    printf 'RUN=%q\n'      "${RUN:-}"
+    printf 'RUN=%q\n' "${RUN:-}"
     printf 'SLUG_RUN_ID=%q\n' "${SLUG_RUN_ID:-}"
-  } > "$tmp" && mv -f "$tmp" "$STATE"
+  } >"$tmp" && mv -f "$tmp" "$STATE"
 }
 
 _launch_proc() {
@@ -66,7 +70,10 @@ _wait_ready() {
   for i in $(seq 1 "$secs"); do
     if [ -S "$SOCK" ]; then
       r=$(curl -s --max-time 3 --unix-socket "$SOCK" http://localhost/api/system/status 2>/dev/null)
-      if [ -n "$r" ]; then echo "bstress: ready=1 after=${i}s"; return 0; fi
+      if [ -n "$r" ]; then
+        echo "bstress: ready=1 after=${i}s"
+        return 0
+      fi
     fi
     if [ -n "${NODE_PID:-}" ] && ! kill -0 "$NODE_PID" 2>/dev/null; then
       echo "bstress: ready=0 node_died_pid=$NODE_PID"
@@ -101,10 +108,18 @@ case "$cmd" in
 
   launch)
     BIN="$(_resolve_bin)"
-    if [ -z "$BIN" ] || [ ! -x "$BIN" ]; then echo "bstress: error=bin_missing tried=$BIN_TRIED"; exit 3; fi
+    if [ -z "$BIN" ] || [ ! -x "$BIN" ]; then
+      echo "bstress: error=bin_missing tried=$BIN_TRIED"
+      exit 3
+    fi
     HOME_DIR="/tmp/bs$$_$RANDOM"
-    case "$HOME_DIR" in /tmp/bs*) : ;; *) echo "bstress: error=refuse_home home=$HOME_DIR"; exit 3;; esac
-    case "$HOME_DIR" in "$HOME/.folddb"*|"$HOME/.lastdb"*) echo "bstress: error=refuse_real_profile"; exit 3;; esac
+    case "$HOME_DIR" in
+      /tmp/bs*) ;;
+      *) echo "bstress: error=refuse_home home=$HOME_DIR"; exit 3 ;;
+    esac
+    case "$HOME_DIR" in
+      "$HOME/.folddb"*|"$HOME/.lastdb"*) echo "bstress: error=refuse_real_profile"; exit 3 ;;
+    esac
     SOCK="$HOME_DIR/data/folddb.sock"
     LOG="$HOME_DIR/node.log"
     FKCONFIG="$HOME_DIR/kanban-config.json"
@@ -153,7 +168,10 @@ case "$cmd" in
 
   relaunch)
     _load
-    if [ -z "${HOME_DIR:-}" ]; then echo "bstress: error=no_state"; exit 3; fi
+    if [ -z "${HOME_DIR:-}" ]; then
+      echo "bstress: error=no_state"
+      exit 3
+    fi
     _launch_proc
     _write_state
     echo "bstress: relaunched pid=$NODE_PID home=$HOME_DIR"
@@ -169,10 +187,17 @@ case "$cmd" in
           kill -9 "$p" 2>/dev/null || true
         fi
       done
-      case "$HOME_DIR" in /tmp/bs*) rm -rf "$HOME_DIR" && echo "bstress: removed_home=$HOME_DIR";; *) echo "bstress: refuse_rm home=$HOME_DIR";; esac
+      case "$HOME_DIR" in
+        /tmp/bs*) rm -rf "$HOME_DIR" && echo "bstress: removed_home=$HOME_DIR" ;;
+        *) echo "bstress: refuse_rm home=$HOME_DIR" ;;
+      esac
     fi
     rm -f "$STATE"
-    if [ -S "$HOME/.folddb/data/folddb.sock" ]; then echo "bstress: primary_brain=present_untouched"; else echo "bstress: primary_brain=not_socket(ok if brain not running)"; fi
+    if [ -S "$HOME/.folddb/data/folddb.sock" ]; then
+      echo "bstress: primary_brain=present_untouched"
+    else
+      echo "bstress: primary_brain=not_socket(ok if brain not running)"
+    fi
     echo "bstress: teardown=done"
     ;;
 
