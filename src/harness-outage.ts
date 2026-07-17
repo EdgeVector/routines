@@ -4,7 +4,7 @@
 // cards in two days — one per routine — while the actual problem was a single
 // dead harness no agent could fix. That is not a papercut and must not become
 // board noise. When a run dies because the HARNESS itself is out of service
-// (usage limit / quota / auth), we instead:
+// (usage limit / quota / capacity / auth), we instead:
 //   1. Classify the run needs-human (triage-result.json → dashboard chip)
 //   2. Upsert an active Situation fencing every routine on that harness, so
 //      the scheduler stops spawning agents into a dead harness
@@ -24,7 +24,7 @@ import { loadAll, type RoutineEntry } from "./registry.ts";
 import { routinesHome } from "./paths.ts";
 import type { RunResult } from "./runner.ts";
 
-export type HarnessOutageKind = "usage-limit" | "auth";
+export type HarnessOutageKind = "usage-limit" | "capacity" | "auth";
 
 export interface HarnessOutage {
   kind: HarnessOutageKind;
@@ -70,7 +70,6 @@ interface OutageState {
 // stderr/stdout tails, which can echo prompt text, so every pattern here must
 // be something no routine prompt plausibly contains as instructions.
 const USAGE_LIMIT_PATTERNS: RegExp[] = [
-  /selected model is at capacity/i,
   /you'?ve hit your usage limit/i,
   /usage limit reached/i,
   /purchase more credits/i,
@@ -78,6 +77,11 @@ const USAGE_LIMIT_PATTERNS: RegExp[] = [
   /insufficient[_\s]quota/i,
   /exceeded your current quota/i,
   /credit balance is too low/i,
+];
+
+const CAPACITY_PATTERNS: RegExp[] = [
+  /selected model is at capacity/i,
+  /model is (?:currently )?at capacity/i,
 ];
 
 const AUTH_PATTERNS: RegExp[] = [
@@ -140,13 +144,14 @@ export function classifyHarnessOutage(
   ].join("\n");
 
   const usage = matchLine(corpus, USAGE_LIMIT_PATTERNS);
-  const auth = usage ? null : matchLine(corpus, AUTH_PATTERNS);
-  const evidence = usage ?? auth;
+  const capacity = usage ? null : matchLine(corpus, CAPACITY_PATTERNS);
+  const auth = usage || capacity ? null : matchLine(corpus, AUTH_PATTERNS);
+  const evidence = usage ?? capacity ?? auth;
   if (!evidence) return null;
 
   const { hint, iso } = parseResetHint(corpus, nowMs);
   return {
-    kind: usage ? "usage-limit" : "auth",
+    kind: usage ? "usage-limit" : capacity ? "capacity" : "auth",
     evidence,
     resetHint: hint,
     resetAt: iso,
