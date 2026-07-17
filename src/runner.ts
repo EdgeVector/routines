@@ -310,7 +310,8 @@ export function completedExitCode(
   outcome: RunOutcome,
 ): number | null {
   if (
-    timedOut &&
+    rawExitCode !== null &&
+    rawExitCode !== 0 &&
     (outcome.kind === "ok" || outcome.kind === "noop") &&
     (outcome.source === "heartbeat" || outcome.source === "routine_result")
   ) {
