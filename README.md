@@ -37,7 +37,24 @@ cwd           = "/Users/you/code/edgevector"
 status        = "active"                         # active | paused
 timeout_min   = 30
 heartbeat_slug = "routine-heartbeats"           # optional; runs append the fleet heartbeat line
+# fallback    = "claude:sonnet,grok:grok-4.5"  # optional; overrides fleet default tail
 ```
+
+### Harness fallback chain
+
+When a run fails because the **harness itself** is out of service (usage limit /
+credits / capacity / auth — same classifier as harness-outage), routinesd does
+**not** stop the fleet. In the same fire it retries the next agent:
+
+1. the routine's configured primary (`harness` / `model`)
+2. **Claude Sonnet** (default)
+3. **Grok** `grok-4.5` (default)
+
+The registry TOML is **not** rewritten (ephemeral). Outage state records an
+expiry so later fires skip the dead primary until it clears. Ordinary agent
+bugs still escalate as before (no chain hop). Disable with `ROUTINES_FALLBACK=0`;
+override the default tail with `ROUTINES_FALLBACK_CHAIN` or per-routine
+`fallback = "claude:sonnet,grok:grok-4.5"`.
 
 Supported rrule keys: `FREQ` (SECONDLY..YEARLY), `INTERVAL`, `BYDAY`, `BYHOUR`,
 `BYMINUTE`, `BYSECOND`, `BYMONTHDAY`, and an optional `DTSTART` anchor. An

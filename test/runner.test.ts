@@ -120,8 +120,10 @@ describe("runRoutine heartbeat handling", () => {
     );
     writeRoutine("last-stack-fkanban-pickup-w3");
 
+    // Isolate outcome classification from the same-run fallback chain.
     const result = await runRoutine(loadEntry("last-stack-fkanban-pickup-w3"), {
       quiet: true,
+      noFallback: true,
     });
 
     expect(result.timedOut).toBe(false);
