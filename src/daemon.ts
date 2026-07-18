@@ -30,9 +30,19 @@ import { loadAll, type RoutineEntry } from "./registry.ts";
 import { locksDir } from "./paths.ts";
 import { nextAfter } from "./rrule.ts";
 import { patchState, readState } from "./state.ts";
-import { runRoutine, type RunResult } from "./runner.ts";
+import { isHarnessOutaged } from "./harness-outage.ts";
+import { routesForFire, runRoutine, type RunResult } from "./runner.ts";
 import { loadProjectConfig } from "./project-config.ts";
 import { captureRoutineRunFailure, captureRoutinesException } from "./observability.ts";
+
+/** True when at least one route in the chain is not currently outaged. */
+function hasHealthyFallback(entry: RoutineEntry): boolean {
+  try {
+    return routesForFire(entry).some((r) => !isHarnessOutaged(r.harness));
+  } catch {
+    return false;
+  }
+}
 
 export interface DaemonOptions {
   once?: boolean;
@@ -218,16 +228,30 @@ function tryDispatch(entry: RoutineEntry, occ: Date, deps: DispatchDeps): void {
 
   // Situation fence — check first so a fenced routine is never dispatched, and
   // advance its last-fire so we don't re-evaluate the same instant every tick.
+  // Exception: harness-outage-* situations that left scope_routines empty (or
+  // a stale fence on a harness that still has a healthy fallback) — runRoutine
+  // will skip the dead primary and use the chain.
   const fence = fenceFor(entry.id, situations);
   if (fence.fenced) {
-    patchState(entry.id, { lastFire: occ.toISOString(), lastSkip: `fence:${fence.situationSlug}` });
+    const sitSlug = fence.situationSlug ?? "unknown";
+    const canFallback =
+      /^harness-outage-/.test(sitSlug) && hasHealthyFallback(entry);
+    if (!canFallback) {
+      patchState(entry.id, { lastFire: occ.toISOString(), lastSkip: `fence:${sitSlug}` });
+      log({
+        ts: now.toISOString(),
+        kind: "skip-fence",
+        id: entry.id,
+        detail: `Situation ${sitSlug} scope_routines=${fence.pattern ?? ""}`,
+      });
+      return;
+    }
     log({
       ts: now.toISOString(),
-      kind: "skip-fence",
+      kind: "dispatch",
       id: entry.id,
-      detail: `Situation ${fence.situationSlug} scope_routines=${fence.pattern}`,
+      detail: `fence ${sitSlug} bypassed via fallback chain`,
     });
-    return;
   }
 
   // Optional hard cap only when concurrency > 0. Unlimited (0) never skip-caps.

@@ -40,6 +40,11 @@ export interface RoutineEntry {
    * When unset, the status snapshot assigns a group heuristically from the id.
    */
   group?: string;
+  /**
+   * Optional comma-separated fallback chain after primary, e.g.
+   * `claude:sonnet,grok:grok-4.5`. When unset, fleet default applies.
+   */
+  fallback?: string;
   /** Absolute path of the source TOML file. */
   sourcePath: string;
 }
@@ -67,6 +72,7 @@ const KNOWN_KEYS = new Set([
   "timeout_min",
   "heartbeat_slug",
   "group",
+  "fallback",
 ]);
 
 export function parseEntry(text: string, sourcePath: string): RoutineEntry {
@@ -165,6 +171,8 @@ export function parseEntry(text: string, sourcePath: string): RoutineEntry {
   const heartbeatSlug = str(raw, "heartbeat_slug", sourcePath);
   if (heartbeatSlug) entry.heartbeatSlug = heartbeatSlug;
   if (group) entry.group = group;
+  const fallback = str(raw, "fallback", sourcePath);
+  if (fallback) entry.fallback = fallback;
   return entry;
 }
 
