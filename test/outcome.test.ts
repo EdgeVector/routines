@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import {
   aggregateOutcomes,
+  filterBenignHarnessNoise,
   nameMatchesRoutine,
   parseOutcome,
 } from "../src/outcome.ts";
@@ -411,6 +412,29 @@ Prior memory:
     const o = parseOutcome("last-stack-disk-reclaim", text, { exitCode: 0 });
     expect(o.kind).toBe("noop");
     expect(o.source).toBe("routine_result");
+  });
+
+  test("filters benign Codex model-cache TTL warning", () => {
+    const text = [
+      "real failure detail stays",
+      "ERROR codex_models_manager::manager: failed to renew cache TTL: missing field supports_reasoning_summaries at line 86 column 5",
+      "another line stays",
+    ].join("\n");
+    const filtered = filterBenignHarnessNoise(text);
+    expect(filtered).not.toContain("supports_reasoning_summaries");
+    expect(filtered).toContain("real failure detail stays");
+    expect(filtered).toContain("another line stays");
+  });
+
+  test("benign Codex cache warning does not override real routine result", () => {
+    const text = `
+ERROR codex_models_manager::manager: failed to renew cache TTL: missing field supports_reasoning_summaries at line 86 column 5
+ROUTINE_RESULT outcome=noop detail=idle nothing-safe
+`;
+    const o = parseOutcome("last-stack-fkanban-pickup", text, { exitCode: 0 });
+    expect(o.kind).toBe("noop");
+    expect(o.source).toBe("routine_result");
+    expect(o.detail).toContain("idle nothing-safe");
   });
 });
 

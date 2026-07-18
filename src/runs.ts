@@ -8,6 +8,7 @@ import { join } from "node:path";
 
 import {
   aggregateOutcomes,
+  filterBenignHarnessNoise,
   outcomeFromMeta,
   parseOutcome,
   type OutcomeStats,
@@ -83,7 +84,7 @@ export function resolveRunOutcome(id: string, runDir: string, meta: Record<strin
   }
   // Re-parse historical logs (or unknown meta) from captured streams.
   const stdout = readText(join(runDir, "stdout.log"));
-  const stderr = readText(join(runDir, "stderr.log"));
+  const stderr = filterBenignHarnessNoise(readText(join(runDir, "stderr.log")));
   // Prefer full logs; fall back to tails stored in meta if logs were pruned.
   const text =
     stdout || stderr
@@ -175,7 +176,7 @@ export function readRun(id: string, stamp?: string, tailBytes = 8000): RunDetail
   const fullStdout = readTail(join(runDir, "stdout.log"), Math.max(tailBytes, 200_000));
   const stdout =
     fullStdout.length <= tailBytes ? fullStdout : fullStdout.slice(fullStdout.length - tailBytes);
-  const stderr = readTail(join(runDir, "stderr.log"), tailBytes);
+  const stderr = filterBenignHarnessNoise(readTail(join(runDir, "stderr.log"), tailBytes));
   const summaryRow = summarize(id, target!, runDir, meta);
   const summary = extractRunSummary(fullStdout, summaryRow);
   return {
