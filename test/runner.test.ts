@@ -94,6 +94,7 @@ describe("runRoutine heartbeat handling", () => {
 
     const result = await runRoutine(loadEntry("last-stack-pipeline-health"), {
       quiet: true,
+      noFallback: true,
     });
 
     expect(result.timedOut).toBe(false);
