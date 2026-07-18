@@ -24,6 +24,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
+import { buildRouteChain, type RouteStep } from "./fallback.ts";
 import { loadAll, type RoutineEntry } from "./registry.ts";
 import { routinesHome } from "./paths.ts";
 import type { RunResult } from "./runner.ts";
@@ -245,11 +246,40 @@ function logLine(quiet: boolean | undefined, msg: string): void {
   }
 }
 
-/** All registry routine ids on the given harness (fallback: just this one). */
-function routineIdsForHarness(harness: string, fallbackId: string): string[] {
+/**
+ * The route (harness + model) a routine is CURRENTLY effectively dispatched
+ * on, honoring the same-run fallback chain: its declared primary unless that
+ * (and any earlier step) is presently outaged, in which case the first
+ * healthy step in its route chain. Registry TOML is never rewritten on
+ * fallback, so comparing against the raw `harness`/`model` fields alone
+ * misses every routine quietly running on a substitute harness (see
+ * fenceRoutines below, and `routines status` in status.ts, which otherwise
+ * reports the configured primary even while dispatch is substituting a
+ * fallback).
+ */
+export function effectiveRoute(entry: RoutineEntry, nowMs: number = Date.now()): RouteStep {
+  const chain = buildRouteChain(entry);
+  for (const step of chain) {
+    if (!isHarnessOutaged(step.harness, nowMs)) return step;
+  }
+  return chain[0]!;
+}
+
+/**
+ * All registry routine ids CURRENTLY effectively running on the given harness
+ * (fallback: just this one). Matches by effective route, not the declared
+ * primary field, so a harness-outage fence also catches codex-primary
+ * routines presently substituted onto this harness because codex itself is
+ * outaged — otherwise the Situation only ever scopes the one routine whose
+ * failure happened to trip the detector, while its siblings keep dispatching
+ * to the same dead harness unfenced.
+ */
+function routineIdsForHarness(harness: string, fallbackId: string, nowMs: number): string[] {
   try {
     const { entries } = loadAll();
-    const ids = entries.filter((e) => e.harness === harness).map((e) => e.id);
+    const ids = entries
+      .filter((e) => effectiveRoute(e, nowMs).harness === harness)
+      .map((e) => e.id);
     if (ids.length > 0) return ids.sort();
   } catch {
     /* fall through */
@@ -363,7 +393,7 @@ export function handleHarnessOutage(
 
     const fenceRoutines = opts.fenceRoutines !== false;
     const scopeRoutines = fenceRoutines
-      ? routineIdsForHarness(entry.harness, entry.id)
+      ? routineIdsForHarness(entry.harness, entry.id, nowMs)
       : [];
     const detailParts: string[] = [
       `harness-outage:${outage.kind}`,

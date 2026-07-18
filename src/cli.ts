@@ -230,8 +230,12 @@ function cmdStatus(rest: string[]): number {
       r.noopRate == null
         ? "noop-rate n/a"
         : `noop ${Math.round(r.noopRate * 100)}% (${r.outcomeNoop}n/${r.outcomeOk}u/${r.outcomeError}e of ${r.outcomeOk + r.outcomeNoop + r.outcomeError + r.outcomeUnknown})`;
+    const routeSuffix =
+      r.effectiveHarness !== r.harness || r.effectiveModel !== r.model
+        ? ` (running ${r.effectiveHarness}/${r.effectiveModel} — primary outaged)`
+        : "";
     console.log(
-      `${r.id}  [${r.status}] ${r.harness}/${r.model}\n` +
+      `${r.id}  [${r.status}] ${r.harness}/${r.model}${routeSuffix}\n` +
         `    next: ${r.nextFire ?? "-"}  last: ${r.lastRun ?? "-"} exit=${r.lastExit ?? "-"} outcome=${outcome}  ${rate} ${flags}`,
     );
     if (r.lastOutcomeDetail) console.log(`    detail: ${r.lastOutcomeDetail}`);
