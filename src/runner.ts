@@ -160,9 +160,13 @@ export async function runRoutine(entry: RoutineEntry, opts: RunOptions = {}): Pr
       routeCount: routes.length,
     });
 
-    // Classify outage even when outcome was remapped to clean noop/safe_skip
-    // (capacity / usage-limit transcripts). Those must still walk the chain.
-    const outage = classifyHarnessOutage(last);
+    // Classify outage when the harness itself died — including capacity /
+    // usage-limit remapped to clean noop/safe_skip. Do NOT classify pure `ok`
+    // runs: agents often quote Situation text containing "at capacity" in
+    // successful logs, which re-opened harness-outage + re-paged Telegram in a
+    // loop (Tom 2026-07-18).
+    const outage =
+      last.outcome.kind === "ok" ? null : classifyHarnessOutage(last);
     attempts.push({
       harness: step.harness,
       model: step.model,
