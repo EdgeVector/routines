@@ -20,6 +20,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -27,7 +28,7 @@ import { join } from "node:path";
 
 import { fenceFor, loadActiveSituations, type ActiveSituation } from "./situations.ts";
 import { loadAll, type RoutineEntry } from "./registry.ts";
-import { locksDir } from "./paths.ts";
+import { locksDir, runsDir } from "./paths.ts";
 import { nextAfter } from "./rrule.ts";
 import { patchState, readState } from "./state.ts";
 import { isHarnessOutaged } from "./harness-outage.ts";
@@ -72,7 +73,8 @@ export interface DaemonEvent {
     | "skip-cap"
     | "warmup"
     | "registry-error"
-    | "situations-degraded";
+    | "situations-degraded"
+    | "reconcile-orphans";
   id?: string;
   detail?: string;
 }
@@ -167,6 +169,65 @@ export function releaseLock(id: string): void {
 export function isLocked(id: string): boolean {
   const pid = readLockPid(id);
   return pid != null && pidAlive(pid);
+}
+
+export interface OrphanedRunInfo {
+  id: string;
+  stamp: string;
+  runDir: string;
+  harnessPid: number | null;
+}
+
+/**
+ * Scan runsDir for run dirs still marked `status:"running"` whose harness pid
+ * is no longer alive — evidence of a prior routinesd process dying/restarting
+ * mid-run without ever reaching the runner's finalize() (the only other place
+ * that writes a terminal meta.json). Rewrite those to `status:"orphaned"` so
+ * they stop looking forever-running to status reads and fleet-health passes.
+ * Meant to run once at real daemon startup (see startDaemon below).
+ */
+export function reconcileOrphanedRuns(now: Date = new Date()): OrphanedRunInfo[] {
+  const base = runsDir();
+  if (!existsSync(base)) return [];
+  const orphaned: OrphanedRunInfo[] = [];
+  let ids: string[];
+  try {
+    ids = readdirSync(base);
+  } catch {
+    return [];
+  }
+  for (const id of ids) {
+    const idDir = join(base, id);
+    let stamps: string[];
+    try {
+      stamps = readdirSync(idDir);
+    } catch {
+      continue;
+    }
+    for (const stamp of stamps) {
+      const runDir = join(idDir, stamp);
+      const metaPath = join(runDir, "meta.json");
+      if (!existsSync(metaPath)) continue;
+      let meta: Record<string, unknown>;
+      try {
+        meta = JSON.parse(readFileSync(metaPath, "utf8")) as Record<string, unknown>;
+      } catch {
+        continue;
+      }
+      if (meta.status !== "running") continue;
+      const harnessPid = typeof meta.harnessPid === "number" ? meta.harnessPid : null;
+      if (harnessPid != null && pidAlive(harnessPid)) continue; // legitimately still running
+      meta.status = "orphaned";
+      if (typeof meta.finishedAt !== "string") meta.finishedAt = now.toISOString();
+      try {
+        writeFileSync(metaPath, JSON.stringify(meta, null, 2) + "\n");
+        orphaned.push({ id, stamp, runDir, harnessPid });
+      } catch {
+        /* best effort */
+      }
+    }
+  }
+  return orphaned;
 }
 
 /** Decide whether a routine is due at `now`, and (as a side effect) write a
@@ -409,6 +470,17 @@ export function startDaemon(opts: DaemonOptions = {}): DaemonHandle {
   const concurrency = normalizeConcurrency(opts.concurrency);
   const catchupMs = opts.catchupMs ?? 0;
   const log = opts.log ?? defaultLog;
+
+  const orphaned = reconcileOrphanedRuns();
+  if (orphaned.length > 0) {
+    log({
+      ts: new Date().toISOString(),
+      kind: "reconcile-orphans",
+      detail: `finalized ${orphaned.length} orphaned run(s): ${orphaned
+        .map((o) => `${o.id}/${o.stamp}`)
+        .join(", ")}`,
+    });
+  }
 
   let stopped = false;
   let resolveDone!: () => void;
