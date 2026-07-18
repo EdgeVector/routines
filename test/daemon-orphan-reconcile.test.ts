@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -42,6 +42,28 @@ describe("reconcileOrphanedRuns", () => {
     expect(meta.status).toBe("orphaned");
     expect(meta.exitCode).toBeNull();
     expect(meta.finishedAt).toBe("2026-07-18T02:00:00.000Z");
+  });
+
+  test("clears a dead single-flight lock for an orphaned run", () => {
+    const runDir = join(home, "runs", "locked", "2026-07-18T01-00-00-000Z");
+    const deadPid = 999_999_999;
+    writeMeta(runDir, {
+      id: "locked",
+      status: "running",
+      harnessPid: deadPid,
+      startedAt: "2026-07-18T01:00:00.000Z",
+      exitCode: null,
+      finishedAt: null,
+    });
+    const lockPath = join(home, "locks", "locked.lock");
+    mkdirSync(join(home, "locks"), { recursive: true });
+    writeFileSync(lockPath, String(deadPid));
+
+    const orphaned = reconcileOrphanedRuns(new Date("2026-07-18T02:00:00.000Z"));
+
+    expect(orphaned).toHaveLength(1);
+    expect(orphaned[0]?.clearedLock).toBe(true);
+    expect(existsSync(lockPath)).toBe(false);
   });
 
   test("leaves a running run alone when its harness pid is still alive", () => {

@@ -176,15 +176,16 @@ export interface OrphanedRunInfo {
   stamp: string;
   runDir: string;
   harnessPid: number | null;
+  clearedLock: boolean;
 }
 
 /**
  * Scan runsDir for run dirs still marked `status:"running"` whose harness pid
  * is no longer alive — evidence of a prior routinesd process dying/restarting
  * mid-run without ever reaching the runner's finalize() (the only other place
- * that writes a terminal meta.json). Rewrite those to `status:"orphaned"` so
- * they stop looking forever-running to status reads and fleet-health passes.
- * Meant to run once at real daemon startup (see startDaemon below).
+ * that writes a terminal meta.json). Rewrite those to `status:"orphaned"` and
+ * clear any matching dead single-flight lock so they stop looking
+ * forever-running to status reads and fleet-health passes.
  */
 export function reconcileOrphanedRuns(now: Date = new Date()): OrphanedRunInfo[] {
   const base = runsDir();
@@ -219,9 +220,19 @@ export function reconcileOrphanedRuns(now: Date = new Date()): OrphanedRunInfo[]
       if (harnessPid != null && pidAlive(harnessPid)) continue; // legitimately still running
       meta.status = "orphaned";
       if (typeof meta.finishedAt !== "string") meta.finishedAt = now.toISOString();
+      const lockPid = readLockPid(id);
+      let clearedLock = false;
+      if (lockPid != null && !pidAlive(lockPid)) {
+        try {
+          rmSync(lockPath(id), { force: true });
+          clearedLock = true;
+        } catch {
+          /* best effort */
+        }
+      }
       try {
         writeFileSync(metaPath, JSON.stringify(meta, null, 2) + "\n");
-        orphaned.push({ id, stamp, runDir, harnessPid });
+        orphaned.push({ id, stamp, runDir, harnessPid, clearedLock });
       } catch {
         /* best effort */
       }
