@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -13,7 +13,7 @@ afterEach(() => {
   process.env = { ...savedEnv };
 });
 
-function makeEntry(): RoutineEntry {
+function makeEntry(overrides: Partial<RoutineEntry> = {}): RoutineEntry {
   return {
     id: "unit-routine",
     harness: "codex",
@@ -25,6 +25,7 @@ function makeEntry(): RoutineEntry {
     timeoutMin: 5,
     heartbeatSlug: "routine-heartbeats",
     sourcePath: "/tmp/unit-routine.toml",
+    ...overrides,
   };
 }
 
@@ -45,52 +46,26 @@ function makeResult(): RunResult {
   };
 }
 
-function writeExecutable(path: string, body: string): void {
-  writeFileSync(path, body);
-  chmodSync(path, 0o755);
-}
-
 describe("writeHeartbeat", () => {
-  test("appends heartbeat lines through fbrain stdin with the reference type", () => {
+  test("appends heartbeat lines to a filesystem log (not brain)", () => {
     const dir = mkdtempSync(join(tmpdir(), "routines-heartbeat-"));
-    const argsPath = join(dir, "args.txt");
-    const stdinPath = join(dir, "stdin.txt");
-    const stub = join(dir, "fbrain");
-    writeExecutable(
-      stub,
-      `#!/bin/sh
-printf '%s\\n' "$@" > "${argsPath}"
-cat > "${stdinPath}"
-exit 0
-`,
-    );
-    process.env.ROUTINES_FBRAIN_BIN = stub;
+    const logPath = join(dir, "heartbeats.log");
+    process.env.ROUTINES_HEARTBEATS_FILE = logPath;
 
     const outcome = writeHeartbeat(makeEntry(), makeResult());
 
     expect(outcome.ok).toBe(true);
-    expect(readFileSync(argsPath, "utf8")).toBe("append\nroutine-heartbeats\n--type\nreference\n");
-    const stdin = readFileSync(stdinPath, "utf8");
-    expect(stdin).toContain("unit-routine ok harness=codex model=gpt-test exit=0");
-    expect(stdin.endsWith("\n")).toBe(true);
+    expect(outcome.path).toBe(logPath);
+    const body = readFileSync(logPath, "utf8");
+    expect(body).toContain("unit-routine ok harness=codex model=gpt-test exit=0");
+    expect(body.endsWith("\n")).toBe(true);
   });
 
-  test("records fbrain stderr when append fails", () => {
+  test("skips when heartbeat_slug is unset", () => {
     const dir = mkdtempSync(join(tmpdir(), "routines-heartbeat-"));
-    const stub = join(dir, "fbrain");
-    writeExecutable(
-      stub,
-      `#!/bin/sh
-echo 'Unknown option --text' >&2
-exit 2
-`,
-    );
-    process.env.ROUTINES_FBRAIN_BIN = stub;
-
-    const outcome = writeHeartbeat(makeEntry(), makeResult());
-
-    expect(outcome.ok).toBe(false);
-    expect(outcome.error).toContain("exited 2");
-    expect(outcome.error).toContain("Unknown option --text");
+    process.env.ROUTINES_HEARTBEATS_FILE = join(dir, "heartbeats.log");
+    const outcome = writeHeartbeat(makeEntry({ heartbeatSlug: undefined }), makeResult());
+    expect(outcome.attempted).toBe(false);
+    expect(outcome.ok).toBe(true);
   });
 });
