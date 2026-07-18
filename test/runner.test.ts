@@ -79,6 +79,36 @@ describe("runRoutine heartbeat handling", () => {
     expect(meta.harnessPid).toBeTruthy();
   });
 
+  test("post-success harness transient keeps durable ok exit", async () => {
+    process.env.ROUTINES_CLAUDE_BIN = stub(
+      join(home, "post-success-capacity-harness"),
+      [
+        "#!/bin/sh",
+        "printf '%s\\n' 'last-stack-pipeline-health 2026-07-17T23:17:13Z ok open_cr=unknown deploy_blocked=already-carded'",
+        "printf '%s\\n' 'ERROR: Selected model is at capacity. Please try a different model.' >&2",
+        "exit 1",
+        "",
+      ].join("\n"),
+    );
+    writeRoutine("last-stack-pipeline-health");
+
+    const result = await runRoutine(loadEntry("last-stack-pipeline-health"), {
+      quiet: true,
+      noFallback: true,
+    });
+
+    expect(result.timedOut).toBe(false);
+    expect(result.outcome.kind).toBe("ok");
+    expect(result.outcome.source).toBe("heartbeat");
+    expect(result.exitCode).toBe(0);
+
+    const meta = JSON.parse(readFileSync(join(result.runDir, "meta.json"), "utf8"));
+    expect(meta.exitCode).toBe(0);
+    expect(meta.outcome).toBe("ok");
+    expect(meta.heartbeat.line).toContain("last-stack-pipeline-health ok");
+    expect(meta.heartbeat.line).toContain("exit=0");
+  });
+
   test("Codex capacity before claim records clean noop exit", async () => {
     process.env.ROUTINES_CLAUDE_BIN = stub(
       join(home, "capacity-harness"),
