@@ -139,6 +139,14 @@ describe("classifyHarnessOutage", () => {
     expect(classifyHarnessOutage(result("TypeError: undefined is not a function"))).toBeNull();
     expect(classifyHarnessOutage(result(""))).toBeNull();
   });
+
+  test("ignores capacity text inside Situation JSON quotes (false-positive loop)", () => {
+    // Agents dump `situations list` into logs; that embeds the capacity phrase
+    // without being a real harness failure.
+    const quoted =
+      '{"slug":"harness-outage-claude","summary":"The claude harness is out of service (capacity); evidence: \\"ERROR: Selected model is at capacity. Please try a different model.\\". Filed by routinesd harness-outage; Tom paged via Telegram."}';
+    expect(classifyHarnessOutage(result(quoted))).toBeNull();
+  });
 });
 
 describe("parseResetHint", () => {

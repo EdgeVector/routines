@@ -117,12 +117,30 @@ function readTail(path: string): string {
 
 function matchLine(text: string, patterns: RegExp[]): string | null {
   if (!text) return null;
-  for (const line of text.split(/\r?\n/)) {
+  // Prefer lines that look like real provider errors, not JSON / prose quoting
+  // a prior Situation summary (common false positive: agents dump
+  // `situations list` output that embeds "Selected model is at capacity").
+  const lines = text.split(/\r?\n/);
+  const scored: { line: string; score: number }[] = [];
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line) continue;
     for (const re of patterns) {
-      if (re.test(line)) return line.trim().slice(0, 300);
+      if (!re.test(line)) continue;
+      let score = 1;
+      if (/^ERROR:/i.test(line)) score += 5;
+      if (/\b(ERROR|error)\b/.test(line) && line.length < 240) score += 2;
+      // Demote Situation / JSON / card-body echoes.
+      if (/"summary"\s*:/.test(line) || /"preflight_message"\s*:/.test(line)) score -= 10;
+      if (/harness-outage-|Filed by routinesd|Tom paged via Telegram/i.test(line)) score -= 10;
+      if (line.startsWith("{") || line.startsWith('"')) score -= 3;
+      if (score > 0) scored.push({ line: line.slice(0, 300), score });
+      break;
     }
   }
-  return null;
+  if (scored.length === 0) return null;
+  scored.sort((a, b) => b.score - a.score);
+  return scored[0]!.score >= 3 ? scored[0]!.line : null;
 }
 
 /** Parse provider reset hints like "try again at Jul 22nd, 2026 10:00 PM". */
