@@ -34,7 +34,7 @@ import type { RoutineEntry } from "./registry.ts";
 import { buildRoutineAttributionEnv, resolveDispatchPrompt } from "./prompt.ts";
 import { runsDir } from "./paths.ts";
 import { writeHeartbeat, type HeartbeatOutcome } from "./heartbeat.ts";
-import { parseOutcome, type RunOutcome } from "./outcome.ts";
+import { filterBenignHarnessNoise, parseOutcome, type RunOutcome } from "./outcome.ts";
 import { patchState } from "./state.ts";
 import { envFromProjectConfig, loadProjectConfig, resolveRoutineCwd } from "./project-config.ts";
 import { discoveredRoutineSocketEnv } from "./socket-env.ts";
@@ -358,7 +358,8 @@ function runOnce(
       const rawExitCode = timedOut ? 124 : code;
       // Classify work quality from harness output (ok | noop | error | unknown).
       // Combined streams: agents often print the final heartbeat on either side.
-      const outcome = parseOutcome(entry.id, `${stdout}\n${stderr}`, {
+      const filteredStderr = filterBenignHarnessNoise(stderr);
+      const outcome = parseOutcome(entry.id, `${stdout}\n${filteredStderr}`, {
         exitCode: rawExitCode,
         timedOut,
       });
@@ -404,7 +405,7 @@ function runOnce(
             outcomeDetail: result.outcome.detail,
             outcomeSource: result.outcome.source,
             stdoutTail: tail(stdout, 2000),
-            stderrTail: tail(stderr, 2000),
+            stderrTail: tail(filteredStderr, 2000),
             heartbeat: result.heartbeat,
             primaryHarness: routeMeta?.primaryHarness ?? entry.harness,
             primaryModel: routeMeta?.primaryModel ?? entry.model,

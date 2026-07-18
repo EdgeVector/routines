@@ -46,6 +46,10 @@ export interface OutcomeStats {
 
 const DETAIL_MAX = 240;
 
+const BENIGN_HARNESS_NOISE_LINES: RegExp[] = [
+  /^\s*ERROR\s+codex_models_manager::manager:\s+failed to renew cache TTL:\s+missing field supports_reasoning_summaries\b.*$/i,
+];
+
 /** Names agents historically put in heartbeats that map to a registry id. */
 const ALIAS_TO_CANONICAL: Record<string, string> = {
   "last-stack-fkanban-pickup": "last-stack-kanban-pickup",
@@ -103,6 +107,14 @@ function asKind(raw: string): OutcomeKind | null {
   const k = raw.toLowerCase();
   if (k === "ok" || k === "noop" || k === "error") return k;
   return null;
+}
+
+export function filterBenignHarnessNoise(text: string): string {
+  if (!text) return text;
+  return text
+    .split(/\r?\n/)
+    .filter((line) => !BENIGN_HARNESS_NOISE_LINES.some((re) => re.test(line)))
+    .join("\n");
 }
 
 /**
@@ -228,6 +240,7 @@ export function parseOutcome(
     incomplete?: boolean;
   } = {},
 ): RunOutcome {
+  text = filterBenignHarnessNoise(text);
   const candidates: Candidate[] = [];
   const startedAtMs = heartbeatTsMs(opts.startedAt ?? null);
   // Highest-confidence, unscoped-by-name signals: only trust these from the
