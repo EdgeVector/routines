@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -144,6 +144,34 @@ test("live lock still reports running when the latest run has not completed", ()
 
   const row = collectStatus(new Date("2026-07-16T16:00:00Z")).rows.find((r) => r.id === "live");
   expect(row?.running).toBe(true);
+});
+
+test("status self-heals stale running meta whose harness pid is dead", () => {
+  writeRoutine("orphan");
+  const runDir = join(home, "runs", "orphan", "2026-07-18T07-41-09-652Z");
+  mkdirSync(runDir, { recursive: true });
+  writeFileSync(
+    join(runDir, "meta.json"),
+    JSON.stringify(
+      {
+        id: "orphan",
+        status: "running",
+        harnessPid: 999_999_999,
+        startedAt: "2026-07-18T07:41:09.652Z",
+        exitCode: null,
+        finishedAt: null,
+      },
+      null,
+      2,
+    ),
+  );
+
+  const row = collectStatus(new Date("2026-07-18T07:50:00Z")).rows.find((r) => r.id === "orphan");
+  const meta = JSON.parse(readFileSync(join(runDir, "meta.json"), "utf8"));
+
+  expect(row?.running).toBe(false);
+  expect(meta.status).toBe("orphaned");
+  expect(meta.finishedAt).toBe("2026-07-18T07:50:00.000Z");
 });
 
 test("status reports the effective fallback route, not just the configured primary", () => {

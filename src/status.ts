@@ -7,7 +7,7 @@
 // computation the daemon's dispatch loop uses (rrule nextAfter, the Situation
 // fence, the per-routine single-flight lock, on-disk run state).
 
-import { isLocked, readLockPid } from "./daemon.ts";
+import { isLocked, readLockPid, reconcileOrphanedRuns } from "./daemon.ts";
 import { compareGrouped, groupForId } from "./groups.ts";
 import { effectiveRoute } from "./harness-outage.ts";
 import { aggregateOutcomes, type OutcomeKind } from "./outcome.ts";
@@ -105,8 +105,9 @@ export interface StatusSnapshot {
   errors: string[];
 }
 
-/** Compute the current status of every registered routine. Read-only. */
+/** Compute the current status of every registered routine. */
 export function collectStatus(now: Date = new Date()): StatusSnapshot {
+  reconcileOrphanedRuns(now);
   const { entries, errors } = loadAll();
   const check = loadActiveSituations();
   const rows: StatusRow[] = entries.map((e) => {
