@@ -233,15 +233,16 @@ function tryDispatch(entry: RoutineEntry, occ: Date, deps: DispatchDeps): void {
   // will skip the dead primary and use the chain.
   const fence = fenceFor(entry.id, situations);
   if (fence.fenced) {
+    const sitSlug = fence.situationSlug ?? "unknown";
     const canFallback =
-      /^harness-outage-/.test(fence.situationSlug) && hasHealthyFallback(entry);
+      /^harness-outage-/.test(sitSlug) && hasHealthyFallback(entry);
     if (!canFallback) {
-      patchState(entry.id, { lastFire: occ.toISOString(), lastSkip: `fence:${fence.situationSlug}` });
+      patchState(entry.id, { lastFire: occ.toISOString(), lastSkip: `fence:${sitSlug}` });
       log({
         ts: now.toISOString(),
         kind: "skip-fence",
         id: entry.id,
-        detail: `Situation ${fence.situationSlug} scope_routines=${fence.pattern}`,
+        detail: `Situation ${sitSlug} scope_routines=${fence.pattern ?? ""}`,
       });
       return;
     }
@@ -249,7 +250,7 @@ function tryDispatch(entry: RoutineEntry, occ: Date, deps: DispatchDeps): void {
       ts: now.toISOString(),
       kind: "dispatch",
       id: entry.id,
-      detail: `fence ${fence.situationSlug} bypassed via fallback chain`,
+      detail: `fence ${sitSlug} bypassed via fallback chain`,
     });
   }
 
