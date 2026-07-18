@@ -6,11 +6,15 @@
 // board noise. When a run dies because the HARNESS itself is out of service
 // (usage limit / quota / capacity / auth), we instead:
 //   1. Classify the run needs-human (triage-result.json → dashboard chip)
-//   2. Upsert an active Situation fencing every routine on that harness, so
-//      the scheduler stops spawning agents into a dead harness
+//   2. Upsert an active Situation for that harness (and optionally fence
+//      routines only when no healthy fallback remains — see fenceRoutines)
 //   3. Page Tom on Telegram via the remote agent (`ra notify --priority high`)
 // and file NO kanban card and dispatch NO triage agent (it would run on the
 // same dead harness).
+//
+// Same-day follow-up: same-run fallback chain (primary → Claude Sonnet → Grok)
+// keeps work moving while the primary is out; outage state records expiresAt so
+// later fires skip the dead primary until the TTL/reset hint lapses.
 //
 // The Situation carries expires_at (parsed from the provider's "try again at
 // …" hint when possible, else a short TTL): when it lapses the fleet resumes,
@@ -49,6 +53,13 @@ export interface HarnessOutageOptions {
   /** Fallback Situation TTL when no reset time is parseable. Default 6h. */
   defaultTtlMs?: number;
   quiet?: boolean;
+  /**
+   * When true (default), Situation.scope_routines lists every registry routine
+   * on this harness so the scheduler fences them. Set false when a same-run
+   * fallback chain still has healthy agents — we still page + record outage
+   * state, but routines must keep firing via the fallback path.
+   */
+  fenceRoutines?: boolean;
 }
 
 const STATE_DIR_NAME = "harness-outage";
@@ -58,12 +69,14 @@ const DEFAULT_TTL_MS = 6 * 60 * 60 * 1000;
 /** How much log tail to scan for outage signatures. */
 const TAIL_BYTES = 16 * 1024;
 
-interface OutageState {
+export interface OutageState {
   kind: HarnessOutageKind;
   lastSeenAt: string;
   lastSituationAt?: string;
   lastNotifiedAt?: string;
   situationSlug: string;
+  /** When the outage is considered cleared (ISO). */
+  expiresAt?: string;
 }
 
 // Unambiguous provider phrases only — these are matched against harness
@@ -170,7 +183,7 @@ function outageStatePath(harness: string): string {
   return join(outageStateDir(), `${harness.replace(/[^a-zA-Z0-9._-]+/g, "-")}.json`);
 }
 
-function readOutageState(harness: string): OutageState | null {
+export function readOutageState(harness: string): OutageState | null {
   const p = outageStatePath(harness);
   if (!existsSync(p)) return null;
   try {
@@ -183,6 +196,26 @@ function readOutageState(harness: string): OutageState | null {
 function writeOutageState(harness: string, st: OutageState): void {
   mkdirSync(outageStateDir(), { recursive: true });
   writeFileSync(outageStatePath(harness), JSON.stringify(st, null, 2) + "\n");
+}
+
+/**
+ * True when this harness was recently recorded as out of service and the
+ * expiry has not lapsed. Used by the fallback chain to skip a dead primary
+ * on the next fire without rewriting registry TOML.
+ */
+export function isHarnessOutaged(harness: string, nowMs: number = Date.now()): boolean {
+  const st = readOutageState(harness);
+  if (!st) return false;
+  if (st.expiresAt) {
+    const exp = Date.parse(st.expiresAt);
+    if (!Number.isNaN(exp) && nowMs >= exp) return false;
+  } else {
+    // Legacy state without expiresAt: treat as outaged for the default TTL
+    // from lastSeenAt so we do not stick forever.
+    const seen = Date.parse(st.lastSeenAt);
+    if (!Number.isNaN(seen) && nowMs - seen >= DEFAULT_TTL_MS) return false;
+  }
+  return true;
 }
 
 function logLine(quiet: boolean | undefined, msg: string): void {
@@ -220,13 +253,16 @@ function upsertSituation(
     "situations";
   const slug = outageSituationSlug(entry.harness);
   const reset = outage.resetAt ?? outage.resetHint;
+  const fenced = scopeRoutines.length > 0;
   const record = {
     slug,
     title: `Harness outage: ${entry.harness} ${outage.kind}`,
     summary:
       `The ${entry.harness} harness is out of service (${outage.kind}); ` +
       `evidence from routine ${entry.id}: "${outage.evidence}". ` +
-      `${scopeRoutines.length} routine(s) fenced until this clears` +
+      (fenced
+        ? `${scopeRoutines.length} routine(s) fenced until this clears`
+        : "fallback chain active — routines keep firing on alternate harnesses") +
       (reset ? ` (provider reset hint: ${reset})` : "") +
       `. Filed by routinesd harness-outage; Tom paged via Telegram.`,
     status: "active",
@@ -237,8 +273,9 @@ function upsertSituation(
     requires_human_clearance: false,
     preflight_message:
       `The ${entry.harness} harness is out of service (${outage.kind}). ` +
-      `Do not spawn ${entry.harness} agents or retry-loop; wait for the reset ` +
-      `or a human to restore credits/auth.`,
+      (fenced
+        ? `Do not spawn ${entry.harness} agents or retry-loop; wait for the reset or a human to restore credits/auth.`
+        : `Skip ${entry.harness}; routinesd will use the configured fallback chain until this expires.`),
     owner: "routinesd",
     expires_at: expiresAt,
   };
@@ -306,10 +343,21 @@ export function handleHarnessOutage(
     const slug = outageSituationSlug(entry.harness);
     const prev = readOutageState(entry.harness);
 
-    const scopeRoutines = routineIdsForHarness(entry.harness, entry.id);
-    const detailParts: string[] = [`harness-outage:${outage.kind}`];
+    const fenceRoutines = opts.fenceRoutines !== false;
+    const scopeRoutines = fenceRoutines
+      ? routineIdsForHarness(entry.harness, entry.id)
+      : [];
+    const detailParts: string[] = [
+      `harness-outage:${outage.kind}`,
+      fenceRoutines ? "fence:routines" : "fence:none-fallback-active",
+    ];
+
+    const ttlMs = opts.defaultTtlMs ?? DEFAULT_TTL_MS;
+    const expiresAt = outage.resetAt ?? new Date(nowMs + ttlMs).toISOString();
 
     // 1. needs-human verdict for the dashboard (escalate-status reads this).
+    //    When fallbacks remain, still mark this attempt so the failed primary
+    //    run is visible — the successful fallback run has its own run dir.
     try {
       writeFileSync(
         join(result.runDir, "triage-result.json"),
@@ -320,6 +368,7 @@ export function handleHarnessOutage(
             needsHuman: true,
             detail: `${entry.harness} harness ${outage.kind}: ${outage.evidence}`,
             rootCause: `harness-outage:${outage.kind}`,
+            fallbackActive: !fenceRoutines,
           },
           null,
           2,
@@ -329,13 +378,11 @@ export function handleHarnessOutage(
       /* ignore */
     }
 
-    // 2. Situation fence (rate-limited refresh; upsert is idempotent by slug).
+    // 2. Situation (rate-limited refresh; upsert is idempotent by slug).
     const refreshMs = opts.situationRefreshMs ?? DEFAULT_SITUATION_REFRESH_MS;
     const lastSit = prev?.lastSituationAt ? Date.parse(prev.lastSituationAt) : 0;
     let situationAt = prev?.lastSituationAt;
     if (Number.isNaN(lastSit) || nowMs - lastSit >= refreshMs) {
-      const ttlMs = opts.defaultTtlMs ?? DEFAULT_TTL_MS;
-      const expiresAt = outage.resetAt ?? new Date(nowMs + ttlMs).toISOString();
       const sit = upsertSituation(entry, outage, scopeRoutines, expiresAt, opts);
       detailParts.push(sit.ok ? sit.detail : `situation FAILED: ${sit.detail}`);
       if (sit.ok) situationAt = now;
@@ -349,7 +396,12 @@ export function handleHarnessOutage(
     const lastNotify = prev?.lastNotifiedAt ? Date.parse(prev.lastNotifiedAt) : 0;
     let notifiedAt = prev?.lastNotifiedAt;
     if (Number.isNaN(lastNotify) || nowMs - lastNotify >= notifyCooldown) {
-      const page = notifyTelegram(entry, outage, scopeRoutines.length, opts);
+      const page = notifyTelegram(
+        entry,
+        outage,
+        fenceRoutines ? scopeRoutines.length : 0,
+        opts,
+      );
       detailParts.push(page.ok ? page.detail : `telegram FAILED: ${page.detail}`);
       if (page.ok) notifiedAt = now;
       logLine(opts.quiet, page.detail);
@@ -361,6 +413,7 @@ export function handleHarnessOutage(
       kind: outage.kind,
       lastSeenAt: now,
       situationSlug: slug,
+      expiresAt,
     };
     if (situationAt) st.lastSituationAt = situationAt;
     if (notifiedAt) st.lastNotifiedAt = notifiedAt;

@@ -2,6 +2,10 @@
 // to a per-run log directory, enforce a timeout, and record the outcome +
 // heartbeat.
 //
+// On harness-outage failures (credits / quota / capacity / auth), walks the
+// fallback chain (primary → Claude Sonnet → Grok by default) in the same fire
+// so work continues without fencing the fleet idle. See `fallback.ts`.
+//
 // Per-run logs land at $ROUTINES_HOME/runs/<id>/<ts>/ containing:
 //   meta.json  — prompt-elided invocation, harness/model, exit code, timing
 //   prompt.txt — the exact prompt dispatched
@@ -9,11 +13,23 @@
 // This is the durable evidence the card's VERIFY asks for.
 
 import { spawn } from "node:child_process";
-import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { buildInvocation, type HarnessInvocation } from "./adapters.ts";
 import { setLockOwnerPid } from "./daemon.ts";
+import {
+  buildRouteChain,
+  entryForRoute,
+  fallbackEnabled,
+  formatRoute,
+  type RouteStep,
+} from "./fallback.ts";
+import {
+  classifyHarnessOutage,
+  handleHarnessOutage,
+  isHarnessOutaged,
+} from "./harness-outage.ts";
 import type { RoutineEntry } from "./registry.ts";
 import { buildRoutineAttributionEnv, resolveDispatchPrompt } from "./prompt.ts";
 import { runsDir } from "./paths.ts";
@@ -22,7 +38,7 @@ import { parseOutcome, type RunOutcome } from "./outcome.ts";
 import { patchState } from "./state.ts";
 import { envFromProjectConfig, loadProjectConfig, resolveRoutineCwd } from "./project-config.ts";
 import { discoveredRoutineSocketEnv } from "./socket-env.ts";
-import { escalateRoutineError, shouldAutoEscalateScheduledRun } from "./error-escalate.ts";
+import { escalateRoutineError, shouldAutoEscalateScheduledRun, shouldEscalate } from "./error-escalate.ts";
 
 export interface RunResult {
   id: string;
@@ -55,6 +71,17 @@ export interface RunOptions {
    * harness environment is the only thing broken.
    */
   trigger?: "scheduled" | "manual";
+  /** Skip same-run fallback chain (tests / explicit single-route). */
+  noFallback?: boolean;
+}
+
+export interface FallbackAttempt {
+  harness: string;
+  model: string;
+  runDir: string;
+  exitCode: number | null;
+  outcome: string;
+  outage: boolean;
 }
 
 /** Write early meta.json so operators can inspect a live run before exit. */
@@ -100,7 +127,113 @@ export function appendRunLog(runDir: string, name: "stdout.log" | "stderr.log", 
   appendFileSync(join(runDir, name), chunk);
 }
 
-export function runRoutine(entry: RoutineEntry, opts: RunOptions = {}): Promise<RunResult> {
+/**
+ * Select routes for this fire: skip harnesses already known-outaged when a
+ * healthy alternate remains. If every step is outaged, try the full chain so
+ * a recovered provider can clear itself on the next real success/failure.
+ */
+export function routesForFire(entry: RoutineEntry, nowMs: number = Date.now()): RouteStep[] {
+  const chain = buildRouteChain(entry);
+  if (!fallbackEnabled()) return chain.slice(0, 1);
+  const healthy = chain.filter((s) => !isHarnessOutaged(s.harness, nowMs));
+  return healthy.length > 0 ? healthy : chain;
+}
+
+/**
+ * Run a routine, walking the fallback chain on harness-outage failures only.
+ * Registry TOML is never rewritten — route changes are ephemeral per fire.
+ */
+export async function runRoutine(entry: RoutineEntry, opts: RunOptions = {}): Promise<RunResult> {
+  const trigger = opts.trigger ?? "scheduled";
+  const useFallback = fallbackEnabled() && !opts.noFallback;
+  const routes = useFallback ? routesForFire(entry) : [buildRouteChain(entry)[0]!];
+  const attempts: FallbackAttempt[] = [];
+  let last: RunResult | null = null;
+
+  for (let i = 0; i < routes.length; i++) {
+    const step = routes[i]!;
+    const runEntry = entryForRoute(entry, step);
+    last = await runOnce(runEntry, opts, {
+      primaryHarness: entry.harness,
+      primaryModel: entry.model,
+      routeIndex: i,
+      routeCount: routes.length,
+    });
+
+    // Classify outage even when outcome was remapped to clean noop/safe_skip
+    // (capacity / usage-limit transcripts). Those must still walk the chain.
+    const outage = classifyHarnessOutage(last);
+    attempts.push({
+      harness: step.harness,
+      model: step.model,
+      runDir: last.runDir,
+      exitCode: last.exitCode,
+      outcome: last.outcome.kind,
+      outage: Boolean(outage),
+    });
+    annotateFallbackMeta(last, entry, attempts, step);
+
+    if (outage) {
+      const hasMore = i < routes.length - 1;
+      try {
+        handleHarnessOutage(runEntry, last, outage, {
+          quiet: opts.quiet,
+          // Fence all routines on this harness only when the chain is exhausted.
+          fenceRoutines: !hasMore,
+        });
+      } catch {
+        /* never break caller */
+      }
+
+      if (!hasMore) {
+        // Outage path already suppressed P0 cards; skip escalateRoutineError.
+        return last;
+      }
+
+      if (!opts.quiet) {
+        try {
+          process.stderr.write(
+            `[routines fallback] ${entry.id}: ${formatRoute(step)} outage → trying ${formatRoute(routes[i + 1]!)}\n`,
+          );
+        } catch {
+          /* ignore */
+        }
+      }
+      continue;
+    }
+
+    if (!shouldEscalate(last)) {
+      // True success (or non-escalating non-outage outcome).
+      return last;
+    }
+
+    // Real routine failure — do not hop agents; escalate as before.
+    if (trigger === "scheduled" && shouldAutoEscalateScheduledRun(last)) {
+      try {
+        escalateRoutineError(entry, last, { quiet: opts.quiet });
+      } catch {
+        /* never break caller */
+      }
+    }
+    return last;
+  }
+
+  return last!;
+}
+
+interface RunOnceMeta {
+  primaryHarness: string;
+  primaryModel: string;
+  routeIndex: number;
+  routeCount: number;
+}
+
+/** Single harness spawn (no fallback). */
+function runOnce(
+  entry: RoutineEntry,
+  opts: RunOptions,
+  routeMeta?: RunOnceMeta,
+): Promise<RunResult> {
   const trigger = opts.trigger ?? "scheduled";
   const startedAt = new Date();
   const runDir = join(runsDir(), entry.id, runStamp(startedAt));
@@ -269,6 +402,10 @@ export function runRoutine(entry: RoutineEntry, opts: RunOptions = {}): Promise<
             stdoutTail: tail(stdout, 2000),
             stderrTail: tail(stderr, 2000),
             heartbeat: result.heartbeat,
+            primaryHarness: routeMeta?.primaryHarness ?? entry.harness,
+            primaryModel: routeMeta?.primaryModel ?? entry.model,
+            routeIndex: routeMeta?.routeIndex ?? 0,
+            routeCount: routeMeta?.routeCount ?? 1,
           },
           null,
           2,
@@ -285,19 +422,28 @@ export function runRoutine(entry: RoutineEntry, opts: RunOptions = {}): Promise<
         });
       }
 
-      // P0 fleet rule: every error run gets a board card + (rate-limited) triage
-      // agent. Never await — must not stall the scheduler or re-throw.
-      if (trigger === "scheduled" && shouldAutoEscalateScheduledRun(result)) {
-        try {
-          escalateRoutineError(entry, result, { quiet: opts.quiet });
-        } catch {
-          /* never break finalize */
-        }
-      }
-
       resolve(result);
     }
   });
+}
+
+function annotateFallbackMeta(
+  result: RunResult,
+  primary: RoutineEntry,
+  attempts: FallbackAttempt[],
+  step: RouteStep,
+): void {
+  try {
+    const metaPath = join(result.runDir, "meta.json");
+    const meta = JSON.parse(readFileSync(metaPath, "utf8")) as Record<string, unknown>;
+    meta.fallbackAttempts = attempts;
+    meta.usedFallback = step.harness !== primary.harness || step.model !== primary.model;
+    meta.primaryHarness = primary.harness;
+    meta.primaryModel = primary.model;
+    writeFileSync(metaPath, JSON.stringify(meta, null, 2) + "\n");
+  } catch {
+    /* ignore */
+  }
 }
 
 /**
