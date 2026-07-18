@@ -9,6 +9,7 @@
 
 import { isLocked, readLockPid } from "./daemon.ts";
 import { compareGrouped, groupForId } from "./groups.ts";
+import { effectiveRoute } from "./harness-outage.ts";
 import { aggregateOutcomes, type OutcomeKind } from "./outcome.ts";
 import { fenceFor, loadActiveSituations } from "./situations.ts";
 import { loadAll, type Harness, type Status } from "./registry.ts";
@@ -52,6 +53,15 @@ export interface StatusRow {
   status: Status;
   harness: Harness;
   model: string;
+  /**
+   * The harness/model actually dispatched right now, honoring the same-run
+   * fallback chain (buildRouteChain in fallback.ts). Differs from `harness`/
+   * `model` exactly when the configured primary is presently outaged and a
+   * fallback step is substituted — this is the field to trust; `harness`/
+   * `model` are what the registry TOML declares, not what will run next.
+   */
+  effectiveHarness: Harness;
+  effectiveModel: string;
   effort: string | null;
   rrule: string;
   cwd: string;
@@ -115,6 +125,7 @@ export function collectStatus(now: Date = new Date()): StatusSnapshot {
     const latest = recent[0];
     const running = isCurrentlyRunning(e.id, latest);
     const harnessPid = running ? resolveHarnessPid(e.id, latest) : null;
+    const route = effectiveRoute(e, now.getTime());
     const stateOutcome: OutcomeKind | null =
       st.lastOutcome === "ok" ||
       st.lastOutcome === "noop" ||
@@ -139,6 +150,8 @@ export function collectStatus(now: Date = new Date()): StatusSnapshot {
       status: e.status,
       harness: e.harness,
       model: e.model,
+      effectiveHarness: route.harness,
+      effectiveModel: route.model,
       effort: e.effort ?? null,
       rrule: e.rrule,
       cwd: e.cwd,

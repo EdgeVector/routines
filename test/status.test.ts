@@ -145,3 +145,38 @@ test("live lock still reports running when the latest run has not completed", ()
   const row = collectStatus(new Date("2026-07-16T16:00:00Z")).rows.find((r) => r.id === "live");
   expect(row?.running).toBe(true);
 });
+
+test("status reports the effective fallback route, not just the configured primary", () => {
+  // Reproduces the live confusion behind fkanban-pickup-harness-config-not-honored:
+  // registry declares harness=codex, codex is outaged, so dispatch silently
+  // substitutes claude. `routines status` must surface that substitution
+  // instead of echoing the stale configured harness/model as if it were live.
+  writeRoutine("codex-primary");
+
+  mkdirSync(join(home, "harness-outage"), { recursive: true });
+  writeFileSync(
+    join(home, "harness-outage", "codex.json"),
+    JSON.stringify({
+      kind: "capacity",
+      lastSeenAt: "2026-07-18T00:48:41.017Z",
+      situationSlug: "harness-outage-codex",
+      expiresAt: "2026-07-18T06:48:41.017Z",
+    }),
+  );
+
+  const row = collectStatus(new Date("2026-07-18T02:00:00Z")).rows.find((r) => r.id === "codex-primary");
+  expect(row?.harness).toBe("codex");
+  expect(row?.model).toBe("gpt-5");
+  expect(row?.effectiveHarness).toBe("claude");
+  expect(row?.effectiveModel).toBe("sonnet");
+});
+
+test("status effective route matches configured route when no outage is active", () => {
+  writeRoutine("codex-healthy");
+
+  const row = collectStatus(new Date("2026-07-18T02:00:00Z")).rows.find((r) => r.id === "codex-healthy");
+  expect(row?.harness).toBe("codex");
+  expect(row?.effectiveHarness).toBe("codex");
+  expect(row?.model).toBe("gpt-5");
+  expect(row?.effectiveModel).toBe("gpt-5");
+});

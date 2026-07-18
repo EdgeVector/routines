@@ -331,4 +331,59 @@ describe("handleHarnessOutage via escalateRoutineError", () => {
     expect(out.detail).toContain("situation FAILED");
     expect(out.detail).toContain("telegram FAILED");
   });
+
+  test("claude outage while codex primaries are on fallback fences the whole substituted fleet", () => {
+    // Reproduces the live fkanban-pickup incident: every worker's registry
+    // declares harness=codex, codex is already outaged, so all of them are
+    // silently running on the claude fallback. When claude *also* fails, the
+    // Situation must fence every routine currently substituted onto claude —
+    // not just the one whose run happened to trip the detector.
+    const situations = stubBin("situations-stub");
+    const ra = stubBin("ra-stub");
+    for (const id of [
+      "last-stack-fkanban-pickup-w2",
+      "last-stack-fkanban-pickup-w3",
+      "last-stack-fkanban-pickup-w4",
+      "last-stack-fkanban-pickup-w5",
+      "last-stack-fkanban-pickup-w6",
+    ]) {
+      writeRegistryEntry(id, "codex");
+    }
+
+    const nowMs = Date.parse("2026-07-18T02:57:00Z");
+    // Codex was already recorded outaged (real capacity incident) with a
+    // not-yet-lapsed expiry, so every codex-primary routine's effective route
+    // is currently claude.
+    mkdirSync(join(home, "harness-outage"), { recursive: true });
+    writeFileSync(
+      join(home, "harness-outage", "codex.json"),
+      JSON.stringify({
+        kind: "capacity",
+        lastSeenAt: "2026-07-18T00:48:41.017Z",
+        situationSlug: outageSituationSlug("codex"),
+        expiresAt: "2026-07-18T06:48:41.017Z",
+      }),
+    );
+
+    // w3's fallback run (harness now "claude" per entryForRoute) also hits
+    // capacity — the same-run fallback chain is exhausted.
+    const w3ClaudeEntry = entry("last-stack-fkanban-pickup-w3", "claude");
+    const out = handleHarnessOutage(
+      w3ClaudeEntry,
+      result(CODEX_CAPACITY_LINE, "last-stack-fkanban-pickup-w3"),
+      classifyHarnessOutage(result(CODEX_CAPACITY_LINE), { nowMs })!,
+      { nowMs, situationsBin: situations.bin, raBin: ra.bin, quiet: true },
+    );
+    expect(out.escalated).toBe(true);
+
+    const sit = JSON.parse(readFileSync(situations.stdinFile, "utf8"));
+    expect(sit.slug).toBe(outageSituationSlug("claude"));
+    expect(sit.scope_routines).toEqual([
+      "last-stack-fkanban-pickup-w2",
+      "last-stack-fkanban-pickup-w3",
+      "last-stack-fkanban-pickup-w4",
+      "last-stack-fkanban-pickup-w5",
+      "last-stack-fkanban-pickup-w6",
+    ]);
+  });
 });
