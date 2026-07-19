@@ -36,10 +36,19 @@ import { routesForFire, runRoutine, type RunResult } from "./runner.ts";
 import { loadProjectConfig } from "./project-config.ts";
 import { captureRoutineRunFailure, captureRoutinesException } from "./observability.ts";
 
-/** True when at least one route in the chain is not currently outaged. */
-function hasHealthyFallback(entry: RoutineEntry): boolean {
+function harnessFromOutageSituation(slug: string): string | null {
+  const m = slug.match(/^harness-outage-(.+)$/);
+  return m?.[1] ?? null;
+}
+
+/** True when the route the runner would select avoids the fenced harness. */
+function canBypassHarnessOutageFence(entry: RoutineEntry, situationSlug: string): boolean {
+  const fencedHarness = harnessFromOutageSituation(situationSlug);
+  if (!fencedHarness) return false;
   try {
-    return routesForFire(entry).some((r) => !isHarnessOutaged(r.harness));
+    const route = routesForFire(entry)[0];
+    if (!route || route.harness === fencedHarness) return false;
+    return !isHarnessOutaged(route.harness);
   } catch {
     return false;
   }
@@ -301,13 +310,13 @@ function tryDispatch(entry: RoutineEntry, occ: Date, deps: DispatchDeps): void {
   // Situation fence — check first so a fenced routine is never dispatched, and
   // advance its last-fire so we don't re-evaluate the same instant every tick.
   // Exception: harness-outage-* situations that left scope_routines empty (or
-  // a stale fence on a harness that still has a healthy fallback) — runRoutine
-  // will skip the dead primary and use the chain.
+  // a stale fence on a harness whose selected route has moved to an alternate)
+  // — runRoutine will avoid the fenced harness and use the chain.
   const fence = fenceFor(entry.id, situations);
   if (fence.fenced) {
     const sitSlug = fence.situationSlug ?? "unknown";
     const canFallback =
-      /^harness-outage-/.test(sitSlug) && hasHealthyFallback(entry);
+      /^harness-outage-/.test(sitSlug) && canBypassHarnessOutageFence(entry, sitSlug);
     if (!canFallback) {
       patchState(entry.id, { lastFire: occ.toISOString(), lastSkip: `fence:${sitSlug}` });
       log({

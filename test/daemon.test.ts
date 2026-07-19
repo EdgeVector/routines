@@ -159,6 +159,62 @@ describe("daemon evaluateOnce", () => {
     expect(existsSync(join(home, "runs", "paused-one"))).toBe(false);
   });
 
+  test("stale harness-outage Situation does not dispatch onto the fenced harness", async () => {
+    const sit = stub(
+      join(home, "stub-fsituations"),
+      '#!/bin/sh\ncat <<\'JSON\'\n[{"slug":"harness-outage-claude","status":"active","scope_routines":["claude-primary"]}]\nJSON\n',
+    );
+    process.env.ROUTINES_FSITUATIONS_BIN = sit;
+    writeRoutine("claude-primary", "claude");
+
+    const events: string[] = [];
+    const results = await evaluateOnce({
+      once: true,
+      catchupMs: 60_000,
+      log: (e) => events.push(`${e.kind}:${e.id ?? ""}:${e.detail ?? ""}`),
+    });
+
+    expect(results.length).toBe(0);
+    expect(events.some((e) => e.startsWith("skip-fence:claude-primary:"))).toBe(true);
+    expect(existsSync(join(home, "runs", "claude-primary"))).toBe(false);
+  });
+
+  test("harness-outage fence bypasses only when local state selects an alternate route", async () => {
+    const sit = stub(
+      join(home, "stub-fsituations"),
+      '#!/bin/sh\ncat <<\'JSON\'\n[{"slug":"harness-outage-claude","status":"active","scope_routines":["claude-primary"]}]\nJSON\n',
+    );
+    process.env.ROUTINES_FSITUATIONS_BIN = sit;
+    writeRoutine("claude-primary", "claude");
+    mkdirSync(join(home, "harness-outage"), { recursive: true });
+    writeFileSync(
+      join(home, "harness-outage", "claude.json"),
+      JSON.stringify(
+        {
+          kind: "capacity",
+          lastSeenAt: "2026-07-18T00:48:41.017Z",
+          situationSlug: "harness-outage-claude",
+          expiresAt: "2999-01-01T00:00:00.000Z",
+        },
+        null,
+        2,
+      ),
+    );
+
+    const events: string[] = [];
+    const results = await evaluateOnce({
+      once: true,
+      catchupMs: 60_000,
+      log: (e) => events.push(`${e.kind}:${e.id ?? ""}:${e.detail ?? ""}`),
+    });
+
+    expect(results.map((r) => r.id)).toEqual(["claude-primary"]);
+    const meta = JSON.parse(readFileSync(join(results[0]!.runDir, "meta.json"), "utf8"));
+    expect(meta.harness).toBe("grok");
+    expect(meta.usedFallback).toBe(true);
+    expect(events.some((e) => e.includes("bypassed via fallback chain"))).toBe(true);
+  });
+
   test("dispatch envelope uses registry id for automation memory, not prompt frontmatter name", async () => {
     const prompt = [
       "---",
