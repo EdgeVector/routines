@@ -175,6 +175,17 @@ export function releaseLock(id: string): void {
   }
 }
 
+export function releaseLockIfOwned(id: string, ownerPid: number): boolean {
+  if (readLockPid(id) !== ownerPid) return false;
+  const p = lockPath(id);
+  try {
+    rmSync(p, { force: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function isLocked(id: string): boolean {
   const pid = readLockPid(id);
   return pid != null && pidAlive(pid);
@@ -360,8 +371,10 @@ function tryDispatch(entry: RoutineEntry, occ: Date, deps: DispatchDeps): void {
     detail: `${entry.harness}/${entry.model}`,
   });
 
+  let finishedResult: RunResult | null = null;
   const p = runRoutine(entry, { quiet: true })
     .then((result) => {
+      finishedResult = result;
       log({
         ts: new Date().toISOString(),
         kind: "complete",
@@ -381,7 +394,7 @@ function tryDispatch(entry: RoutineEntry, occ: Date, deps: DispatchDeps): void {
     })
     .finally(() => {
       inFlight.delete(entry.id);
-      releaseLock(entry.id);
+      releaseLockIfOwned(entry.id, finishedResult?.harnessPid ?? process.pid);
       // Defer refill so we never re-enter the admit loop mid-dispatch scan.
       if (deps.onSlotFree) {
         queueMicrotask(() => deps.onSlotFree?.());

@@ -8,6 +8,7 @@ import {
   isLocked,
   readLockPid,
   releaseLock,
+  releaseLockIfOwned,
   setLockOwnerPid,
 } from "../src/daemon.ts";
 
@@ -50,5 +51,15 @@ describe("single-flight lock pid ownership", () => {
       expect(readLockPid("r2")).toBe(process.pid);
       releaseLock("r2");
     }
+  });
+
+  test("conditional release only clears the matching lock owner", () => {
+    setLockOwnerPid("owned", process.pid);
+
+    expect(releaseLockIfOwned("owned", 999_999_999)).toBe(false);
+    expect(readLockPid("owned")).toBe(process.pid);
+
+    expect(releaseLockIfOwned("owned", process.pid)).toBe(true);
+    expect(readLockPid("owned")).toBeNull();
   });
 });

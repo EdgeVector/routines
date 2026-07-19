@@ -17,7 +17,7 @@ import { appendFileSync, mkdirSync, readFileSync, statSync, writeFileSync } from
 import { join } from "node:path";
 
 import { buildInvocation, type HarnessInvocation } from "./adapters.ts";
-import { setLockOwnerPid } from "./daemon.ts";
+import { releaseLockIfOwned, setLockOwnerPid } from "./daemon.ts";
 import {
   buildRouteChain,
   entryForRoute,
@@ -464,6 +464,8 @@ function runOnce(
           lastOutcomeDetail: result.outcome.detail ?? undefined,
         });
       }
+
+      releaseLockIfOwned(entry.id, result.harnessPid ?? process.pid);
 
       resolve(result);
     }
