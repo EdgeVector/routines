@@ -238,6 +238,9 @@ function cmdStatus(rest: string[]): number {
       `${r.id}  [${r.status}] ${r.harness}/${r.model}${routeSuffix}\n` +
         `    next: ${r.nextFire ?? "-"}  last: ${r.lastRun ?? "-"} exit=${r.lastExit ?? "-"} outcome=${outcome}  ${rate} ${flags}`,
     );
+    if (r.currentRunDir) {
+      console.log(`    current: ${r.currentStartedAt ?? "-"} pid=${r.harnessPid ?? "-"} dir=${r.currentRunDir}`);
+    }
     if (r.lastOutcomeDetail) console.log(`    detail: ${r.lastOutcomeDetail}`);
   }
   for (const err of snap.errors) console.error(`ERROR ${err}`);

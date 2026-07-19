@@ -179,6 +179,54 @@ test("live lock still reports running when the latest run has not completed", ()
   expect(row?.running).toBe(true);
 });
 
+test("running status exposes current run separately from last completed run", () => {
+  writeRoutine("active-again");
+  writeLiveLock("active-again");
+  const completed = join(home, "runs", "active-again", "2026-07-16T15-00-00-000Z");
+  mkdirSync(completed, { recursive: true });
+  writeFileSync(
+    join(completed, "meta.json"),
+    JSON.stringify(
+      {
+        finishedAt: "2026-07-16T15:05:00.000Z",
+        startedAt: "2026-07-16T15:00:00.000Z",
+        exitCode: 0,
+        timedOut: false,
+        outcome: "ok",
+      },
+      null,
+      2,
+    ),
+  );
+  const current = join(home, "runs", "active-again", "2026-07-16T15-58-40-903Z");
+  mkdirSync(current, { recursive: true });
+  writeFileSync(
+    join(current, "meta.json"),
+    JSON.stringify(
+      {
+        status: "running",
+        startedAt: "2026-07-16T15:58:40.903Z",
+        harnessPid: process.pid,
+        exitCode: null,
+        finishedAt: null,
+      },
+      null,
+      2,
+    ),
+  );
+
+  const row = collectStatus(new Date("2026-07-16T16:00:00Z")).rows.find(
+    (r) => r.id === "active-again",
+  );
+
+  expect(row?.running).toBe(true);
+  expect(row?.lastRun).toBeNull();
+  expect(row?.lastOutcome).toBe("ok");
+  expect(row?.currentRun).toBe("2026-07-16T15-58-40-903Z");
+  expect(row?.currentRunDir).toBe(current);
+  expect(row?.currentStartedAt).toBe("2026-07-16T15:58:40.903Z");
+});
+
 test("status self-heals stale running meta whose harness pid is dead", () => {
   writeRoutine("orphan");
   const runDir = join(home, "runs", "orphan", "2026-07-18T07-41-09-652Z");

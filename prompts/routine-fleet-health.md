@@ -132,6 +132,13 @@ Allowed, when the evidence clearly supports it:
   fix its permissions, when heartbeats say `memory_unwritable`.
 - Remove a **stale** lock in `$ROUTINES_HOME/locks/` (no live pid behind it)
   that is blocking a routine from firing.
+  - Before deleting or reporting a stale-lock recurrence, re-read
+    `routines status --json` for that id and the newest
+    `$ROUTINES_HOME/runs/<id>/*/meta.json`. Prefer `currentRunDir` /
+    `currentStartedAt` from status when present; `lastRunDir` is the last
+    completed run and can be stale while a new scheduled fire is active.
+    If the lock disappeared during the re-check, treat it as normal runner
+    finalize cleanup, not a finding.
   - `kill -0 <pid>` returning `Operation not permitted`, `EPERM`, or another
     permission/sandbox denial is **not** dead-pid proof. Treat it as
     unknown/live and do not remove the lock. This is common for live harness
