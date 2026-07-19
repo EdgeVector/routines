@@ -97,6 +97,20 @@ describe("routine-fleet-health prompt", () => {
     expect(prompt).toContain("Do not turn a healthy");
     expect(prompt).toContain("only board/brain follow-up writes were deferred");
   });
+
+  test("treats harness-outage situations as read-only detector-owned state", () => {
+    const prompt = readFileSync(
+      new URL("../prompts/routine-fleet-health.md", import.meta.url),
+      "utf8",
+    );
+
+    expect(prompt).toContain("Harness-outage Situations are detector-owned");
+    expect(prompt).toContain("must never run `situations");
+    expect(prompt).toContain("harness-outage-*");
+    expect(prompt).toContain("must be allowed to");
+    expect(prompt).toContain("expire");
+    expect(prompt).toContain("do not refresh its `updated_at` / `expires_at`");
+  });
 });
 
 describe("routine attribution env + trailers", () => {

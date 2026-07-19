@@ -49,6 +49,14 @@ Fallback order only when no envelope path is present:
 - Before framing anything as an incident: `situations notices --since 1h` — a
   matching notice (LastDB upgrade, stack upgrade, cutover) means treat symptoms
   as expected fallout unless they outlast the notice window.
+- Harness-outage Situations are detector-owned. `routine-fleet-health` may read
+  them with `situations list --json` / `situations notices`, and may include a
+  `harness_notice` token in its heartbeat, but it must never run `situations
+  put`, `situations notice`, `situations move`, or any equivalent write/upsert
+  for a `harness-outage-*` record. A stale harness-outage record with no fresh
+  `$ROUTINES_HOME/harness-outage/<harness>.json` detection must be allowed to
+  expire; do not refresh its `updated_at` / `expires_at` while reporting fleet
+  health.
 - If `routines doctor` and `routines status --json` complete and show
   `reds=0`, but board/brain reads or writes later fail while a matching recent
   Situations notice explains LastDB/routines fallout, do **not** turn the whole
@@ -70,6 +78,8 @@ export PATH="$HOME/.local/bin:$PATH"
 ```
 
 Situations: `fsituations list --json` or the workspace fallback. Empty list = OK.
+This is a read-only probe; do not mutate active `harness-outage-*` records from
+this routine.
 Socket health: `kanban list --column todo >/dev/null`.
 
 Optional cheap prune if hygiene launchd might be missing (idempotent; skip if
