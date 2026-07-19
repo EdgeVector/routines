@@ -13,7 +13,7 @@
 // This is the durable evidence the card's VERIFY asks for.
 
 import { spawn } from "node:child_process";
-import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { buildInvocation, type HarnessInvocation } from "./adapters.ts";
@@ -84,6 +84,9 @@ export interface FallbackAttempt {
   outage: boolean;
 }
 
+const DEFAULT_RUN_LOG_MAX_BYTES = 2_000_000;
+const MIN_RUN_LOG_MAX_BYTES = 8_192;
+
 /** Write early meta.json so operators can inspect a live run before exit. */
 export function writeEarlyMeta(args: {
   runDir: string;
@@ -98,7 +101,7 @@ export function writeEarlyMeta(args: {
   harnessPid: number | null;
   status?: "running" | "spawn_failed";
 }): void {
-  writeFileSync(
+  writeRunFile(
     join(args.runDir, "meta.json"),
     JSON.stringify(
       {
@@ -122,9 +125,28 @@ export function writeEarlyMeta(args: {
   );
 }
 
-/** Append a chunk to a run-dir log file (create on first write). */
-export function appendRunLog(runDir: string, name: "stdout.log" | "stderr.log", chunk: string): void {
-  appendFileSync(join(runDir, name), chunk);
+/**
+ * Append a chunk to a run-dir log file (create on first write). Log writes are
+ * best-effort so disk-full errors do not kill the scheduler.
+ */
+export function appendRunLog(
+  runDir: string,
+  name: "stdout.log" | "stderr.log",
+  chunk: string,
+  maxBytes: number = runLogMaxBytes(),
+): boolean {
+  if (chunk.length === 0 || maxBytes <= 0) return true;
+  const path = join(runDir, name);
+  try {
+    const current = fileSize(path);
+    const remaining = maxBytes - current;
+    if (remaining <= 0) return true;
+    const buf = Buffer.from(chunk);
+    appendFileSync(path, buf.byteLength <= remaining ? chunk : buf.subarray(0, remaining));
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -245,10 +267,10 @@ function runOnce(
   // Prompt after runDir so the envelope can name Run directory / Run-Id trailers.
   const prompt = resolveDispatchPrompt(entry, { runDir });
   const invocation = buildInvocation(entry, prompt);
-  writeFileSync(join(runDir, "prompt.txt"), prompt);
+  writeRunFile(join(runDir, "prompt.txt"), prompt);
   // Empty logs so mid-flight `tail -f` works even before first chunk.
-  writeFileSync(join(runDir, "stdout.log"), "");
-  writeFileSync(join(runDir, "stderr.log"), "");
+  writeRunFile(join(runDir, "stdout.log"), "");
+  writeRunFile(join(runDir, "stderr.log"), "");
 
   const project = loadProjectConfig();
   const cwd = resolveRoutineCwd(entry.cwd, project);
@@ -259,8 +281,10 @@ function runOnce(
     ...buildRoutineAttributionEnv(entry.id, runDir),
   };
 
-  const stdoutChunks: string[] = [];
-  const stderrChunks: string[] = [];
+  const maxLogBytes = runLogMaxBytes();
+  const stdoutCapture = new BoundedLogCapture(maxLogBytes);
+  const stderrCapture = new BoundedLogCapture(maxLogBytes);
+  let logWriteFailed = false;
 
   return new Promise<RunResult>((resolve) => {
     const child = spawn(invocation.bin, invocation.args, {
@@ -308,22 +332,34 @@ function runOnce(
 
     child.stdout?.on("data", (d: Buffer) => {
       const s = d.toString();
-      stdoutChunks.push(s);
-      appendRunLog(runDir, "stdout.log", s);
-      if (!opts.quiet) process.stdout.write(s);
+      stdoutCapture.push(s);
+      if (!appendRunLog(runDir, "stdout.log", s, maxLogBytes)) logWriteFailed = true;
+      if (!opts.quiet) {
+        try {
+          process.stdout.write(s);
+        } catch {
+          /* ignore */
+        }
+      }
     });
     child.stderr?.on("data", (d: Buffer) => {
       const s = d.toString();
-      stderrChunks.push(s);
-      appendRunLog(runDir, "stderr.log", s);
-      if (!opts.quiet) process.stderr.write(s);
+      stderrCapture.push(s);
+      if (!appendRunLog(runDir, "stderr.log", s, maxLogBytes)) logWriteFailed = true;
+      if (!opts.quiet) {
+        try {
+          process.stderr.write(s);
+        } catch {
+          /* ignore */
+        }
+      }
     });
 
     child.on("error", (err) => {
       // Spawn failure (e.g. binary not found): record as a failed run.
       const msg = `spawn error: ${err.message}\n`;
-      stderrChunks.push(msg);
-      appendRunLog(runDir, "stderr.log", msg);
+      stderrCapture.push(msg);
+      if (!appendRunLog(runDir, "stderr.log", msg, maxLogBytes)) logWriteFailed = true;
       writeEarlyMeta({
         runDir,
         id: entry.id,
@@ -348,12 +384,12 @@ function runOnce(
       clearTimeout(timer);
       if (killTimer) clearTimeout(killTimer);
       const finishedAt = new Date();
-      const stdout = stdoutChunks.join("");
-      const stderr = stderrChunks.join("");
+      const stdout = stdoutCapture.text();
+      const stderr = stderrCapture.text();
       // Final rewrite ensures the on-disk logs match memory even if a chunk
       // handler raced; streaming already wrote the content for mid-flight tail.
-      writeFileSync(join(runDir, "stdout.log"), stdout);
-      writeFileSync(join(runDir, "stderr.log"), stderr);
+      if (!writeRunLog(runDir, "stdout.log", stdout, maxLogBytes)) logWriteFailed = true;
+      if (!writeRunLog(runDir, "stderr.log", stderr, maxLogBytes)) logWriteFailed = true;
 
       const rawExitCode = timedOut ? 124 : code;
       // Classify work quality from harness output (ok | noop | error | unknown).
@@ -381,7 +417,7 @@ function runOnce(
 
       result.heartbeat = writeHeartbeat(entry, result);
 
-      writeFileSync(
+      writeRunFile(
         join(runDir, "meta.json"),
         JSON.stringify(
           {
@@ -406,6 +442,8 @@ function runOnce(
             outcomeSource: result.outcome.source,
             stdoutTail: tail(stdout, 2000),
             stderrTail: tail(filteredStderr, 2000),
+            logWriteFailed,
+            logMaxBytes: maxLogBytes,
             heartbeat: result.heartbeat,
             primaryHarness: routeMeta?.primaryHarness ?? entry.harness,
             primaryModel: routeMeta?.primaryModel ?? entry.model,
@@ -491,6 +529,87 @@ function sigkillGraceMs(): number {
   if (!raw) return 5_000;
   const n = Number(raw);
   return Number.isFinite(n) && n >= 0 ? n : 5_000;
+}
+
+function runLogMaxBytes(): number {
+  const raw = process.env.ROUTINES_RUN_LOG_MAX_BYTES;
+  if (!raw) return DEFAULT_RUN_LOG_MAX_BYTES;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return DEFAULT_RUN_LOG_MAX_BYTES;
+  return Math.max(MIN_RUN_LOG_MAX_BYTES, Math.floor(n));
+}
+
+function fileSize(path: string): number {
+  try {
+    return statSync(path).size;
+  } catch {
+    return 0;
+  }
+}
+
+function writeRunLog(
+  runDir: string,
+  name: "stdout.log" | "stderr.log",
+  text: string,
+  maxBytes: number,
+): boolean {
+  try {
+    writeFileSync(join(runDir, name), trimToLastBytes(text, maxBytes));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function writeRunFile(path: string, text: string): boolean {
+  try {
+    writeFileSync(path, text);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function trimToLastBytes(text: string, maxBytes: number): string {
+  const buf = Buffer.from(text);
+  if (buf.byteLength <= maxBytes) return text;
+  const marker = Buffer.from(`[routinesd log truncated to last ${maxBytes} bytes]\n`);
+  const keep = Math.max(0, maxBytes - marker.byteLength);
+  return Buffer.concat([marker, buf.subarray(buf.byteLength - keep)]).toString();
+}
+
+class BoundedLogCapture {
+  private chunks: string[] = [];
+  private bytes = 0;
+
+  constructor(private readonly maxBytes: number) {}
+
+  push(chunk: string): void {
+    if (chunk.length === 0) return;
+    let next = chunk;
+    const nextBytes = Buffer.byteLength(next);
+    if (nextBytes >= this.maxBytes) {
+      this.chunks = [trimToLastBytes(next, this.maxBytes)];
+      this.bytes = Buffer.byteLength(this.chunks[0]!);
+      return;
+    }
+
+    this.chunks.push(next);
+    this.bytes += nextBytes;
+    while (this.bytes > this.maxBytes && this.chunks.length > 0) {
+      const first = this.chunks.shift()!;
+      this.bytes -= Buffer.byteLength(first);
+    }
+    if (this.bytes > this.maxBytes) {
+      next = trimToLastBytes(this.chunks.join(""), this.maxBytes);
+      this.chunks = [next];
+      this.bytes = Buffer.byteLength(next);
+    }
+  }
+
+  text(): string {
+    return this.chunks.join("");
+  }
 }
 
 function tail(s: string, n: number): string {
