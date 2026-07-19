@@ -111,6 +111,20 @@ describe("routine-fleet-health prompt", () => {
     expect(prompt).toContain("expire");
     expect(prompt).toContain("do not refresh its `updated_at` / `expires_at`");
   });
+
+  test("does not treat permission-denied kill probes as stale locks", () => {
+    const prompt = readFileSync(
+      new URL("../prompts/routine-fleet-health.md", import.meta.url),
+      "utf8",
+    );
+
+    expect(prompt).toContain("Operation not permitted");
+    expect(prompt).toContain("EPERM");
+    expect(prompt).toContain("is **not** dead-pid proof");
+    expect(prompt).toContain("status:\"running\"");
+    expect(prompt).toContain("No such");
+    expect(prompt).toContain("process` / ESRCH");
+  });
 });
 
 describe("routine attribution env + trailers", () => {
