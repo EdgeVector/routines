@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -8,6 +8,8 @@ import { loadEntry } from "../src/registry.ts";
 import { appendRunLog, runRoutine, writeEarlyMeta } from "../src/runner.ts";
 
 let home: string;
+let outageSituationLog: string;
+let outageRaLog: string;
 
 const savedEnv = { ...process.env };
 
@@ -34,6 +36,24 @@ test "$2" = routine-heartbeats || exit 12
 test "$3" = --type || exit 13
 test "$4" = reference || exit 14
 cat >> ${fbrainOut}
+exit 0
+`,
+  );
+
+  outageSituationLog = join(home, "situations-calls.log");
+  process.env.ROUTINES_SITUATIONS_CLI = stub(
+    join(home, "stub-situations"),
+    `#!/bin/sh
+printf '%s\\n' "$@" >> ${JSON.stringify(outageSituationLog)}
+cat >/dev/null
+exit 0
+`,
+  );
+  outageRaLog = join(home, "ra-calls.log");
+  process.env.ROUTINES_RA_BIN = stub(
+    join(home, "stub-ra"),
+    `#!/bin/sh
+printf '%s\\n' "$@" >> ${JSON.stringify(outageRaLog)}
 exit 0
 `,
   );
@@ -136,6 +156,35 @@ describe("runRoutine heartbeat handling", () => {
     expect(meta.exitCode).toBe(0);
     expect(meta.outcome).toBe("noop");
     expect(meta.outcomeDetail).toBe("codex-capacity no_card_claimed");
+    expect(readFileSync(outageSituationLog, "utf8")).toContain("put");
+    expect(readFileSync(outageRaLog, "utf8")).toContain("notify");
+  });
+
+  test("non-outage failures do not touch harness-outage side-effect tools", async () => {
+    process.env.ROUTINES_CLAUDE_BIN = stub(
+      join(home, "regular-failure-harness"),
+      [
+        "#!/bin/sh",
+        "printf '%s\\n' 'TypeError: undefined is not a function' >&2",
+        "exit 1",
+        "",
+      ].join("\n"),
+    );
+    process.env.ROUTINES_ERROR_ESCALATE = "0";
+    writeRoutine("regular-failure");
+
+    const result = await runRoutine(loadEntry("regular-failure"), {
+      quiet: true,
+      noFallback: true,
+    });
+
+    expect(result.exitCode).toBe(1);
+    expect(result.outcome.kind).toBe("error");
+    const situationCalls = existsSync(outageSituationLog)
+      ? readFileSync(outageSituationLog, "utf8")
+      : "";
+    expect(situationCalls).not.toContain("put");
+    expect(existsSync(outageRaLog)).toBe(false);
   });
 
   test("streams stdout to run-dir before finalize and records harness pid on the lock", async () => {
