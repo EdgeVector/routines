@@ -390,6 +390,47 @@ Pruned 12 clean, zero-unique, \`done\` F-Kanban worktrees and deleted their loca
     expect(o.detail).toContain("board-read-unavailable");
   });
 
+  test("classifies dogfood-rotate pre-feature blocker with filed cards as safe noop", () => {
+    const text = `
+Routine stopped before dogfooding a feature.
+
+Selected feature: none. \`last-stack-routine-read dogfood-rotate\` found the routine install stale, then clean-only self-upgrade failed with \`result=error-lock\` because \`/Users/tomtang/.last-stack/.self-upgrade.lock\` is held.
+
+Result: \`error\`. Real assertion: socket-backed preflight reads worked, but routine freshness failed.
+
+Target checkout freshness: skipped because no feature recipe was selected.
+
+Cards filed:
+- \`dogfood-rotate-last-stack-self-upgrade-lock-20260719\`
+- \`fkanban-search-full-scan-guard-still-live-20260719\`
+
+\`dogfood-rotate 2026-07-19T02:04:37Z error feature=none result=error cards=2\`
+`;
+    const o = parseOutcome("dogfood-rotate", text, {
+      exitCode: 0,
+      startedAt: "2026-07-19T02:00:06.109Z",
+    });
+    expect(o.kind).toBe("noop");
+    expect(o.source).toBe("safe_skip");
+    expect(o.detail).toContain("pre-feature blocker");
+    expect(o.detail).toContain("cards=2");
+  });
+
+  test("does not mask dogfood-rotate feature assertion failures as safe noop", () => {
+    const text = `
+Selected feature: ai-llm-query-agent
+Product assertion failed after recipe execution.
+\`dogfood-rotate 2026-07-19T03:00:00Z error feature=ai-llm-query-agent result=fail cards=1\`
+`;
+    const o = parseOutcome("dogfood-rotate", text, {
+      exitCode: 0,
+      startedAt: "2026-07-19T02:59:00.000Z",
+    });
+    expect(o.kind).toBe("error");
+    expect(o.source).toBe("heartbeat");
+    expect(o.detail).toContain("ai-llm-query-agent");
+  });
+
   test("leaves zero-reclaim disk runs as noop when the explicit signal says noop", () => {
     const text = `
 ROUTINE_RESULT outcome=noop detail=free-space-ok

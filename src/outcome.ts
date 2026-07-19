@@ -336,6 +336,13 @@ export function parseOutcome(
     const best = candidates[0]!;
     const diskReclaimUsefulWork = parseDiskReclaimUsefulWork(routineId, text, opts, best);
     if (diskReclaimUsefulWork) return diskReclaimUsefulWork;
+    const dogfoodPreFeatureBlocker = parseDogfoodRotatePreFeatureBlocker(
+      routineId,
+      text,
+      opts,
+      best,
+    );
+    if (dogfoodPreFeatureBlocker) return dogfoodPreFeatureBlocker;
     return { kind: best.kind, detail: best.detail, source: best.source };
   }
 
@@ -454,6 +461,50 @@ function diskReclaimEvidence(text: string): string | null {
   if (pruned !== null) return `worktrees-removed=${Math.trunc(pruned)}`;
 
   return null;
+}
+
+function parseDogfoodRotatePreFeatureBlocker(
+  routineId: string,
+  text: string,
+  opts: { exitCode?: number | null; timedOut?: boolean },
+  best: Candidate,
+): RunOutcome | null {
+  if (!nameMatchesRoutine("dogfood-rotate", routineId)) return null;
+  if (best.kind !== "error") return null;
+  if (opts.timedOut) return null;
+  if (opts.exitCode !== undefined && opts.exitCode !== null && opts.exitCode !== 0) return null;
+
+  const detail = best.detail ?? "";
+  if (!/\bfeature=(?:none|-)\b/i.test(detail)) return null;
+  const cards = detail.match(/\bcards=(\d+)\b/i);
+  if (!cards || Number(cards[1]) <= 0) return null;
+
+  const lower = text.toLowerCase();
+  const stoppedBeforeFeature =
+    lower.includes("routine stopped before dogfooding a feature") ||
+    lower.includes("stopped before feature selection") ||
+    lower.includes("stopped before selecting a feature");
+  const noFeatureSelected =
+    lower.includes("selected feature: none") || lower.includes("feature=none");
+  const beforeAssertions =
+    lower.includes("before product assertions") ||
+    lower.includes("product assertions did not run") ||
+    lower.includes("target checkout freshness: skipped");
+  const blockerCardEvidence =
+    lower.includes("cards filed") ||
+    lower.includes("filed todo blockers") ||
+    lower.includes("reused live todo blocker") ||
+    lower.includes("cards filed/reused");
+
+  if (!stoppedBeforeFeature || !noFeatureSelected || !beforeAssertions || !blockerCardEvidence) {
+    return null;
+  }
+
+  return {
+    kind: "noop",
+    detail: clip(`dogfood-rotate pre-feature blocker ${detail}`),
+    source: "safe_skip",
+  };
 }
 
 function firstPositiveNumber(text: string, re: RegExp): number | null {
