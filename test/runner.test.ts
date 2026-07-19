@@ -99,6 +99,24 @@ describe("runRoutine heartbeat handling", () => {
     expect(meta.harnessPid).toBeTruthy();
   });
 
+  test("finalize clears the owned single-flight lock", async () => {
+    process.env.ROUTINES_CLAUDE_BIN = stub(
+      join(home, "lock-clean-harness"),
+      [
+        "#!/bin/sh",
+        "printf '%s\\n' 'lock-clean 2026-07-19T22:50:00Z ok lock-cleared'",
+        "",
+      ].join("\n"),
+    );
+    writeRoutine("lock-clean");
+    expect(acquireLock("lock-clean")).toBe(true);
+
+    const result = await runRoutine(loadEntry("lock-clean"), { quiet: true });
+
+    expect(result.outcome.kind).toBe("ok");
+    expect(readLockPid("lock-clean")).toBeNull();
+  });
+
   test("post-success harness transient keeps durable ok exit", async () => {
     process.env.ROUTINES_CLAUDE_BIN = stub(
       join(home, "post-success-capacity-harness"),
