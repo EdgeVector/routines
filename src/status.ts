@@ -7,7 +7,7 @@
 // computation the daemon's dispatch loop uses (rrule nextAfter, the Situation
 // fence, the per-routine single-flight lock, on-disk run state).
 
-import { isLocked, readLockPid, reconcileOrphanedRuns } from "./daemon.ts";
+import { isLocked, pidAlive, readLockPid, reconcileOrphanedRuns, releaseLock } from "./daemon.ts";
 import { compareGrouped, groupForId } from "./groups.ts";
 import { effectiveRoute } from "./harness-outage.ts";
 import { aggregateOutcomes, type OutcomeKind } from "./outcome.ts";
@@ -30,6 +30,13 @@ function latestRunIsCompleted(latest: RunSummary | undefined): boolean {
 function isCurrentlyRunning(id: string, latest: RunSummary | undefined): boolean {
   if (!isLocked(id)) return false;
   return !latestRunIsCompleted(latest);
+}
+
+function clearDeadLockForCompletedRun(id: string, latest: RunSummary | undefined): void {
+  if (!latestRunIsCompleted(latest)) return;
+  const lockPid = readLockPid(id);
+  if (lockPid == null || pidAlive(lockPid)) return;
+  releaseLock(id);
 }
 
 /** Prefer lock file pid; fall back to early meta.harnessPid in the latest run dir. */
@@ -116,6 +123,7 @@ export function collectStatus(now: Date = new Date()): StatusSnapshot {
     const fence = fenceFor(e.id, check.situations);
     const group = groupForId(e.id, e.group);
     const recent = listRuns(e.id, OUTCOME_WINDOW);
+    clearDeadLockForCompletedRun(e.id, recent[0]);
     const stats = aggregateOutcomes(
       recent.map((r) => ({
         kind: r.outcome,

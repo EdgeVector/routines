@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -43,6 +43,13 @@ function writeRoutine(id: string): void {
 function writeLiveLock(id: string): void {
   mkdirSync(join(home, "locks"), { recursive: true });
   writeFileSync(join(home, "locks", `${id}.lock`), String(process.pid));
+}
+
+function writeDeadLock(id: string): string {
+  mkdirSync(join(home, "locks"), { recursive: true });
+  const path = join(home, "locks", `${id}.lock`);
+  writeFileSync(path, "999999999");
+  return path;
 }
 
 test("status prefers reparsed latest run outcome over persisted unknown state", () => {
@@ -135,6 +142,32 @@ test("completed latest run suppresses stale running lock in status", () => {
   const row = collectStatus(new Date("2026-07-16T16:00:00Z")).rows.find((r) => r.id === "done");
   expect(row?.running).toBe(false);
   expect(row?.lastOutcome).toBe("ok");
+});
+
+test("completed latest run clears dead single-flight lock", () => {
+  writeRoutine("done-dead-lock");
+  const lockPath = writeDeadLock("done-dead-lock");
+  const runDir = join(home, "runs", "done-dead-lock", "2026-07-16T15-58-40-903Z");
+  mkdirSync(runDir, { recursive: true });
+  writeFileSync(
+    join(runDir, "meta.json"),
+    JSON.stringify(
+      {
+        finishedAt: "2026-07-16T15:58:40.903Z",
+        exitCode: 0,
+        timedOut: false,
+        outcome: "ok",
+      },
+      null,
+      2,
+    ),
+  );
+
+  const row = collectStatus(new Date("2026-07-16T16:00:00Z")).rows.find(
+    (r) => r.id === "done-dead-lock",
+  );
+  expect(row?.running).toBe(false);
+  expect(existsSync(lockPath)).toBe(false);
 });
 
 test("live lock still reports running when the latest run has not completed", () => {
