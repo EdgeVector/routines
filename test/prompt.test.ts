@@ -118,6 +118,10 @@ describe("routine-fleet-health prompt", () => {
       "utf8",
     );
 
+    expect(prompt).toContain("Before deleting or reporting a stale-lock recurrence");
+    expect(prompt).toContain("currentRunDir");
+    expect(prompt).toContain("`lastRunDir` is the last");
+    expect(prompt).toContain("normal runner");
     expect(prompt).toContain("Operation not permitted");
     expect(prompt).toContain("EPERM");
     expect(prompt).toContain("is **not** dead-pid proof");

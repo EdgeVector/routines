@@ -17,11 +17,19 @@ import { listRuns, type RunSummary } from "./runs.ts";
 import { routinesHome, runsDir } from "./paths.ts";
 import { nextAfter } from "./rrule.ts";
 import { readState } from "./state.ts";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
 /** How many recent runs feed the rolling noop/useful rates. */
 const OUTCOME_WINDOW = 10;
+
+interface LatestRunDir {
+  stamp: string;
+  runDir: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  status: string | null;
+}
 
 function latestRunIsCompleted(latest: RunSummary | undefined): boolean {
   return Boolean(latest?.finishedAt && latest.exitCode !== null && latest.timedOut === false);
@@ -55,6 +63,44 @@ function resolveHarnessPid(id: string, latest: RunSummary | undefined): number |
   }
 }
 
+function readLatestRunDir(id: string): LatestRunDir | null {
+  const idDir = join(runsDir(), id);
+  if (!existsSync(idDir)) return null;
+  let stamp: string | undefined;
+  try {
+    stamp = readdirSync(idDir).sort().at(-1);
+  } catch {
+    return null;
+  }
+  if (!stamp) return null;
+  const runDir = join(idDir, stamp);
+  const metaPath = join(runDir, "meta.json");
+  let meta: Record<string, unknown> = {};
+  if (existsSync(metaPath)) {
+    try {
+      meta = JSON.parse(readFileSync(metaPath, "utf8")) as Record<string, unknown>;
+    } catch {
+      meta = {};
+    }
+  }
+  return {
+    stamp,
+    runDir,
+    startedAt: typeof meta.startedAt === "string" ? meta.startedAt : null,
+    finishedAt: typeof meta.finishedAt === "string" ? meta.finishedAt : null,
+    status: typeof meta.status === "string" ? meta.status : null,
+  };
+}
+
+function activeRunDir(id: string, running: boolean): LatestRunDir | null {
+  if (!running) return null;
+  const latest = readLatestRunDir(id);
+  if (!latest) return null;
+  if (latest.finishedAt) return null;
+  if (latest.status && latest.status !== "running") return null;
+  return latest;
+}
+
 export interface StatusRow {
   id: string;
   status: Status;
@@ -82,6 +128,10 @@ export interface StatusRow {
    * single-flight lock / early meta). null when not running.
    */
   harnessPid: number | null;
+  /** Newest on-disk run directory while a routine is actively running. */
+  currentRun: string | null;
+  currentRunDir: string | null;
+  currentStartedAt: string | null;
   /** false, or the slug of the active Situation whose scope_routines matches. */
   fenced: string | boolean;
   /** Display group id (board | brain | dogfood | …). */
@@ -134,6 +184,7 @@ export function collectStatus(now: Date = new Date()): StatusSnapshot {
     const latest = recent[0];
     const running = isCurrentlyRunning(e.id, latest);
     const harnessPid = running ? resolveHarnessPid(e.id, latest) : null;
+    const currentRun = activeRunDir(e.id, running);
     const route = effectiveRoute(e, now.getTime());
     const stateOutcome: OutcomeKind | null =
       st.lastOutcome === "ok" ||
@@ -170,6 +221,9 @@ export function collectStatus(now: Date = new Date()): StatusSnapshot {
       lastRunDir: st.lastRunDir ?? null,
       running,
       harnessPid,
+      currentRun: currentRun?.stamp ?? null,
+      currentRunDir: currentRun?.runDir ?? null,
+      currentStartedAt: currentRun?.startedAt ?? null,
       fenced: fence.fenced ? (fence.situationSlug ?? true) : false,
       groupId: group.id,
       groupLabel: group.label,
