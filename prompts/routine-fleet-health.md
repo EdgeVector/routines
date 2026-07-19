@@ -132,6 +132,16 @@ Allowed, when the evidence clearly supports it:
   fix its permissions, when heartbeats say `memory_unwritable`.
 - Remove a **stale** lock in `$ROUTINES_HOME/locks/` (no live pid behind it)
   that is blocking a routine from firing.
+  - `kill -0 <pid>` returning `Operation not permitted`, `EPERM`, or another
+    permission/sandbox denial is **not** dead-pid proof. Treat it as
+    unknown/live and do not remove the lock. This is common for live harness
+    workers in sandboxed routine runs.
+  - Remove only when evidence is unambiguous: `kill -0` reports `No such
+    process` / ESRCH, or `routines status --json` / orphan reconciliation
+    already proves the run is not active and the lock owner is dead.
+  - If the newest run dir for that id has `status:"running"` and no
+    `finishedAt`, leave the lock alone unless a non-permission dead-pid signal
+    proves the harness is gone.
 - **Chronic timeout budget**: if a single id has **≥3** of its last 5 finished
   runs with `exitCode==124` / `timedOut`, and registry `timeout_min` is still
   &lt; 90, bump it by **+15** (cap 90) in
