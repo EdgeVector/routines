@@ -233,4 +233,40 @@ describe("runRoutine heartbeat handling", () => {
     expect(meta.status).toBe("running");
     expect(readFileSync(join(runDir, "stdout.log"), "utf8")).toBe("hello-live\n");
   });
+
+  test("appendRunLog is best-effort when the log path cannot be written", () => {
+    const notDir = join(home, "not-a-directory");
+    writeFileSync(notDir, "x");
+
+    expect(appendRunLog(notDir, "stdout.log", "hello\n")).toBe(false);
+  });
+
+  test("caps final run logs and preserves the outcome tail", async () => {
+    process.env.ROUTINES_RUN_LOG_MAX_BYTES = "8192";
+    process.env.ROUTINES_CLAUDE_BIN = stub(
+      join(home, "large-output-harness"),
+      [
+        "#!/bin/sh",
+        "i=0",
+        "while [ \"$i\" -lt 500 ]; do",
+        "  printf 'line-%04d abcdefghijklmnopqrstuvwxyz abcdefghijklmnopqrstuvwxyz\\n' \"$i\"",
+        "  i=$((i + 1))",
+        "done",
+        "printf '%s\\n' 'large-output 2026-07-19T00:00:00Z ok GREEN findings=0'",
+        "",
+      ].join("\n"),
+    );
+    writeRoutine("large-output");
+
+    const result = await runRoutine(loadEntry("large-output"), { quiet: true, noFallback: true });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.outcome.kind).toBe("ok");
+    const stdout = readFileSync(join(result.runDir, "stdout.log"), "utf8");
+    expect(Buffer.byteLength(stdout)).toBeLessThanOrEqual(8192);
+    expect(stdout).toContain("large-output 2026-07-19T00:00:00Z ok GREEN findings=0");
+    expect(stdout).not.toContain("line-0000");
+    const meta = JSON.parse(readFileSync(join(result.runDir, "meta.json"), "utf8"));
+    expect(meta.logMaxBytes).toBe(8192);
+  });
 });
