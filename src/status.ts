@@ -7,7 +7,13 @@
 // computation the daemon's dispatch loop uses (rrule nextAfter, the Situation
 // fence, the per-routine single-flight lock, on-disk run state).
 
-import { isLocked, pidAlive, readLockPid, reconcileOrphanedRuns, releaseLock } from "./daemon.ts";
+import {
+  isLocked,
+  lockHasLiveOwner,
+  readLockPid,
+  reconcileOrphanedRuns,
+  releaseLock,
+} from "./daemon.ts";
 import { compareGrouped, groupForId } from "./groups.ts";
 import { effectiveRoute } from "./harness-outage.ts";
 import { aggregateOutcomes, type OutcomeKind } from "./outcome.ts";
@@ -43,7 +49,7 @@ function isCurrentlyRunning(id: string, latest: RunSummary | undefined): boolean
 function clearDeadLockForCompletedRun(id: string, latest: RunSummary | undefined): void {
   if (!latestRunIsCompleted(latest)) return;
   const lockPid = readLockPid(id);
-  if (lockPid == null || pidAlive(lockPid)) return;
+  if (lockPid == null || lockHasLiveOwner(id)) return;
   releaseLock(id);
 }
 
