@@ -3,7 +3,7 @@
 // log. Reads the same $ROUTINES_HOME/runs/<id>/<ts>/ evidence the runner
 // writes and the CLI `logs` command reads.
 
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { closeSync, existsSync, openSync, readFileSync, readdirSync, readSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 import {
@@ -19,6 +19,8 @@ import {
   type EscalateStatus,
 } from "./escalate-status.ts";
 import { runsDir } from "./paths.ts";
+
+const OUTCOME_LOG_TAIL_BYTES = 40_000;
 
 export interface RunSummary {
   stamp: string;
@@ -50,6 +52,10 @@ export interface RunDetail extends RunSummary {
   summarySource: "routine_result" | "claude_result" | "result_colon" | "outcome_detail" | null;
 }
 
+interface ListRunsOptions {
+  includeEscalate?: boolean;
+}
+
 function runDirFor(id: string): string {
   return join(runsDir(), id);
 }
@@ -64,15 +70,6 @@ function readMeta(dir: string): Record<string, unknown> {
   }
 }
 
-function readText(path: string): string {
-  if (!existsSync(path)) return "";
-  try {
-    return readFileSync(path, "utf8");
-  } catch {
-    return "";
-  }
-}
-
 /**
  * Resolve the work outcome for a run dir. Prefer meta.json fields written by
  * the runner; for older runs (pre-outcome), re-parse stdout/stderr so history
@@ -83,8 +80,10 @@ export function resolveRunOutcome(id: string, runDir: string, meta: Record<strin
     return outcomeFromMeta(meta);
   }
   // Re-parse historical logs (or unknown meta) from captured streams.
-  const stdout = readText(join(runDir, "stdout.log"));
-  const stderr = filterBenignHarnessNoise(readText(join(runDir, "stderr.log")));
+  const stdout = readTail(join(runDir, "stdout.log"), OUTCOME_LOG_TAIL_BYTES);
+  const stderr = filterBenignHarnessNoise(
+    readTail(join(runDir, "stderr.log"), OUTCOME_LOG_TAIL_BYTES),
+  );
   // Prefer full logs; fall back to tails stored in meta if logs were pruned.
   const text =
     stdout || stderr
@@ -104,7 +103,13 @@ export function resolveRunOutcome(id: string, runDir: string, meta: Record<strin
   return parseOutcome(id, text, { exitCode, timedOut, startedAt, incomplete });
 }
 
-function summarize(id: string, stamp: string, runDir: string, meta: Record<string, unknown>): RunSummary {
+function summarize(
+  id: string,
+  stamp: string,
+  runDir: string,
+  meta: Record<string, unknown>,
+  options: ListRunsOptions = {},
+): RunSummary {
   const outcome = resolveRunOutcome(id, runDir, meta);
   return {
     stamp,
@@ -117,7 +122,7 @@ function summarize(id: string, stamp: string, runDir: string, meta: Record<strin
     outcome: outcome.kind,
     outcomeDetail: outcome.detail,
     outcomeSource: outcome.source,
-    escalate: resolveEscalateStatus(runDir),
+    escalate: options.includeEscalate === false ? null : resolveEscalateStatus(runDir),
   };
 }
 
@@ -132,7 +137,7 @@ function isCompleteRunDir(runDir: string, meta: Record<string, unknown>): boolea
 }
 
 /** List a routine's runs, most recent first (run-dir stamps sort chronologically). */
-export function listRuns(id: string, limit = 20): RunSummary[] {
+export function listRuns(id: string, limit = 20, options: ListRunsOptions = {}): RunSummary[] {
   const dir = runDirFor(id);
   if (!existsSync(dir)) return [];
   const stamps = readdirSync(dir)
@@ -143,12 +148,12 @@ export function listRuns(id: string, limit = 20): RunSummary[] {
     .sort()
     .reverse()
     .slice(0, limit);
-  return stamps.map((s) => summarize(id, s, join(dir, s), readMeta(join(dir, s))));
+  return stamps.map((s) => summarize(id, s, join(dir, s), readMeta(join(dir, s)), options));
 }
 
 /** Rolling outcome stats over the most recent `limit` runs (default 10). */
 export function outcomeStatsFor(id: string, limit = 10): OutcomeStats {
-  const runs = listRuns(id, limit);
+  const runs = listRuns(id, limit, { includeEscalate: false });
   return aggregateOutcomes(
     runs.map((r) => ({
       kind: r.outcome,
@@ -272,6 +277,24 @@ function clipSummary(s: string, max = 2000): string {
 
 function readTail(path: string, n: number): string {
   if (!existsSync(path)) return "";
-  const s = readFileSync(path, "utf8");
-  return s.length <= n ? s : s.slice(s.length - n);
+  let fd: number | null = null;
+  try {
+    const size = statSync(path).size;
+    const start = Math.max(0, size - n);
+    const length = size - start;
+    const buffer = Buffer.alloc(length);
+    fd = openSync(path, "r");
+    const bytesRead = readSync(fd, buffer, 0, length, start);
+    return buffer.subarray(0, bytesRead).toString("utf8");
+  } catch {
+    return "";
+  } finally {
+    if (fd != null) {
+      try {
+        closeSync(fd);
+      } catch {
+        /* best effort */
+      }
+    }
+  }
 }
