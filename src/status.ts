@@ -182,7 +182,7 @@ export function collectStatus(now: Date = new Date()): StatusSnapshot {
     const next = e.status === "active" ? nextAfter(e.parsedRrule, now) : null;
     const fence = fenceFor(e.id, check.situations);
     const group = groupForId(e.id, e.group);
-    const recent = listRuns(e.id, OUTCOME_WINDOW);
+    const recent = listRuns(e.id, OUTCOME_WINDOW, { includeEscalate: false });
     clearDeadLockForCompletedRun(e.id, recent[0]);
     const stats = aggregateOutcomes(
       recent.map((r) => ({

@@ -266,36 +266,36 @@ export function reconcileOrphanedRuns(now: Date = new Date()): OrphanedRunInfo[]
     } catch {
       continue;
     }
-    for (const stamp of stamps) {
-      const runDir = join(idDir, stamp);
-      const metaPath = join(runDir, "meta.json");
-      if (!existsSync(metaPath)) continue;
-      let meta: Record<string, unknown>;
+    const stamp = stamps.sort().at(-1);
+    if (!stamp) continue;
+    const runDir = join(idDir, stamp);
+    const metaPath = join(runDir, "meta.json");
+    if (!existsSync(metaPath)) continue;
+    let meta: Record<string, unknown>;
+    try {
+      meta = JSON.parse(readFileSync(metaPath, "utf8")) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    if (meta.status !== "running") continue;
+    const harnessPid = typeof meta.harnessPid === "number" ? meta.harnessPid : null;
+    if (harnessPid != null && pidAlive(harnessPid)) continue; // legitimately still running
+    meta.status = "orphaned";
+    if (typeof meta.finishedAt !== "string") meta.finishedAt = now.toISOString();
+    let clearedLock = false;
+    if (!lockInfoHasLiveOwner(readLockInfo(id))) {
       try {
-        meta = JSON.parse(readFileSync(metaPath, "utf8")) as Record<string, unknown>;
-      } catch {
-        continue;
-      }
-      if (meta.status !== "running") continue;
-      const harnessPid = typeof meta.harnessPid === "number" ? meta.harnessPid : null;
-      if (harnessPid != null && pidAlive(harnessPid)) continue; // legitimately still running
-      meta.status = "orphaned";
-      if (typeof meta.finishedAt !== "string") meta.finishedAt = now.toISOString();
-      let clearedLock = false;
-      if (!lockInfoHasLiveOwner(readLockInfo(id))) {
-        try {
-          rmSync(lockPath(id), { force: true });
-          clearedLock = true;
-        } catch {
-          /* best effort */
-        }
-      }
-      try {
-        writeFileSync(metaPath, JSON.stringify(meta, null, 2) + "\n");
-        orphaned.push({ id, stamp, runDir, harnessPid, clearedLock });
+        rmSync(lockPath(id), { force: true });
+        clearedLock = true;
       } catch {
         /* best effort */
       }
+    }
+    try {
+      writeFileSync(metaPath, JSON.stringify(meta, null, 2) + "\n");
+      orphaned.push({ id, stamp, runDir, harnessPid, clearedLock });
+    } catch {
+      /* best effort */
     }
   }
   return orphaned;

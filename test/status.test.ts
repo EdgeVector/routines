@@ -120,6 +120,35 @@ test("status prefers reparsed latest run outcome over persisted unknown state", 
   expect(row.outcomeUnknown).toBe(0);
 });
 
+test("status reparses historical outcome from bounded log tail", () => {
+  writeRoutine("large-log-history");
+  const runDir = join(home, "runs/large-log-history", "2026-07-16T15-58-40-903Z");
+  mkdirSync(runDir, { recursive: true });
+  writeFileSync(
+    join(runDir, "meta.json"),
+    JSON.stringify(
+      {
+        finishedAt: "2026-07-16T15:58:40.903Z",
+        exitCode: 0,
+        timedOut: false,
+        outcome: "unknown",
+      },
+      null,
+      2,
+    ) + "\n",
+  );
+  writeFileSync(
+    join(runDir, "stdout.log"),
+    `${"noise\n".repeat(50_000)}ROUTINE_RESULT outcome=ok detail=large-log-tail\n`,
+  );
+
+  const row = collectStatus(new Date("2026-07-16T16:00:00Z")).rows.find(
+    (r) => r.id === "large-log-history",
+  );
+  expect(row?.lastOutcome).toBe("ok");
+  expect(row?.lastOutcomeDetail).toBe("large-log-tail");
+});
+
 test("completed latest run suppresses stale running lock in status", () => {
   writeRoutine("done");
   writeLiveLock("done");
@@ -313,6 +342,50 @@ test("dead lock is cleared even when an unfinished run dir is newer than the com
   expect(row?.running).toBe(false);
   expect(row?.lastOutcome).toBe("ok");
   expect(existsSync(lockPath)).toBe(false);
+});
+
+test("orphan reconciliation ignores older unfinished run dirs", () => {
+  writeRoutine("old-unfinished-history");
+  const oldRun = join(home, "runs", "old-unfinished-history", "2026-07-16T14-00-00-000Z");
+  mkdirSync(oldRun, { recursive: true });
+  writeFileSync(
+    join(oldRun, "meta.json"),
+    JSON.stringify(
+      {
+        status: "running",
+        startedAt: "2026-07-16T14:00:00.000Z",
+        harnessPid: 999_999_999,
+        exitCode: null,
+        finishedAt: null,
+      },
+      null,
+      2,
+    ),
+  );
+  const completed = join(home, "runs", "old-unfinished-history", "2026-07-16T15-00-00-000Z");
+  mkdirSync(completed, { recursive: true });
+  writeFileSync(
+    join(completed, "meta.json"),
+    JSON.stringify(
+      {
+        finishedAt: "2026-07-16T15:05:00.000Z",
+        exitCode: 0,
+        timedOut: false,
+        outcome: "ok",
+      },
+      null,
+      2,
+    ),
+  );
+
+  const row = collectStatus(new Date("2026-07-16T16:00:00Z")).rows.find(
+    (r) => r.id === "old-unfinished-history",
+  );
+  const oldMeta = JSON.parse(readFileSync(join(oldRun, "meta.json"), "utf8"));
+
+  expect(row?.running).toBe(false);
+  expect(row?.lastOutcome).toBe("ok");
+  expect(oldMeta.status).toBe("running");
 });
 
 test("status self-heals stale running meta whose harness pid is dead", () => {
