@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
+  renderHygienePlist,
   runHygiene,
   selectRunsToPrune,
   truncateMemoryText,
@@ -142,5 +143,20 @@ describe("runHygiene", () => {
     expect(result.prunedRuns).toBe(1);
     expect(result.dryRun).toBe(true);
     expect(existsSync(d)).toBe(true);
+  });
+});
+
+describe("renderHygienePlist", () => {
+  test("installed hygiene agent fast-forwards clean installs", () => {
+    const plist = renderHygienePlist({
+      program: "/tmp/routines",
+      runtime: "/tmp/bun",
+      intervalSec: 60,
+      env: { ROUTINES_HOME: "/tmp/routines-home" },
+    });
+
+    expect(plist).toContain("<string>hygiene</string>");
+    expect(plist).toContain("<string>--json</string>");
+    expect(plist).toContain("<string>--ff-install</string>");
   });
 });
