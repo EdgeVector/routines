@@ -111,6 +111,21 @@ function lockPath(id: string): string {
   return join(locksDir(), `${id}.lock`);
 }
 
+interface LockInfo {
+  /** Legacy/plain owner pid, or the supervising daemon/manual caller pid. */
+  pid: number | null;
+  /** Supervising routinesd / routines run process that owns final cleanup. */
+  ownerPid: number | null;
+  /** Live harness child pid once spawn succeeds. */
+  harnessPid: number | null;
+}
+
+function finitePid(value: unknown): number | null {
+  if (value == null) return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
 export function pidAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
@@ -130,40 +145,67 @@ export function pidAlive(pid: number): boolean {
  * child has spawned (via setLockOwnerPid); before that it holds the daemon pid
  * that acquired the lock.
  */
-export function readLockPid(id: string): number | null {
+function readLockInfo(id: string): LockInfo | null {
   const p = lockPath(id);
   if (!existsSync(p)) return null;
   const raw = readFileSync(p, "utf8").trim();
   // Accept plain pid or JSON {"pid":N,...} for forward compatibility.
   if (raw.startsWith("{")) {
     try {
-      const j = JSON.parse(raw) as { pid?: unknown; harnessPid?: unknown };
-      const n = Number(j.harnessPid ?? j.pid);
-      return Number.isFinite(n) ? n : null;
+      const j = JSON.parse(raw) as { pid?: unknown; ownerPid?: unknown; harnessPid?: unknown };
+      return {
+        pid: finitePid(j.pid),
+        ownerPid: finitePid(j.ownerPid),
+        harnessPid: finitePid(j.harnessPid),
+      };
     } catch {
       return null;
     }
   }
   const pid = Number(raw);
-  return Number.isFinite(pid) ? pid : null;
+  return Number.isFinite(pid) ? { pid, ownerPid: null, harnessPid: null } : null;
+}
+
+function lockInfoHasLiveOwner(info: LockInfo | null): boolean {
+  if (!info) return false;
+  const candidates = [info.harnessPid, info.ownerPid, info.pid];
+  return candidates.some((pid) => pid != null && pidAlive(pid));
+}
+
+export function readLockPid(id: string): number | null {
+  const info = readLockInfo(id);
+  if (!info) return null;
+  return info.harnessPid ?? info.ownerPid ?? info.pid;
+}
+
+export function lockHasLiveOwner(id: string): boolean {
+  return lockInfoHasLiveOwner(readLockInfo(id));
 }
 
 export function acquireLock(id: string): boolean {
   mkdirSync(locksDir(), { recursive: true });
   const p = lockPath(id);
   if (existsSync(p)) {
-    const pid = readLockPid(id);
-    if (pid != null && pidAlive(pid)) return false;
+    const info = readLockInfo(id);
+    if (lockInfoHasLiveOwner(info)) return false;
     // stale lock: fall through and overwrite
   }
-  writeFileSync(p, String(process.pid));
+  writeFileSync(
+    p,
+    JSON.stringify({ pid: process.pid, ownerPid: process.pid, harnessPid: null }) + "\n",
+  );
   return true;
 }
 
 /** Update the lock owner to the live harness worker after spawn. */
 export function setLockOwnerPid(id: string, pid: number): void {
   mkdirSync(locksDir(), { recursive: true });
-  writeFileSync(lockPath(id), String(pid));
+  const existing = readLockInfo(id);
+  const ownerPid = existing?.ownerPid ?? existing?.pid ?? process.pid;
+  writeFileSync(
+    lockPath(id),
+    JSON.stringify({ pid: ownerPid, ownerPid, harnessPid: pid }) + "\n",
+  );
 }
 
 export function releaseLock(id: string): void {
@@ -187,8 +229,7 @@ export function releaseLockIfOwned(id: string, ownerPid: number): boolean {
 }
 
 export function isLocked(id: string): boolean {
-  const pid = readLockPid(id);
-  return pid != null && pidAlive(pid);
+  return lockHasLiveOwner(id);
 }
 
 export interface OrphanedRunInfo {
@@ -240,9 +281,8 @@ export function reconcileOrphanedRuns(now: Date = new Date()): OrphanedRunInfo[]
       if (harnessPid != null && pidAlive(harnessPid)) continue; // legitimately still running
       meta.status = "orphaned";
       if (typeof meta.finishedAt !== "string") meta.finishedAt = now.toISOString();
-      const lockPid = readLockPid(id);
       let clearedLock = false;
-      if (lockPid != null && !pidAlive(lockPid)) {
+      if (!lockInfoHasLiveOwner(readLockInfo(id))) {
         try {
           rmSync(lockPath(id), { force: true });
           clearedLock = true;
