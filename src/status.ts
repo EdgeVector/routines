@@ -41,8 +41,13 @@ function latestRunIsCompleted(latest: RunSummary | undefined): boolean {
   return Boolean(latest?.finishedAt && latest.exitCode !== null && latest.timedOut === false);
 }
 
-function isCurrentlyRunning(id: string, latest: RunSummary | undefined): boolean {
+function isCurrentlyRunning(
+  id: string,
+  latest: RunSummary | undefined,
+  currentRun: LatestRunDir | null,
+): boolean {
   if (!isLocked(id)) return false;
+  if (currentRun) return true;
   return !latestRunIsCompleted(latest);
 }
 
@@ -98,8 +103,7 @@ function readLatestRunDir(id: string): LatestRunDir | null {
   };
 }
 
-function activeRunDir(id: string, running: boolean): LatestRunDir | null {
-  if (!running) return null;
+function activeRunDir(id: string): LatestRunDir | null {
   const latest = readLatestRunDir(id);
   if (!latest) return null;
   if (latest.finishedAt) return null;
@@ -188,9 +192,9 @@ export function collectStatus(now: Date = new Date()): StatusSnapshot {
       })),
     );
     const latest = recent[0];
-    const running = isCurrentlyRunning(e.id, latest);
+    const currentRun = activeRunDir(e.id);
+    const running = isCurrentlyRunning(e.id, latest, currentRun);
     const harnessPid = running ? resolveHarnessPid(e.id, latest) : null;
-    const currentRun = activeRunDir(e.id, running);
     const route = effectiveRoute(e, now.getTime());
     const stateOutcome: OutcomeKind | null =
       st.lastOutcome === "ok" ||

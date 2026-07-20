@@ -227,6 +227,94 @@ test("running status exposes current run separately from last completed run", ()
   expect(row?.currentStartedAt).toBe("2026-07-16T15:58:40.903Z");
 });
 
+test("running meta with exitCode null is not treated as latest completed history", () => {
+  writeRoutine("active-history");
+  writeLiveLock("active-history");
+  const completed = join(home, "runs", "active-history", "2026-07-16T15-00-00-000Z");
+  mkdirSync(completed, { recursive: true });
+  writeFileSync(
+    join(completed, "meta.json"),
+    JSON.stringify(
+      {
+        finishedAt: "2026-07-16T15:05:00.000Z",
+        exitCode: 0,
+        timedOut: false,
+        outcome: "ok",
+      },
+      null,
+      2,
+    ),
+  );
+  const current = join(home, "runs", "active-history", "2026-07-16T15-58-40-903Z");
+  mkdirSync(current, { recursive: true });
+  writeFileSync(
+    join(current, "meta.json"),
+    JSON.stringify(
+      {
+        status: "running",
+        startedAt: "2026-07-16T15:58:40.903Z",
+        harnessPid: process.pid,
+        exitCode: null,
+        finishedAt: null,
+      },
+      null,
+      2,
+    ),
+  );
+
+  const row = collectStatus(new Date("2026-07-16T16:00:00Z")).rows.find(
+    (r) => r.id === "active-history",
+  );
+
+  expect(row?.running).toBe(true);
+  expect(row?.lastOutcome).toBe("ok");
+  expect(row?.currentRun).toBe("2026-07-16T15-58-40-903Z");
+});
+
+test("dead lock is cleared even when an unfinished run dir is newer than the completed run", () => {
+  writeRoutine("dead-active-history");
+  const lockPath = writeDeadLock("dead-active-history");
+  const completed = join(home, "runs", "dead-active-history", "2026-07-16T15-00-00-000Z");
+  mkdirSync(completed, { recursive: true });
+  writeFileSync(
+    join(completed, "meta.json"),
+    JSON.stringify(
+      {
+        finishedAt: "2026-07-16T15:05:00.000Z",
+        exitCode: 0,
+        timedOut: false,
+        outcome: "ok",
+      },
+      null,
+      2,
+    ),
+  );
+  const unfinished = join(home, "runs", "dead-active-history", "2026-07-16T15-58-40-903Z");
+  mkdirSync(unfinished, { recursive: true });
+  writeFileSync(
+    join(unfinished, "meta.json"),
+    JSON.stringify(
+      {
+        status: "running",
+        startedAt: "2026-07-16T15:58:40.903Z",
+        harnessPid: 999_999_999,
+        exitCode: null,
+        finishedAt: null,
+      },
+      null,
+      2,
+    ),
+  );
+
+  const row = collectStatus(new Date("2026-07-16T16:00:00Z")).rows.find(
+    (r) => r.id === "dead-active-history",
+  );
+
+  expect(row?.running).toBe(false);
+  expect(row?.lastOutcome).toBe("ok");
+  expect(existsSync(lockPath)).toBe(false);
+});
+
 test("status self-heals stale running meta whose harness pid is dead", () => {
   writeRoutine("orphan");
   const runDir = join(home, "runs", "orphan", "2026-07-18T07-41-09-652Z");

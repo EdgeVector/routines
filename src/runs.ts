@@ -124,9 +124,10 @@ function summarize(id: string, stamp: string, runDir: string, meta: Record<strin
 /** True when a run dir never finished (e.g. web/daemon restart mid-run). */
 function isCompleteRunDir(runDir: string, meta: Record<string, unknown>): boolean {
   if (!existsSync(join(runDir, "meta.json"))) return false;
-  // meta must have an exitCode field (null is ok for spawn fail) OR finishedAt
+  // Running meta is written early with exitCode:null. Treat only terminal
+  // values as complete so a live/stale run does not mask the latest finished run.
   if (typeof meta.finishedAt === "string") return true;
-  if ("exitCode" in meta) return true;
+  if (typeof meta.exitCode === "number") return true;
   return false;
 }
 
