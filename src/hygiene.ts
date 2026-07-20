@@ -519,7 +519,7 @@ export function renderHygienePlist(opts: {
   const runtime = opts.runtime ?? process.execPath;
   const interval = opts.intervalSec ?? 3600;
   const logDir = daemonLogDir();
-  const args = [runtime, opts.program, "hygiene", "--json"];
+  const args = [runtime, opts.program, "hygiene", "--json", "--ff-install"];
   const argXml = args.map((a) => `    <string>${xmlEscape(a)}</string>`).join("\n");
   const env = { ROUTINES_HOME: routinesHome(), ...(opts.env ?? {}) };
   const envXml = Object.entries(env)

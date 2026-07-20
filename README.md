@@ -91,9 +91,11 @@ Two complementary layers:
    `~/.routines/runs` (keep last 20 per id **or** last 7 days), truncates
    `memory.md` files to the last 100 lines, drops stale
    `error-escalate/*.json`, checks that `com.edgevector.routinesd` is loaded,
-   and runs `publish-status`. Install hourly via `routines install-hygiene`
-   (label `com.edgevector.routines-hygiene`). Shell wrapper:
-   `scripts/routines-hygiene.sh`.
+   and runs `publish-status`. The installed hourly agent also runs
+   `--ff-install`, so a clean CLI checkout fast-forwards to LastGit `main` and
+   kickstarts `routinesd` after updates. Install hourly via
+   `routines install-hygiene` (label `com.edgevector.routines-hygiene`). Shell
+   wrapper: `scripts/routines-hygiene.sh`.
 2. **`routine-fleet-health`** (agent, hourly) — closes healed
    `routine-error-*` cards, safe registry timeout bumps for chronic 124s,
    dedupes against error-escalate, files pickup cards only when needed.
