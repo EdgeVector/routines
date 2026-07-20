@@ -68,7 +68,7 @@ function writeRoutine(id: string): void {
       'rrule = "FREQ=SECONDLY"',
       'prompt = "hello"',
       'heartbeat_slug = "routine-heartbeats"',
-      "timeout_min = 0.01",
+      "timeout_min = 0.05",
     ].join("\n") + "\n",
   );
 }
