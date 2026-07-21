@@ -68,4 +68,15 @@ describe("parseEntry", () => {
     expect(e.effort).toBe("high");
     expect(e.heartbeatSlug).toBe("routine-heartbeats");
   });
+
+  test("accepts an explicit routine error priority", () => {
+    const e = parseEntry(base + '\nerror_priority = "P0"', "/x/disk-reclaim.toml");
+    expect(e.errorPriority).toBe("P0");
+  });
+
+  test("rejects an invalid routine error priority", () => {
+    expect(() =>
+      parseEntry(base + '\nerror_priority = "urgent"', "/x/disk-reclaim.toml"),
+    ).toThrow(/error_priority.*P0\|P1\|P2\|P3/);
+  });
 });

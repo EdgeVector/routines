@@ -159,6 +159,96 @@ describe("shouldEscalate", () => {
 });
 
 describe("escalateRoutineError", () => {
+  test("new routine failures default to P3 and carry routinesd creator attribution", () => {
+    const stubDir = join(home, "bin");
+    mkdirSync(stubDir, { recursive: true });
+    const stub = join(stubDir, "kanban-stub");
+    const argsFile = join(stubDir, "args");
+    const bodyFile = join(stubDir, "body");
+    writeFileSync(
+      stub,
+      `#!/usr/bin/env bash
+set -euo pipefail
+if [ "\${1:-}" = "show" ]; then exit 1; fi
+if [ "\${1:-}" = "rank" ]; then exit 0; fi
+printf '%s\n' "$@" > ${JSON.stringify(argsFile)}
+cat > ${JSON.stringify(bodyFile)}
+echo "created card $2"
+`,
+    );
+    spawnSyncchmod(stub);
+
+    const r = result({ exitCode: 1 });
+    const out = escalateRoutineError(entry(), r, {
+      kanbanBin: stub,
+      dispatchAgent: false,
+      quiet: true,
+    });
+
+    expect(out.escalated).toBe(true);
+    const args = readFileSync(argsFile, "utf8").split("\n");
+    expect(args).toContain("P3");
+    expect(args).toContain("routine:routinesd-error-escalate");
+    expect(readFileSync(bodyFile, "utf8")).toContain("Priority: P3");
+  });
+
+  test("registry can opt a critical routine into P0", () => {
+    const stubDir = join(home, "bin");
+    mkdirSync(stubDir, { recursive: true });
+    const stub = join(stubDir, "kanban-stub");
+    const argsFile = join(stubDir, "args");
+    writeFileSync(
+      stub,
+      `#!/usr/bin/env bash
+if [ "\${1:-}" = "show" ]; then exit 1; fi
+if [ "\${1:-}" = "rank" ]; then exit 0; fi
+printf '%s\n' "$@" > ${JSON.stringify(argsFile)}
+cat >/dev/null
+echo ok
+`,
+    );
+    spawnSyncchmod(stub);
+
+    const out = escalateRoutineError(
+      { ...entry("backup-restore-probe"), errorPriority: "P0" },
+      result({ id: "backup-restore-probe", exitCode: 1 }),
+      { kanbanBin: stub, dispatchAgent: false, quiet: true },
+    );
+
+    expect(out.escalated).toBe(true);
+    expect(readFileSync(argsFile, "utf8").split("\n")).toContain("P0");
+  });
+
+  test("existing human-set priority wins over registry and default", () => {
+    const stubDir = join(home, "bin");
+    mkdirSync(stubDir, { recursive: true });
+    const stub = join(stubDir, "kanban-stub");
+    const argsFile = join(stubDir, "args");
+    writeFileSync(
+      stub,
+      `#!/usr/bin/env bash
+if [ "\${1:-}" = "show" ]; then
+  echo '{"tags":["routine","error","p2"]}'
+  exit 0
+fi
+if [ "\${1:-}" = "rank" ]; then exit 0; fi
+printf '%s\n' "$@" > ${JSON.stringify(argsFile)}
+cat >/dev/null
+echo ok
+`,
+    );
+    spawnSyncchmod(stub);
+
+    const out = escalateRoutineError(
+      { ...entry(), errorPriority: "P0" },
+      result({ exitCode: 1 }),
+      { kanbanBin: stub, dispatchAgent: false, quiet: true },
+    );
+
+    expect(out.escalated).toBe(true);
+    expect(readFileSync(argsFile, "utf8").split("\n")).toContain("P2");
+  });
+
   test("files card via stub kanban and writes state", () => {
     const stubDir = join(home, "bin");
     mkdirSync(stubDir, { recursive: true });
@@ -196,6 +286,9 @@ exit 0
 set -euo pipefail
 if [ "\${1:-}" = "rank" ]; then
   exit 0
+fi
+if [ "\${1:-}" = "show" ]; then
+  exit 1
 fi
 count_file=${JSON.stringify(countFile)}
 body_prefix=${JSON.stringify(bodyPrefix)}

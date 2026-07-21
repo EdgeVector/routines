@@ -6,7 +6,7 @@
 //
 // On hard failure (non-zero exit / timeout / spawn failure) or soft
 // outcome=error (agent heartbeat), we:
-//   1. Upsert a P0 kanban card with run evidence (deterministic CLI)
+//   1. Upsert a priority-classified kanban card with run evidence
 //   2. Fire a one-shot triage harness agent (async, never blocks the
 //      completing run) that investigates the run dir and either fixes or
 //      tightens the card.
@@ -35,7 +35,7 @@ import {
   type HarnessOutageOptions,
 } from "./harness-outage.ts";
 import { buildRoutineAttributionEnv } from "./prompt.ts";
-import type { RoutineEntry } from "./registry.ts";
+import type { ErrorPriority, RoutineEntry } from "./registry.ts";
 import { routinesHome, runsDir } from "./paths.ts";
 import type { RunResult } from "./runner.ts";
 
@@ -44,6 +44,8 @@ const TRIAGE_ID = "routine-error-triage";
 const DEFAULT_AGENT_COOLDOWN_MS = 30 * 60 * 1000;
 const CARD_FILE_ATTEMPTS = 3;
 const CARD_RETRY_DELAY_MS = 250;
+const DEFAULT_ERROR_PRIORITY: ErrorPriority = "P3";
+const ERROR_ESCALATE_CREATOR = "routine:routinesd-error-escalate";
 /** Card upsert always; agent spawn is rate-limited. */
 const STATE_DIR_NAME = "error-escalate";
 
@@ -181,7 +183,11 @@ function logLine(quiet: boolean | undefined, msg: string): void {
   }
 }
 
-function buildCardBody(entry: RoutineEntry, result: RunResult): string {
+function buildCardBody(
+  entry: RoutineEntry,
+  result: RunResult,
+  priority: ErrorPriority,
+): string {
   const detail = result.outcome.detail ?? "(no detail)";
   const day = result.finishedAt.slice(0, 10);
   return `**Follow the kanban-agent skill — drive this through to a MERGED PR
@@ -192,7 +198,7 @@ Repo: ${defaultRepo(entry.id)}
 Base: main
 Branch: kanban/${cardSlug(entry.id)}
 Kind: pr
-Priority: P0
+Priority: ${priority}
 North Star: north-star-lastgit-native-forge
 
 ## GOAL
@@ -257,22 +263,60 @@ function kanbanFailureDetail(res: ReturnType<typeof spawnSync>): string {
   return `kanban ${status}: ${(res.stderr || res.stdout || "").slice(0, 400)}`;
 }
 
-function fileP0Card(
+function priorityFromTags(tags: unknown): ErrorPriority | null {
+  if (!Array.isArray(tags)) return null;
+  const priorities = tags
+    .filter((tag): tag is string => typeof tag === "string")
+    .map((tag) => tag.toUpperCase())
+    .filter((tag): tag is ErrorPriority => /^(P0|P1|P2|P3)$/.test(tag));
+  return priorities.length === 1 ? priorities[0]! : null;
+}
+
+function existingCardPriority(kanban: string, slug: string): ErrorPriority | null {
+  const res = spawnSync(kanban, ["show", slug, "--json"], {
+    encoding: "utf8",
+    timeout: 60_000,
+    env: process.env,
+  });
+  if (res.error || res.status !== 0) return null;
+  try {
+    const parsed = JSON.parse(res.stdout || "null") as { tags?: unknown } | null;
+    return priorityFromTags(parsed?.tags);
+  } catch {
+    return null;
+  }
+}
+
+function resolveCardPriority(
+  entry: RoutineEntry,
+  kanban: string,
+  slug: string,
+): ErrorPriority {
+  return existingCardPriority(kanban, slug) ?? entry.errorPriority ?? DEFAULT_ERROR_PRIORITY;
+}
+
+function fileRoutineErrorCard(
   entry: RoutineEntry,
   result: RunResult,
   opts: EscalateOptions,
-): { ok: boolean; slug: string; detail: string } {
+): { ok: boolean; slug: string; priority: ErrorPriority; detail: string } {
   const slug = cardSlug(entry.id);
-  const body = buildCardBody(entry, result);
+  const kanban = opts.kanbanBin ?? process.env.ROUTINES_KANBAN_BIN ?? "kanban";
+  const priority = resolveCardPriority(entry, kanban, slug);
+  const body = buildCardBody(entry, result, priority);
   const bodyPath = join(result.runDir, "error-escalate-card-body.md");
   try {
     writeFileSync(bodyPath, body);
   } catch (err) {
-    return { ok: false, slug, detail: `write body failed: ${(err as Error).message}` };
+    return {
+      ok: false,
+      slug,
+      priority,
+      detail: `write body failed: ${(err as Error).message}`,
+    };
   }
 
-  const kanban = opts.kanbanBin ?? process.env.ROUTINES_KANBAN_BIN ?? "kanban";
-  const title = `P0: routine ${entry.id} errored (exit=${String(result.exitCode)} outcome=${result.outcome.kind})`;
+  const title = `${priority}: routine ${entry.id} errored (exit=${String(result.exitCode)} outcome=${result.outcome.kind})`;
   const args = [
     "add",
     slug,
@@ -281,7 +325,9 @@ function fileP0Card(
     "--column",
     "todo",
     "--priority",
-    "P0",
+    priority,
+    "--created-by",
+    ERROR_ESCALATE_CREATOR,
     "--repo",
     defaultRepo(entry.id),
     "--base",
@@ -289,7 +335,7 @@ function fileP0Card(
     "--kind",
     "pr",
     "--tags",
-    "routine,error,p0,agent-runnable,fleet",
+    `routine,error,${priority.toLowerCase()},agent-runnable,fleet`,
     "--north-star",
     "north-star-lastgit-native-forge",
   ];
@@ -303,7 +349,7 @@ function fileP0Card(
       env: process.env,
     });
     if (!res.error && res.status === 0) {
-      // Best-effort rank so pickup drains P0 first.
+      // Best-effort rank so pickup observes the resolved priority.
       spawnSync(kanban, ["rank", "--column", "todo"], {
         encoding: "utf8",
         timeout: 60_000,
@@ -314,6 +360,7 @@ function fileP0Card(
       return {
         ok: true,
         slug,
+        priority,
         detail: attempt === 1 ? detail : `${detail} after ${attempt} attempts`,
       };
     }
@@ -333,11 +380,17 @@ function fileP0Card(
   return {
     ok: false,
     slug,
+    priority,
     detail: `kanban add failed after ${CARD_FILE_ATTEMPTS} attempts; last: ${lastFailure}`,
   };
 }
 
-function buildTriagePrompt(entry: RoutineEntry, result: RunResult, cardSlugName: string): string {
+function buildTriagePrompt(
+  entry: RoutineEntry,
+  result: RunResult,
+  cardSlugName: string,
+  priority: ErrorPriority,
+): string {
   return `You are the **routine-error-triage** agent. A scheduled routine just
 failed. Your only job is to figure out WHY and make the failure stop recurring.
 
@@ -347,7 +400,7 @@ failed. Your only job is to figure out WHY and make the failure stop recurring.
 - run_dir: ${result.runDir}
 - exitCode: ${String(result.exitCode)} timedOut: ${String(result.timedOut)}
 - outcome: ${result.outcome.kind} (${result.outcome.source}) detail: ${result.outcome.detail ?? ""}
-- board card (P0, already filed): ${cardSlugName}
+- board card (${priority}, already filed): ${cardSlugName}
 
 ## Hard rules
 - NEVER kill/restart primary lastdbd / brew Mini / forgejo.
@@ -355,7 +408,7 @@ failed. Your only job is to figure out WHY and make the failure stop recurring.
 - Prefer a durable fix (prompt / registry / last-stack / product code) + MERGED PR
   via the correct venue (last-stack-pr-venue).
 - If you cannot fix in this session: update card ${cardSlugName} with root cause +
-  next steps; leave it P0 in todo/review as appropriate. Use result=blocked when
+  next steps; keep its existing priority and leave it in todo as appropriate. Use result=blocked when
   waiting on an external gate; use result=needs-human when Tom must decide.
 - Whenever your verdict is needs-human (or needsHuman=true), ALSO page Tom on
   Telegram — a parked card/verdict alone is not a page:
@@ -395,6 +448,7 @@ function dispatchTriageAgent(
   entry: RoutineEntry,
   result: RunResult,
   cardSlugName: string,
+  priority: ErrorPriority,
   opts: EscalateOptions,
 ): { ok: boolean; detail: string; triageDir?: string; triagePid?: number | null } {
   if (opts.dispatchAgent === false) {
@@ -409,7 +463,7 @@ function dispatchTriageAgent(
     return { ok: false, detail: `mkdir triage: ${(err as Error).message}` };
   }
 
-  const prompt = buildTriagePrompt(entry, result, cardSlugName);
+  const prompt = buildTriagePrompt(entry, result, cardSlugName, priority);
   writeFileSync(join(triageDir, "prompt.txt"), prompt);
   writeFileSync(
     join(triageDir, "meta.json"),
@@ -504,7 +558,7 @@ function dispatchTriageAgent(
 }
 
 /**
- * File a P0 card and (rate-limited) dispatch a triage agent.
+ * File a priority-classified card and (rate-limited) dispatch a triage agent.
  * Never throws. Safe to call from runner finalize.
  */
 export function escalateRoutineError(
@@ -518,7 +572,7 @@ export function escalateRoutineError(
     }
 
     // Harness-level outage (usage limit / dead auth): the harness itself is
-    // out of service, so a per-routine P0 card is board noise and a triage
+    // out of service, so a per-routine card is board noise and a triage
     // agent on the same harness cannot even start. Fence the fleet via a
     // Situation, mark needs-human, and page Tom instead.
     const outage = classifyHarnessOutage(result, {
@@ -539,7 +593,7 @@ export function escalateRoutineError(
     const cooldown = opts.agentCooldownMs ?? DEFAULT_AGENT_COOLDOWN_MS;
     const prev = readState(entry.id);
 
-    const card = fileP0Card(entry, result, opts);
+    const card = fileRoutineErrorCard(entry, result, opts);
     logLine(opts.quiet, `card ${card.slug}: ${card.ok ? "ok" : "FAIL"} ${card.detail}`);
 
     let agentDetail = "skipped";
@@ -553,7 +607,7 @@ export function escalateRoutineError(
       opts.dispatchAgent !== false && (Number.isNaN(lastAgent) || nowMs - lastAgent >= cooldown);
 
     if (allowAgent) {
-      const agent = dispatchTriageAgent(entry, result, card.slug, opts);
+      const agent = dispatchTriageAgent(entry, result, card.slug, card.priority, opts);
       agentDetail = agent.detail;
       triageDir = agent.triageDir;
       triagePid = agent.triagePid;

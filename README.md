@@ -36,6 +36,7 @@ prompt_path   = "/Users/you/.last-stack/routines/disk-reclaim.md"   # or inline 
 cwd           = "/Users/you/code/edgevector"
 status        = "active"                         # active | paused
 timeout_min   = 30
+error_priority = "P0"                            # optional; new error cards default to P3
 heartbeat_slug = "routine-heartbeats"           # optional; runs append the fleet heartbeat line
 # fallback    = "claude:sonnet,grok:grok-4.5"  # optional; overrides fleet default tail
 ```
@@ -309,14 +310,19 @@ dashboard (single-pane coordination) + the one-time `import` + cutover tooling.
 **Out of scope** (separate cards): remote/authenticated access and historical
 analytics for the dashboard, and any new routine content.
 
-## Error escalation (P0)
+## Error escalation
 
 When a run ends with **non-zero exit**, **timeout**, or **outcome=error**,
 `routinesd` automatically:
 
-1. Upserts a **P0** kanban card `routine-error-<id>` with the run dir evidence
+1. Upserts a priority-classified kanban card `routine-error-<id>` with the run
+   dir evidence. New cards default to **P3** unless the registry explicitly sets
+   `error_priority = "P0"` (or P1/P2). Once a human changes an existing card's
+   priority, later failures preserve that priority instead of promoting it.
 2. Dispatches a one-shot **triage agent** (same harness/model; 30m cooldown per id)
    that investigates `~/.routines/runs/<id>/…` and either fixes or updates the card
+
+New cards are attributed to `routine:routinesd-error-escalate`.
 
 Disable with `ROUTINES_ERROR_ESCALATE=0`. The triage runner id
 `routine-error-triage` is never re-escalated (no loops).
