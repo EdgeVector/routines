@@ -142,6 +142,29 @@ describe("daemon evaluateOnce", () => {
     expect(existsSync(join(home, "error-escalate"))).toBe(false);
   });
 
+  test("first successful manual run bootstraps empty routine status", async () => {
+    process.env.ROUTINES_CLAUDE_BIN = stub(
+      join(home, "manual-smoke-harness"),
+      '#!/bin/sh\nprintf \'%s\\n\' \'manual-smoke noop production-smoke-safe\'\nexit 0\n',
+    );
+    writeRoutine("manual-smoke", "claude");
+
+    const result = await runRoutine(loadEntry("manual-smoke"), {
+      quiet: true,
+      trigger: "manual",
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.outcome.kind).toBe("noop");
+    expect(readState("manual-smoke")).toMatchObject({
+      lastRun: result.finishedAt,
+      lastExit: 0,
+      lastRunDir: result.runDir,
+      lastOutcome: "noop",
+      lastOutcomeDetail: "production-smoke-safe",
+    });
+  });
+
   test("cron warm-up: a fresh routine with no catch-up does not fire on first sight", () => {
     writeRoutine("warm", "claude");
     const entry = loadEntry("warm");

@@ -35,7 +35,7 @@ import { buildRoutineAttributionEnv, resolveDispatchPrompt } from "./prompt.ts";
 import { runsDir } from "./paths.ts";
 import { writeHeartbeat, type HeartbeatOutcome } from "./heartbeat.ts";
 import { filterBenignHarnessNoise, parseOutcome, type RunOutcome } from "./outcome.ts";
-import { patchState } from "./state.ts";
+import { patchState, readState } from "./state.ts";
 import { envFromProjectConfig, loadProjectConfig, resolveRoutineCwd } from "./project-config.ts";
 import { discoveredRoutineSocketEnv } from "./socket-env.ts";
 import { escalateRoutineError, shouldAutoEscalateScheduledRun, shouldEscalate } from "./error-escalate.ts";
@@ -455,7 +455,14 @@ function runOnce(
         ) + "\n",
       );
 
-      if (trigger === "scheduled") {
+      // Scheduled fires always own fleet health. A successful first manual run
+      // may bootstrap an empty status record so a newly installed routine does
+      // not remain lastRun=null after an explicit production smoke test. Once
+      // scheduled health exists, manual runs never overwrite it (especially a
+      // caller-local failure).
+      const bootstrapManualStatus =
+        trigger === "manual" && result.exitCode === 0 && !readState(entry.id).lastRun;
+      if (trigger === "scheduled" || bootstrapManualStatus) {
         patchState(entry.id, {
           lastRun: result.finishedAt,
           lastExit: result.exitCode,

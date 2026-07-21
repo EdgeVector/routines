@@ -34,6 +34,38 @@ ROUTINE_RESULT outcome=noop actions=0 detail=queue empty
     expect(o.detail).toContain("queue empty");
   });
 
+  test("classifies a natural Outcome: noop line in Claude stream-json final text", () => {
+    const text = JSON.stringify({
+      type: "result",
+      subtype: "success",
+      is_error: false,
+      result:
+        "One milestone-driver pass complete — no board mutations made.\n\nOutcome: `noop` — grooming defect not safely repairable this run.",
+    });
+    const o = parseOutcome("last-stack-milestone-driver", text, { exitCode: 0 });
+    expect(o.kind).toBe("noop");
+    expect(o.source).toBe("routine_result");
+    expect(o.detail).toContain("grooming defect");
+  });
+
+  test("ignores Outcome: examples inside tool-result stream-json", () => {
+    const text =
+      JSON.stringify({
+        type: "user",
+        message: { content: "historical card says Outcome: noop — old run" },
+      }) +
+      "\n" +
+      JSON.stringify({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        result: "Current run finished without an explicit outcome.",
+      });
+    const o = parseOutcome("last-stack-milestone-driver", text, { exitCode: 0 });
+    expect(o.kind).toBe("ok");
+    expect(o.detail).toContain("Current run finished");
+  });
+
   test("ignores ROUTINE_RESULT examples embedded in stream-json content", () => {
     const text =
       '{"type":"user","message":{"content":"prompt example: ROUTINE_RESULT outcome=ok detail=bites=<n> cards=<n>"}}\n' +
