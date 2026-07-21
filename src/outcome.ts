@@ -141,6 +141,15 @@ const RESULT_COLON_RE =
   /^[^\S\r\n]*RESULT:\s*(ok|noop|error)\b([^\n\r]*)/gim;
 
 /**
+ * Natural-language final line emitted by bounded routines when they omit the
+ * stronger ROUTINE_RESULT trailer. Claude stream-json keeps embedded newlines
+ * escaped inside its JSON result string, so accept either a real newline or
+ * the literal `\\n` boundary. Tool-result JSON lines are removed first.
+ */
+const OUTCOME_COLON_RE =
+  /(?:^|[\n\r]|\\n)[^\S\r\n]*Outcome:\s*`?(ok|noop|error)`?\b([^\\\n\r"]*)/gim;
+
+/**
  * Heartbeat-style lines, including:
  *   groom-board 2026-07-13T12:34:00Z ok closed-review-1
  *   kanban-pickup 2026-07-13T13:06:03Z noop cards=0
@@ -277,6 +286,21 @@ export function parseOutcome(
       detail: rest || null,
       source: "routine_result",
       score: 95,
+      index: m.index ?? 0,
+      tsMs: null,
+    });
+  }
+
+  for (const m of ownText.matchAll(OUTCOME_COLON_RE)) {
+    const kind = asKind(m[1]!);
+    if (!kind) continue;
+    const rest = clip(m[2] ?? "");
+    if (isPromptFixtureDetail(rest)) continue;
+    candidates.push({
+      kind,
+      detail: rest || null,
+      source: "routine_result",
+      score: 94,
       index: m.index ?? 0,
       tsMs: null,
     });
