@@ -1,7 +1,7 @@
 // Minimal TOML reader for routine registry files.
 //
 // The registry format is deliberately flat (id, prompt_path, harness, model,
-// effort, rrule, cwd, status, timeout_min, heartbeat_slug) — a handful of
+// effort, rrule, cwd, status, timeout_min, error_priority, heartbeat_slug) — a handful of
 // scalar key = value pairs. We parse exactly that subset so the app carries no
 // runtime npm dependency (the LastGit CI gate clones fresh and does NOT run
 // `bun install`, so every runtime import must resolve to a node builtin or a

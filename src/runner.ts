@@ -212,7 +212,7 @@ export async function runRoutine(entry: RoutineEntry, opts: RunOptions = {}): Pr
       }
 
       if (!hasMore) {
-        // Outage path already suppressed P0 cards; skip escalateRoutineError.
+        // Outage path already suppressed per-routine cards; skip escalateRoutineError.
         return last;
       }
 

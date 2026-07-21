@@ -15,6 +15,8 @@ import { parseToml, type TomlValue } from "./toml.ts";
 export const HARNESSES = ["claude", "codex", "grok"] as const;
 export type Harness = (typeof HARNESSES)[number];
 export type Status = "active" | "paused";
+export const ERROR_PRIORITIES = ["P0", "P1", "P2", "P3"] as const;
+export type ErrorPriority = (typeof ERROR_PRIORITIES)[number];
 
 export function isHarness(value: string): value is Harness {
   return (HARNESSES as readonly string[]).includes(value);
@@ -34,6 +36,8 @@ export interface RoutineEntry {
   cwd: string;
   status: Status;
   timeoutMin: number;
+  /** Priority for a newly filed routine-error card. Defaults to P3. */
+  errorPriority?: ErrorPriority;
   heartbeatSlug?: string;
   /**
    * Optional dashboard group override (`board` | `brain` | `dogfood` | …).
@@ -70,6 +74,7 @@ const KNOWN_KEYS = new Set([
   "cwd",
   "status",
   "timeout_min",
+  "error_priority",
   "heartbeat_slug",
   "group",
   "fallback",
@@ -131,6 +136,17 @@ export function parseEntry(text: string, sourcePath: string): RoutineEntry {
     throw new RegistryError(`invalid timeout_min ${timeoutMin}`, sourcePath);
   }
 
+  const errorPriorityRaw = str(raw, "error_priority", sourcePath);
+  if (
+    errorPriorityRaw !== undefined &&
+    !(ERROR_PRIORITIES as readonly string[]).includes(errorPriorityRaw)
+  ) {
+    throw new RegistryError(
+      `invalid error_priority ${JSON.stringify(errorPriorityRaw)} (${ERROR_PRIORITIES.join("|")})`,
+      sourcePath,
+    );
+  }
+
   const group = str(raw, "group", sourcePath);
   if (group !== undefined) {
     // Lazy import avoided: validate against a fixed set here so registry
@@ -170,6 +186,7 @@ export function parseEntry(text: string, sourcePath: string): RoutineEntry {
   if (effort) entry.effort = effort;
   const heartbeatSlug = str(raw, "heartbeat_slug", sourcePath);
   if (heartbeatSlug) entry.heartbeatSlug = heartbeatSlug;
+  if (errorPriorityRaw) entry.errorPriority = errorPriorityRaw as ErrorPriority;
   if (group) entry.group = group;
   const fallback = str(raw, "fallback", sourcePath);
   if (fallback) entry.fallback = fallback;

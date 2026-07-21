@@ -369,7 +369,7 @@ export function resolveEscalateStatus(runDir: string): EscalateStatus | null {
         needsHumanReason ??
         (cardDetail
           ? `board card not filed: ${cardDetail}`
-          : "board card failed to file — no P0 on kanban");
+          : "board card failed to file — no escalation card on kanban");
     }
 
     if (triageStatus === "blocked" || triageStatus === "needs-human") {
