@@ -19,6 +19,8 @@ const CODEX_LIMIT_LINE =
   "ERROR: You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at Jul 22nd, 2026 10:00 PM.";
 const CODEX_CAPACITY_LINE =
   "ERROR: Selected model is at capacity. Please try a different model.";
+const CLAUDE_API_DISCONNECT_LINE =
+  '{"type":"message","content":[{"type":"text","text":"API Error: Connection closed mid-response. The response above may be incomplete."}],"error":"server_error"}';
 
 let home: string;
 const prevHome = process.env.ROUTINES_HOME;
@@ -133,6 +135,12 @@ describe("classifyHarnessOutage", () => {
   test("invalid api key classifies as auth", () => {
     const out = classifyHarnessOutage(result("Error: invalid API key provided"));
     expect(out?.kind).toBe("auth");
+  });
+
+  test("claude api disconnect classifies as transient", () => {
+    const out = classifyHarnessOutage(result(CLAUDE_API_DISCONNECT_LINE));
+    expect(out?.kind).toBe("transient");
+    expect(out?.evidence).toContain("Connection closed mid-response");
   });
 
   test("ordinary failure is not an outage", () => {
