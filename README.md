@@ -313,16 +313,20 @@ analytics for the dashboard, and any new routine content.
 ## Error escalation
 
 When a run ends with **non-zero exit**, **timeout**, or **outcome=error**,
-`routinesd` automatically:
+`routinesd` resolves the priority once, preserving a human-set priority on an
+existing card ahead of registry/default policy, then uses exactly one route:
 
-1. Upserts a priority-classified kanban card `routine-error-<id>` with the run
-   dir evidence. New cards default to **P3** unless the registry explicitly sets
-   `error_priority = "P0"` (or P1/P2). Once a human changes an existing card's
-   priority, later failures preserve that priority instead of promoting it.
-2. Dispatches a one-shot **triage agent** (same harness/model; 30m cooldown per id)
-   that investigates `~/.routines/runs/<id>/…` and either fixes or updates the card
+1. **P0:** upsert `routine-error-<id>` on Kanban and dispatch a one-shot triage
+   agent (same harness/model; 30m cooldown per id). Cards are attributed to
+   `routine:routinesd-error-escalate`.
+2. **P1/P2/P3:** append the failure evidence and a stable cross-routine
+   signature to the single Brain reference
+   `papercut-routine-non-p0-failures`. No Kanban card is created and no
+   immediate triage agent is dispatched, so Brain grooming can consolidate
+   overlapping papercuts into systemic fixes.
 
-New cards are attributed to `routine:routinesd-error-escalate`.
+New failures default to **P3**. A truly critical routine must explicitly set
+`error_priority = "P0"` in its registry entry.
 
 Disable with `ROUTINES_ERROR_ESCALATE=0`. The triage runner id
 `routine-error-triage` is never re-escalated (no loops).

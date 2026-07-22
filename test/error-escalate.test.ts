@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -17,7 +17,10 @@ let home: string;
 const prevHome = process.env.ROUTINES_HOME;
 const prevEsc = process.env.ROUTINES_ERROR_ESCALATE;
 
-function entry(id = "last-stack-disk-reclaim"): RoutineEntry {
+function entry(
+  id = "last-stack-disk-reclaim",
+  errorPriority: RoutineEntry["errorPriority"] = "P0",
+): RoutineEntry {
   return {
     id,
     harness: "codex",
@@ -27,6 +30,7 @@ function entry(id = "last-stack-disk-reclaim"): RoutineEntry {
     cwd: home,
     status: "active",
     timeoutMin: 30,
+    errorPriority,
     sourcePath: join(home, "registry", `${id}.toml`),
   };
 }
@@ -159,37 +163,62 @@ describe("shouldEscalate", () => {
 });
 
 describe("escalateRoutineError", () => {
-  test("new routine failures default to P3 and carry routinesd creator attribution", () => {
+  test("new routine failures default to P3 and append to Brain without a Kanban write", () => {
     const stubDir = join(home, "bin");
     mkdirSync(stubDir, { recursive: true });
-    const stub = join(stubDir, "kanban-stub");
-    const argsFile = join(stubDir, "args");
-    const bodyFile = join(stubDir, "body");
+    const kanbanStub = join(stubDir, "kanban-stub");
+    const kanbanArgsFile = join(stubDir, "kanban-args");
+    const brainStub = join(stubDir, "brain-stub");
+    const brainArgsFile = join(stubDir, "brain-args");
+    const brainBodyFile = join(stubDir, "brain-body");
     writeFileSync(
-      stub,
+      kanbanStub,
       `#!/usr/bin/env bash
 set -euo pipefail
+printf '%s\n' "$@" >> ${JSON.stringify(kanbanArgsFile)}
 if [ "\${1:-}" = "show" ]; then exit 1; fi
-if [ "\${1:-}" = "rank" ]; then exit 0; fi
-printf '%s\n' "$@" > ${JSON.stringify(argsFile)}
-cat > ${JSON.stringify(bodyFile)}
-echo "created card $2"
+echo "unexpected Kanban write" >&2
+exit 97
 `,
     );
-    spawnSyncchmod(stub);
+    writeFileSync(
+      brainStub,
+      `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$@" > ${JSON.stringify(brainArgsFile)}
+cat > ${JSON.stringify(brainBodyFile)}
+echo "appended papercut"
+`,
+    );
+    spawnSyncchmod(kanbanStub);
+    spawnSyncchmod(brainStub);
 
     const r = result({ exitCode: 1 });
-    const out = escalateRoutineError(entry(), r, {
-      kanbanBin: stub,
+    const out = escalateRoutineError({ ...entry(), errorPriority: undefined }, r, {
+      kanbanBin: kanbanStub,
+      brainBin: brainStub,
       dispatchAgent: false,
       quiet: true,
     });
 
     expect(out.escalated).toBe(true);
-    const args = readFileSync(argsFile, "utf8").split("\n");
-    expect(args).toContain("P3");
-    expect(args).toContain("routine:routinesd-error-escalate");
-    expect(readFileSync(bodyFile, "utf8")).toContain("Priority: P3");
+    expect(out.cardSlug).toBeUndefined();
+    expect(readFileSync(kanbanArgsFile, "utf8").trim()).toBe(
+      "show\nroutine-error-last-stack-disk-reclaim\n--json",
+    );
+    expect(readFileSync(brainArgsFile, "utf8").split("\n")).toEqual(
+      expect.arrayContaining(["append", "papercut-routine-non-p0-failures", "reference"]),
+    );
+    const body = readFileSync(brainBodyFile, "utf8");
+    expect(body).toContain("priority: P3");
+    expect(body).toContain("signature:");
+    expect(body).toContain("routine:routinesd-error-escalate");
+    const breadcrumb = JSON.parse(
+      readFileSync(join(r.runDir, "error-escalated.json"), "utf8"),
+    );
+    expect(breadcrumb.cardSlug).toBeNull();
+    expect(breadcrumb.brainSlug).toBe("papercut-routine-non-p0-failures");
+    expect(breadcrumb.agentDispatched).toBe(false);
   });
 
   test("registry can opt a critical routine into P0", () => {
@@ -197,6 +226,7 @@ echo "created card $2"
     mkdirSync(stubDir, { recursive: true });
     const stub = join(stubDir, "kanban-stub");
     const argsFile = join(stubDir, "args");
+    const brainStub = join(stubDir, "brain-stub");
     writeFileSync(
       stub,
       `#!/usr/bin/env bash
@@ -208,22 +238,76 @@ echo ok
 `,
     );
     spawnSyncchmod(stub);
+    writeFileSync(brainStub, "#!/usr/bin/env bash\necho unexpected >&2\nexit 98\n");
+    spawnSyncchmod(brainStub);
 
     const out = escalateRoutineError(
       { ...entry("backup-restore-probe"), errorPriority: "P0" },
       result({ id: "backup-restore-probe", exitCode: 1 }),
-      { kanbanBin: stub, dispatchAgent: false, quiet: true },
+      { kanbanBin: stub, brainBin: brainStub, dispatchAgent: false, quiet: true },
     );
 
     expect(out.escalated).toBe(true);
     expect(readFileSync(argsFile, "utf8").split("\n")).toContain("P0");
   });
 
-  test("existing human-set priority wins over registry and default", () => {
+  test("creates the consolidated Brain inbox when the first append finds no record", () => {
+    const stubDir = join(home, "bin");
+    mkdirSync(stubDir, { recursive: true });
+    const kanbanStub = join(stubDir, "kanban-stub");
+    const brainStub = join(stubDir, "brain-stub");
+    const brainCalls = join(stubDir, "brain-calls");
+    const putBody = join(stubDir, "put-body");
+    writeFileSync(kanbanStub, "#!/usr/bin/env bash\nexit 1\n");
+    writeFileSync(
+      brainStub,
+      `#!/usr/bin/env bash
+printf '%s\n' "$1" >> ${JSON.stringify(brainCalls)}
+if [ "$1" = "append" ]; then
+  echo "record not found" >&2
+  exit 1
+fi
+if [ "$1" = "put" ]; then
+  cat > ${JSON.stringify(putBody)}
+  echo created
+  exit 0
+fi
+exit 2
+`,
+    );
+    spawnSyncchmod(kanbanStub);
+    spawnSyncchmod(brainStub);
+
+    const out = escalateRoutineError(
+      { ...entry(), errorPriority: undefined },
+      result({ exitCode: 1 }),
+      {
+        kanbanBin: kanbanStub,
+        brainBin: brainStub,
+        dispatchAgent: false,
+        quiet: true,
+      },
+    );
+
+    expect(out.detail).toContain("papercut-recorded");
+    expect(readFileSync(brainCalls, "utf8").trim().split("\n")).toEqual([
+      "append",
+      "put",
+    ]);
+    const body = readFileSync(putBody, "utf8");
+    expect(body).toContain("type: reference");
+    expect(body).toContain("slug: papercut-routine-non-p0-failures");
+    expect(body).toContain("Status: OPEN");
+    expect(body).toContain("priority: P3");
+  });
+
+  test("existing human-set non-P0 priority wins and routes to Brain", () => {
     const stubDir = join(home, "bin");
     mkdirSync(stubDir, { recursive: true });
     const stub = join(stubDir, "kanban-stub");
     const argsFile = join(stubDir, "args");
+    const brainStub = join(stubDir, "brain-stub");
+    const brainBodyFile = join(stubDir, "brain-body");
     writeFileSync(
       stub,
       `#!/usr/bin/env bash
@@ -231,22 +315,30 @@ if [ "\${1:-}" = "show" ]; then
   echo '{"tags":["routine","error","p2"]}'
   exit 0
 fi
-if [ "\${1:-}" = "rank" ]; then exit 0; fi
 printf '%s\n' "$@" > ${JSON.stringify(argsFile)}
-cat >/dev/null
-echo ok
+exit 97
 `,
     );
     spawnSyncchmod(stub);
+    writeFileSync(
+      brainStub,
+      `#!/usr/bin/env bash
+cat > ${JSON.stringify(brainBodyFile)}
+echo ok
+`,
+    );
+    spawnSyncchmod(brainStub);
 
     const out = escalateRoutineError(
       { ...entry(), errorPriority: "P0" },
       result({ exitCode: 1 }),
-      { kanbanBin: stub, dispatchAgent: false, quiet: true },
+      { kanbanBin: stub, brainBin: brainStub, dispatchAgent: false, quiet: true },
     );
 
     expect(out.escalated).toBe(true);
-    expect(readFileSync(argsFile, "utf8").split("\n")).toContain("P2");
+    expect(out.cardSlug).toBeUndefined();
+    expect(existsSync(argsFile)).toBe(false);
+    expect(readFileSync(brainBodyFile, "utf8")).toContain("priority: P2");
   });
 
   test("files card via stub kanban and writes state", () => {

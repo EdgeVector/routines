@@ -5,11 +5,9 @@
 // important."
 //
 // On hard failure (non-zero exit / timeout / spawn failure) or soft
-// outcome=error (agent heartbeat), we:
-//   1. Upsert a priority-classified kanban card with run evidence
-//   2. Fire a one-shot triage harness agent (async, never blocks the
-//      completing run) that investigates the run dir and either fixes or
-//      tightens the card.
+// outcome=error (agent heartbeat), we resolve priority once and route it:
+//   - P0: upsert a Kanban card and fire bounded immediate triage.
+//   - P1/P2/P3: append evidence to one consolidated Brain papercut inbox.
 //
 // Recursion / spam guards:
 //   - Never escalate the triage runner itself
@@ -18,6 +16,7 @@
 //   - Never throw out of escalate paths (scheduler must not die)
 
 import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
@@ -46,13 +45,15 @@ const CARD_FILE_ATTEMPTS = 3;
 const CARD_RETRY_DELAY_MS = 250;
 const DEFAULT_ERROR_PRIORITY: ErrorPriority = "P3";
 const ERROR_ESCALATE_CREATOR = "routine:routinesd-error-escalate";
+const ROUTINE_PAPERCUT_SLUG = "papercut-routine-non-p0-failures";
 /** Card upsert always; agent spawn is rate-limited. */
 const STATE_DIR_NAME = "error-escalate";
 
 export interface EscalateState {
   lastEscalatedAt: string;
   lastRunDir: string;
-  lastCardSlug: string;
+  lastCardSlug?: string;
+  lastBrainSlug?: string;
   lastAgentDispatchedAt?: string;
   lastExit?: number | null;
   lastOutcome?: string;
@@ -66,6 +67,8 @@ export interface EscalateOptions {
   dispatchAgent?: boolean;
   /** Override kanban binary (tests). */
   kanbanBin?: string;
+  /** Override brain binary (tests). */
+  brainBin?: string;
   /** Override retry delay for tests. */
   cardRetryDelayMs?: number;
   /** Suppress console noise. */
@@ -298,11 +301,11 @@ function resolveCardPriority(
 function fileRoutineErrorCard(
   entry: RoutineEntry,
   result: RunResult,
+  priority: ErrorPriority,
   opts: EscalateOptions,
 ): { ok: boolean; slug: string; priority: ErrorPriority; detail: string } {
   const slug = cardSlug(entry.id);
   const kanban = opts.kanbanBin ?? process.env.ROUTINES_KANBAN_BIN ?? "kanban";
-  const priority = resolveCardPriority(entry, kanban, slug);
   const body = buildCardBody(entry, result, priority);
   const bodyPath = join(result.runDir, "error-escalate-card-body.md");
   try {
@@ -382,6 +385,138 @@ function fileRoutineErrorCard(
     slug,
     priority,
     detail: `kanban add failed after ${CARD_FILE_ATTEMPTS} attempts; last: ${lastFailure}`,
+  };
+}
+
+function normalizedFailureDetail(result: RunResult): string {
+  return (result.outcome.detail ?? "no-detail")
+    .toLowerCase()
+    .replace(/\b\d{4}-\d{2}-\d{2}t\d{2}:\d{2}:\d{2}(?:\.\d+)?z\b/g, "<timestamp>")
+    .replace(/\/[\w./-]+/g, "<path>")
+    .replace(/\b\d+\b/g, "<n>")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 400);
+}
+
+function failureSignature(result: RunResult): string {
+  const material = [
+    result.outcome.kind,
+    result.outcome.source,
+    String(result.exitCode),
+    String(result.timedOut),
+    normalizedFailureDetail(result),
+  ].join("|");
+  return createHash("sha256").update(material).digest("hex").slice(0, 16);
+}
+
+function buildPapercutEntry(
+  entry: RoutineEntry,
+  result: RunResult,
+  priority: ErrorPriority,
+): string {
+  return `## ${result.finishedAt} — ${entry.id}
+
+- priority: ${priority}
+- signature: \`${failureSignature(result)}\`
+- routine: \`${entry.id}\`
+- harness/model: \`${entry.harness}/${entry.model}\`
+- exitCode: \`${String(result.exitCode)}\` timedOut=\`${String(result.timedOut)}\`
+- outcome: \`${result.outcome.kind}\` source=\`${result.outcome.source}\`
+- detail: ${result.outcome.detail ?? "(no detail)"}
+- run_dir: \`${result.runDir}\`
+- filed_by: \`${ERROR_ESCALATE_CREATOR}\`
+`;
+}
+
+function brainFailureDetail(res: ReturnType<typeof spawnSync>): string {
+  if (res.error) return `brain spawn: ${res.error.message}`;
+  const status =
+    res.status === null ? `signal ${res.signal ?? "unknown"}` : `exit ${res.status}`;
+  return `brain ${status}: ${(res.stderr || res.stdout || "").slice(0, 400)}`;
+}
+
+function isMissingBrainRecord(res: ReturnType<typeof spawnSync>): boolean {
+  return /(?:not found|no (?:such )?record|missing record)/i.test(
+    `${res.stderr || ""}\n${res.stdout || ""}`,
+  );
+}
+
+function appendRoutineFailurePapercut(
+  entry: RoutineEntry,
+  result: RunResult,
+  priority: ErrorPriority,
+  opts: EscalateOptions,
+): { ok: boolean; slug: string; detail: string } {
+  const brain = opts.brainBin ?? process.env.ROUTINES_BRAIN_BIN ?? "brain";
+  const entryBody = buildPapercutEntry(entry, result, priority);
+  const initialBody = `---
+type: reference
+slug: ${ROUTINE_PAPERCUT_SLUG}
+title: Routine papercut inbox — consolidated non-P0 failures
+tags: papercut, routines, automation
+---
+
+# Routine papercut inbox — consolidated non-P0 failures
+
+Status: OPEN
+
+Append-only evidence from routinesd. Stable signatures intentionally omit the
+routine id so equivalent symptoms across routines can be clustered into one
+systemic fix by Brain grooming.
+
+${entryBody}`;
+
+  let lastFailure = "unknown failure";
+  for (let attempt = 1; attempt <= CARD_FILE_ATTEMPTS; attempt += 1) {
+    const append = spawnSync(
+      brain,
+      ["append", ROUTINE_PAPERCUT_SLUG, "--type", "reference"],
+      { input: entryBody, encoding: "utf8", timeout: 60_000, env: process.env },
+    );
+    if (!append.error && append.status === 0) {
+      const detail = (append.stdout || "").trim() || "papercut appended";
+      return {
+        ok: true,
+        slug: ROUTINE_PAPERCUT_SLUG,
+        detail: attempt === 1 ? detail : `${detail} after ${attempt} attempts`,
+      };
+    }
+
+    if (isMissingBrainRecord(append)) {
+      const create = spawnSync(brain, ["put"], {
+        input: initialBody,
+        encoding: "utf8",
+        timeout: 60_000,
+        env: process.env,
+      });
+      if (!create.error && create.status === 0) {
+        return {
+          ok: true,
+          slug: ROUTINE_PAPERCUT_SLUG,
+          detail: (create.stdout || "").trim() || "papercut inbox created",
+        };
+      }
+      lastFailure = brainFailureDetail(create);
+    } else {
+      lastFailure = brainFailureDetail(append);
+    }
+
+    if (attempt < CARD_FILE_ATTEMPTS) {
+      logLine(
+        opts.quiet,
+        `brain papercut attempt ${attempt}/${CARD_FILE_ATTEMPTS} failed: ${lastFailure}; retrying`,
+      );
+      const baseDelay = opts.cardRetryDelayMs ?? CARD_RETRY_DELAY_MS;
+      const jitter = opts.nowMs === undefined ? Math.floor(Math.random() * 100) : 0;
+      sleepSync(baseDelay * attempt + jitter);
+    }
+  }
+
+  return {
+    ok: false,
+    slug: ROUTINE_PAPERCUT_SLUG,
+    detail: `brain append failed after ${CARD_FILE_ATTEMPTS} attempts; last: ${lastFailure}`,
   };
 }
 
@@ -557,10 +692,7 @@ function dispatchTriageAgent(
   }
 }
 
-/**
- * File a priority-classified card and (rate-limited) dispatch a triage agent.
- * Never throws. Safe to call from runner finalize.
- */
+/** Route P0 to Kanban + triage and every non-P0 to the Brain papercut inbox. */
 export function escalateRoutineError(
   entry: RoutineEntry,
   result: RunResult,
@@ -592,8 +724,61 @@ export function escalateRoutineError(
     const nowMs = opts.nowMs ?? Date.now();
     const cooldown = opts.agentCooldownMs ?? DEFAULT_AGENT_COOLDOWN_MS;
     const prev = readState(entry.id);
+    const slug = cardSlug(entry.id);
+    const kanban = opts.kanbanBin ?? process.env.ROUTINES_KANBAN_BIN ?? "kanban";
+    const priority = resolveCardPriority(entry, kanban, slug);
 
-    const card = fileRoutineErrorCard(entry, result, opts);
+    if (priority !== "P0") {
+      const papercut = appendRoutineFailurePapercut(entry, result, priority, opts);
+      logLine(
+        opts.quiet,
+        `brain ${papercut.slug}: ${papercut.ok ? "ok" : "FAIL"} ${papercut.detail}`,
+      );
+
+      const st: EscalateState = {
+        lastEscalatedAt: new Date(nowMs).toISOString(),
+        lastRunDir: result.runDir,
+        lastBrainSlug: papercut.slug,
+        lastExit: result.exitCode,
+        lastOutcome: result.outcome.kind,
+        lastAgentDispatchedAt: prev?.lastAgentDispatchedAt,
+      };
+      writeState(entry.id, st);
+
+      try {
+        writeFileSync(
+          join(result.runDir, "error-escalated.json"),
+          JSON.stringify(
+            {
+              at: st.lastEscalatedAt,
+              cardSlug: null,
+              cardOk: null,
+              cardDetail: null,
+              brainSlug: papercut.slug,
+              brainOk: papercut.ok,
+              brainDetail: papercut.ok ? null : papercut.detail,
+              agent: "not dispatched for non-P0 failure",
+              agentDispatched: false,
+              triageDir: null,
+              triagePid: null,
+            },
+            null,
+            2,
+          ) + "\n",
+        );
+      } catch {
+        /* ignore */
+      }
+
+      return {
+        escalated: true,
+        detail: papercut.ok
+          ? `papercut-recorded: ${papercut.slug}`
+          : `papercut-failed: ${papercut.detail}`,
+      };
+    }
+
+    const card = fileRoutineErrorCard(entry, result, priority, opts);
     logLine(opts.quiet, `card ${card.slug}: ${card.ok ? "ok" : "FAIL"} ${card.detail}`);
 
     let agentDetail = "skipped";
