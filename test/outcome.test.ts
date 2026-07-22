@@ -301,10 +301,31 @@ tokens used
     expect(o.detail).toBe("codex-capacity no_card_claimed");
   });
 
+  test("classifies pre-claim harness transient disconnect as safe noop", () => {
+    const text = `
+{"type":"message","content":[{"type":"text","text":"API Error: Connection closed mid-response. The response above may be incomplete."}],"error":"server_error"}
+{"type":"result","is_error":true,"terminal_reason":"api_error"}
+`;
+    const o = parseOutcome("backup-restore-probe", text, { exitCode: 1 });
+    expect(o.kind).toBe("noop");
+    expect(o.source).toBe("safe_skip");
+    expect(o.detail).toBe("harness-transient no_card_claimed");
+  });
+
   test("does not mask Codex capacity after visible claim evidence", () => {
     const text = `
 {"claimed":true,"reason":"claimed","card":{"slug":"some-card"}}
 ERROR: Selected model is at capacity. Please try a different model.
+`;
+    const o = parseOutcome("last-stack-fkanban-pickup-w3", text, { exitCode: 1 });
+    expect(o.kind).toBe("error");
+    expect(o.source).toBe("exit");
+  });
+
+  test("does not mask harness transient after visible claim evidence", () => {
+    const text = `
+claimed=true worked=some-card
+API Error: Connection closed mid-response. The response above may be incomplete.
 `;
     const o = parseOutcome("last-stack-fkanban-pickup-w3", text, { exitCode: 1 });
     expect(o.kind).toBe("error");

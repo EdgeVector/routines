@@ -29,7 +29,7 @@ import { loadAll, type RoutineEntry } from "./registry.ts";
 import { routinesHome } from "./paths.ts";
 import type { RunResult } from "./runner.ts";
 
-export type HarnessOutageKind = "usage-limit" | "capacity" | "auth";
+export type HarnessOutageKind = "usage-limit" | "capacity" | "auth" | "transient";
 
 export interface HarnessOutage {
   kind: HarnessOutageKind;
@@ -105,6 +105,10 @@ const AUTH_PATTERNS: RegExp[] = [
   /401 unauthorized/i,
 ];
 
+const TRANSIENT_PATTERNS: RegExp[] = [
+  /API Error:\s*Connection closed mid-response/i,
+];
+
 function readTail(path: string): string {
   try {
     if (!existsSync(path)) return "";
@@ -130,6 +134,7 @@ function matchLine(text: string, patterns: RegExp[]): string | null {
       if (!re.test(line)) continue;
       let score = 1;
       if (/^ERROR:/i.test(line)) score += 5;
+      if (/API Error:\s*Connection closed mid-response/i.test(line)) score += 5;
       if (/\b(ERROR|error)\b/.test(line) && line.length < 240) score += 2;
       // Demote Situation / JSON / card-body echoes.
       if (/"summary"\s*:/.test(line) || /"preflight_message"\s*:/.test(line)) score -= 10;
@@ -178,12 +183,14 @@ export function classifyHarnessOutage(
   const usage = matchLine(corpus, USAGE_LIMIT_PATTERNS);
   const capacity = usage ? null : matchLine(corpus, CAPACITY_PATTERNS);
   const auth = usage || capacity ? null : matchLine(corpus, AUTH_PATTERNS);
-  const evidence = usage ?? capacity ?? auth;
+  const transient =
+    usage || capacity || auth ? null : matchLine(corpus, TRANSIENT_PATTERNS);
+  const evidence = usage ?? capacity ?? auth ?? transient;
   if (!evidence) return null;
 
   const { hint, iso } = parseResetHint(corpus, nowMs);
   return {
-    kind: usage ? "usage-limit" : capacity ? "capacity" : "auth",
+    kind: usage ? "usage-limit" : capacity ? "capacity" : auth ? "auth" : "transient",
     evidence,
     resetHint: hint,
     resetAt: iso,

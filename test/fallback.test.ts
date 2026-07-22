@@ -17,6 +17,8 @@ import type { RoutineEntry } from "../src/registry.ts";
 
 const CODEX_LIMIT =
   "ERROR: You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at Jul 22nd, 2026 10:00 PM.";
+const CLAUDE_API_DISCONNECT =
+  '{"type":"message","content":[{"type":"text","text":"API Error: Connection closed mid-response. The response above may be incomplete."}],"error":"server_error"}';
 
 let home: string;
 const savedEnv = { ...process.env };
@@ -225,6 +227,57 @@ describe("runRoutine same-run fallback", () => {
 
     // Codex marked outaged for next fire
     expect(isHarnessOutaged("codex")).toBe(true);
+  });
+
+  test("claude api disconnect falls back to grok success", async () => {
+    process.env.ROUTINES_CLAUDE_BIN = stub(
+      join(home, "claude-bin"),
+      [
+        "#!/bin/sh",
+        `printf '%s\\n' ${JSON.stringify(CLAUDE_API_DISCONNECT)}`,
+        "exit 1",
+        "",
+      ].join("\n"),
+    );
+    process.env.ROUTINES_GROK_BIN = stub(
+      join(home, "grok-bin"),
+      [
+        "#!/bin/sh",
+        "printf '%s\\n' 'backup-restore-probe 2026-07-21T14:00:00Z ok GREEN findings=0'",
+        "exit 0",
+        "",
+      ].join("\n"),
+    );
+
+    writeFileSync(
+      join(home, "registry", "backup-restore-probe.toml"),
+      [
+        'harness = "claude"',
+        'model = "sonnet"',
+        'rrule = "FREQ=DAILY"',
+        'prompt = "hello"',
+        "timeout_min = 0.5",
+      ].join("\n") + "\n",
+    );
+
+    process.env.ROUTINES_SITUATIONS_CLI = stub(join(home, "sit"), "#!/bin/sh\nexit 0\n");
+    process.env.ROUTINES_RA_BIN = stub(join(home, "ra"), "#!/bin/sh\nexit 0\n");
+
+    const result = await runRoutine(loadEntry("backup-restore-probe"), {
+      quiet: true,
+      trigger: "scheduled",
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.outcome.kind).toBe("ok");
+
+    const meta = JSON.parse(readFileSync(join(result.runDir, "meta.json"), "utf8"));
+    expect(meta.harness).toBe("grok");
+    expect(meta.usedFallback).toBe(true);
+    expect(meta.primaryHarness).toBe("claude");
+    expect(meta.fallbackAttempts[0].outage).toBe(true);
+    expect(meta.fallbackAttempts[0].outcome).toBe("noop");
+    expect(isHarnessOutaged("claude")).toBe(true);
   });
 
   test("non-outage failure does not walk the chain", async () => {

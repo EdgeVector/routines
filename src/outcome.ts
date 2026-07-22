@@ -557,8 +557,8 @@ function parseKnownSafeSkip(
   text: string,
   opts: { exitCode?: number | null; timedOut?: boolean },
 ): RunOutcome | null {
-  const codexCapacity = parseCodexHarnessCapacitySkip(text, opts);
-  if (codexCapacity) return codexCapacity;
+  const harnessExternalSkip = parseHarnessExternalSkip(text, opts);
+  if (harnessExternalSkip) return harnessExternalSkip;
 
   if (routineId !== "codex-stale-agent-memory-cleanup") return null;
   if (opts.timedOut) return null;
@@ -581,19 +581,20 @@ function parseKnownSafeSkip(
   };
 }
 
-function parseCodexHarnessCapacitySkip(
+function parseHarnessExternalSkip(
   text: string,
   opts: { exitCode?: number | null; timedOut?: boolean },
 ): RunOutcome | null {
   if (opts.timedOut) return null;
 
   const lower = text.toLowerCase();
-  const externalBlocker =
+  const capacityOrUsage =
     lower.includes("selected model is at capacity") ||
     lower.includes("you've hit your usage limit") ||
     lower.includes("you have hit your usage limit") ||
     lower.includes("usage limit");
-  if (!externalBlocker) return null;
+  const providerTransient = /API Error:\s*Connection closed mid-response/i.test(text);
+  if (!capacityOrUsage && !providerTransient) return null;
 
   // Once a worker has visibly claimed work or published a review artifact,
   // the routine contract requires normal rollback/handoff handling. Treat the
@@ -610,7 +611,9 @@ function parseCodexHarnessCapacitySkip(
 
   return {
     kind: "noop",
-    detail: "codex-capacity no_card_claimed",
+    detail: providerTransient && !capacityOrUsage
+      ? "harness-transient no_card_claimed"
+      : "codex-capacity no_card_claimed",
     source: "safe_skip",
   };
 }
