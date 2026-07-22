@@ -48,6 +48,7 @@ const DETAIL_MAX = 240;
 
 const BENIGN_HARNESS_NOISE_LINES: RegExp[] = [
   /^\s*ERROR\s+codex_models_manager::manager:\s+failed to renew cache TTL:\s+missing field supports_reasoning_summaries\b.*$/i,
+  /^\s*ERROR\s+codex_models_manager::cache:\s+failed to load models cache:\s+missing field supports_reasoning_summaries\b.*$/i,
 ];
 
 /** Names agents historically put in heartbeats that map to a registry id. */
