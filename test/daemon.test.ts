@@ -175,6 +175,34 @@ describe("daemon evaluateOnce", () => {
     expect(occ2).not.toBeNull();
   });
 
+  test("coalesces stale hourly backlog to one latest due occurrence", () => {
+    writeFileSync(
+      join(home, "registry", "hourly-backlog.toml"),
+      [
+        'harness = "claude"',
+        'model = "test-model"',
+        'rrule = "DTSTART=20260721T000000;FREQ=HOURLY"',
+        'prompt = "hourly backlog"',
+        'heartbeat_slug = "routine-heartbeats"',
+      ].join("\n") + "\n",
+    );
+    writeState({
+      id: "hourly-backlog",
+      lastFire: new Date(2026, 6, 21, 0, 0, 0).toISOString(),
+    });
+    const entry = loadEntry("hourly-backlog");
+    const events: string[] = [];
+
+    const occ = dueOccurrence(entry, new Date(2026, 6, 21, 5, 30, 0), 0, (e) => {
+      events.push(`${e.kind}:${e.id ?? ""}:${e.detail ?? ""}`);
+    });
+
+    expect(occ?.getTime()).toBe(new Date(2026, 6, 21, 5, 0, 0).getTime());
+    expect(events).toContain(
+      `coalesce-backlog:hourly-backlog:since=${new Date(2026, 6, 21, 0, 0, 0).toISOString()}`,
+    );
+  });
+
   test("paused routines are skipped", async () => {
     writeRoutine("paused-one", "claude", ['status = "paused"']);
     const results = await evaluateOnce({ once: true, catchupMs: 60_000 });

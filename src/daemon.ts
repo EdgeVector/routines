@@ -83,7 +83,8 @@ export interface DaemonEvent {
     | "warmup"
     | "registry-error"
     | "situations-degraded"
-    | "reconcile-orphans";
+    | "reconcile-orphans"
+    | "coalesce-backlog";
   id?: string;
   detail?: string;
 }
@@ -322,10 +323,39 @@ export function dueOccurrence(
     log({ ts: now.toISOString(), kind: "warmup", id: entry.id });
     return null;
   }
-  const occ = nextAfter(entry.parsedRrule, since);
+  let occ = nextAfter(entry.parsedRrule, since);
   if (!occ || occ.getTime() > now.getTime()) return null;
+
+  // `since` can fall far behind `now` for reasons unrelated to the routine's
+  // own cadence (a long Situation fence, a paused status just lifted, a
+  // registry edit that widens the interval, daemon downtime). Naively
+  // returning the *first* missed occurrence makes the caller replay every
+  // instant the routine missed one dispatch at a time — each firing looks
+  // "due" again the moment the previous run finishes, so a routine on an
+  // hourly-or-slower RRULE tight-loops for as long as it takes to work
+  // through the backlog instead of respecting its configured interval.
+  // Coalesce: skip straight to the *latest* occurrence at or before `now` and
+  // fire once for the whole backlog.
+  for (let skipped = 0; skipped < MAX_COALESCE_BACKLOG; skipped++) {
+    const next = nextAfter(entry.parsedRrule, occ);
+    if (!next || next.getTime() > now.getTime()) break;
+    occ = next;
+    if (skipped === 0) {
+      log({
+        ts: now.toISOString(),
+        kind: "coalesce-backlog",
+        id: entry.id,
+        detail: `since=${since.toISOString()}`,
+      });
+    }
+  }
   return occ;
 }
+
+/** Safety bound on how many missed occurrences a single dueOccurrence() call
+ * will skip past when coalescing a backlog (belt-and-suspenders against a
+ * pathological RRULE; real backlogs seen in practice are under 20). */
+const MAX_COALESCE_BACKLOG = 100_000;
 
 
 /** Prefer never-fired, then oldest lastFire, so skip-capped work is not starved
