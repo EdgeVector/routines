@@ -126,6 +126,39 @@ names a routine id) in backlog/todo/doing/review:
 Never force-done a card that is actively assigned to a pickup worker mid-PR
 unless status is clearly green for 2+ finished runs.
 
+### Stale red re-proof before repeating old evidence
+If an open `routine-error-<id>` card is still red but the status row points at
+the **same failed run dir / finished_at** that fleet-health has already reported,
+do not append another "still red" note from that same stale run until you check
+whether a likely fix has landed after the failure.
+
+For that one card, run a cheap repo proof probe:
+
+1. Resolve the card's `Repo:` header (or the routine default repo) to a local
+   checkout, fetch `origin/main`, and inspect only likely routine-owned files:
+   `prompts/<id>.md`, `routines/<id>.md`, `skills/**/<id>*`, `registry/<id>.toml`,
+   `config/routines-registry/<id>.toml`, and source files named by the card's
+   evidence. Do not broad-scan every repo.
+2. Check for commits on `origin/main` **after the failed run's finished_at**
+   that touch those paths or mention `<id>` / the card slug:
+   `git log --since=<finished_at> --oneline -- <scoped paths>`.
+3. If no post-failure candidate commit exists, keep the current behavior:
+   append/update the card with the latest status evidence, but include
+   `reproof=no-fix-commit`.
+4. If a candidate fix commit exists and the routine is not currently running,
+   trigger exactly one bounded fresh proof with `routines run <id> --quiet`
+   (use the routine's own timeout; never loop or force a second run).
+   - Fresh run green (`lastOutcome ok|noop`, exit 0/null, no recent errors):
+     append `## PROOF <ISO>` with the commit + run dir and move the card to
+     `done`.
+   - Fresh run red: append the new run dir / outcome and keep the card open;
+     future passes must quote this fresh failure, not the old stale one.
+   - Could not run because it is already running, gated, or budget is tight:
+     append `PROOF-PENDING: post-failure fix commit seen; fresh run deferred`
+     and note `reproof_deferred=<id>` in memory/heartbeat.
+5. Cap stale-red re-proofs at **1 routine per pass** so a bad fleet wave cannot
+   spend the whole health check re-running heavy jobs.
+
 ## Step 3 — Quick safe ops fixes (do in-run)
 Allowed, when the evidence clearly supports it:
 - Create a missing `$ROUTINES_HOME/memory/<id>/` dir or `memory.md` file, or

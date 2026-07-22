@@ -129,6 +129,21 @@ describe("routine-fleet-health prompt", () => {
     expect(prompt).toContain("No such");
     expect(prompt).toContain("process` / ESRCH");
   });
+
+  test("re-proves stale red routine-error cards after likely fix commits land", () => {
+    const prompt = readFileSync(
+      new URL("../prompts/routine-fleet-health.md", import.meta.url),
+      "utf8",
+    );
+
+    expect(prompt).toContain("Stale red re-proof before repeating old evidence");
+    expect(prompt).toContain("same failed run dir / finished_at");
+    expect(prompt).toContain("after the failed run's finished_at");
+    expect(prompt).toContain("routines run <id> --quiet");
+    expect(prompt).toContain("reproof=no-fix-commit");
+    expect(prompt).toContain("PROOF-PENDING: post-failure fix commit seen; fresh run deferred");
+    expect(prompt).toContain("Cap stale-red re-proofs at **1 routine per pass**");
+  });
 });
 
 describe("routine attribution env + trailers", () => {
