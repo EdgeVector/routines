@@ -127,7 +127,18 @@ export function buildInvocation(entry: RoutineEntry, prompt: string): HarnessInv
   return { bin, args, display };
 }
 
-/** Extra dirs Codex may write outside the routine cwd (workspace-write sandbox). */
+/**
+ * Extra dirs Codex may write outside the routine cwd (workspace-write sandbox).
+ *
+ * Policy (brain `concepts-edgevector-run-dev-state-board`): allow **pretty**
+ * homes agents name *and* **real** XDG/state paths behind managed symlinks.
+ * Codex follows symlink realpaths on write — e.g. `~/.last-stack/logs` →
+ * `~/.local/state/last-stack/runtime/logs`. Omitting the realpath causes
+ * EPERM after green work (heartbeats, proofs, dogfood under runtime/).
+ *
+ * Do not add host-track `current` as a write target; agents must not develop
+ * there (RUN bucket). DEV is worktrees only.
+ */
 export function codexWritableDirs(): string[] {
   const home = process.env.HOME && process.env.HOME.length > 0 ? process.env.HOME : homedir();
   const dirs = [
@@ -135,17 +146,16 @@ export function codexWritableDirs(): string[] {
     routinesHome(),
     join(home, ".codex", "automations"),
     join(home, ".lastdb"),
-    join(home, ".folddb"), // legacy socket/state path still referenced by some CLIs
-    join(home, ".kanban"),
+    join(home, ".folddb"), // legacy alias → often symlink to ~/.lastdb
+    join(home, ".kanban"), // legacy alias → often symlink to ~/.fkanban
     join(home, ".fkanban"),
-    join(home, ".last-stack"),
-    // Managed last-stack install symlinks ~/.last-stack/logs →
-    // ~/.local/state/last-stack/runtime/logs. Codex's sandbox follows the
-    // real path for writes, so allowing only ~/.last-stack is not enough for
-    // last-stack-brain-append-heartbeat (EPERM / Operation not permitted).
+    join(home, ".last-stack"), // compat root (mostly symlinks into state/)
+    // STATE realpath for entire managed last-stack layout (logs, proofs, …)
     join(home, ".local", "state", "last-stack"),
     join(home, ".lastgit"),
     join(home, ".brain"),
+    // Portal git cache (wt fetch); read/write during routine portal ops
+    join(home, ".cache", "edgevector-git"),
   ];
   // De-dupe while preserving order (ROUTINES_HOME may equal ~/.routines).
   const seen = new Set<string>();
