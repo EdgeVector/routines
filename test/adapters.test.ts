@@ -74,12 +74,13 @@ describe("buildInvocation", () => {
     expect(inv.stdin).toBe("hi");
   });
 
-  test("codexWritableDirs includes last-stack runtime state (logs symlink target)", () => {
+  test("codexWritableDirs includes last-stack state realpath and portal cache", () => {
     const home = process.env.HOME && process.env.HOME.length > 0 ? process.env.HOME : homedir();
     const dirs = codexWritableDirs();
     expect(dirs).toContain(`${home}/.last-stack`);
-    // Heartbeats log lives under runtime/logs via symlink from ~/.last-stack/logs
+    // Entire managed layout (logs/proofs/dogfood) lives under state/
     expect(dirs).toContain(`${home}/.local/state/last-stack`);
+    expect(dirs).toContain(`${home}/.cache/edgevector-git`);
   });
 
   test("grok adapter shape (flags before -p prompt)", () => {
