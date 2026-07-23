@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
 
-import { buildInvocation, harnessBinary } from "../src/adapters.ts";
+import { homedir } from "node:os";
+
+import { buildInvocation, codexWritableDirs, harnessBinary } from "../src/adapters.ts";
 import { parseEntry } from "../src/registry.ts";
 
 function entry(harness: string, extra = "") {
@@ -70,6 +72,14 @@ describe("buildInvocation", () => {
     expect(inv.args.at(-1)).toBe("-");
     expect(inv.args).not.toContain("-c");
     expect(inv.stdin).toBe("hi");
+  });
+
+  test("codexWritableDirs includes last-stack runtime state (logs symlink target)", () => {
+    const home = process.env.HOME && process.env.HOME.length > 0 ? process.env.HOME : homedir();
+    const dirs = codexWritableDirs();
+    expect(dirs).toContain(`${home}/.last-stack`);
+    // Heartbeats log lives under runtime/logs via symlink from ~/.last-stack/logs
+    expect(dirs).toContain(`${home}/.local/state/last-stack`);
   });
 
   test("grok adapter shape (flags before -p prompt)", () => {

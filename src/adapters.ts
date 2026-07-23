@@ -139,7 +139,13 @@ export function codexWritableDirs(): string[] {
     join(home, ".kanban"),
     join(home, ".fkanban"),
     join(home, ".last-stack"),
+    // Managed last-stack install symlinks ~/.last-stack/logs →
+    // ~/.local/state/last-stack/runtime/logs. Codex's sandbox follows the
+    // real path for writes, so allowing only ~/.last-stack is not enough for
+    // last-stack-brain-append-heartbeat (EPERM / Operation not permitted).
+    join(home, ".local", "state", "last-stack"),
     join(home, ".lastgit"),
+    join(home, ".brain"),
   ];
   // De-dupe while preserving order (ROUTINES_HOME may equal ~/.routines).
   const seen = new Set<string>();
