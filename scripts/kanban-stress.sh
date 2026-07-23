@@ -94,10 +94,9 @@ while [ "$i" -le "$N" ]; do
   # Capture stdout only — the CLI prints a cosmetic "pickup will skip" warning to
   # stderr that would otherwise corrupt the JSON we parse. A real failure comes
   # back as a JSON error envelope on stdout (or a non-.slug payload).
-  # --repo keeps the card pickup-eligible: kanban's add guard hard-rejects a
-  # header-less card in `todo` ("not agent-runnable: Missing Repo header"), which
-  # would otherwise make every add fail and produce phantom consistency findings.
-  res=$("$FK" add "$s" --title "$title" --board "$BOARD" --column todo --tags kstress --repo EdgeVector/fold --body "$body" --json 2>/dev/null)
+  # --repo keeps the card pickup-eligible, and --force marks these scratch
+  # writes as intentional Operational exceptions to the default/todo milestone gate.
+  res=$("$FK" add "$s" --title "$title" --board "$BOARD" --column todo --force --tags kstress --repo EdgeVector/fold --body "$body" --json 2>/dev/null)
   if ! printf '%s' "$res" | jq -e '.slug' >/dev/null 2>&1; then
     errlog "add $s did not ACK: $(printf '%s' "$res" | tr '\n' ' ')"
     i=$((i+1)); continue
@@ -159,7 +158,7 @@ tmp=$(mktemp -d 2>/dev/null || echo "/tmp/kstress.$$"); mkdir -p "$tmp"
 i=1
 while [ "$i" -le "$BURST" ]; do
   s="$RUN-b$i"
-  ( "$FK" add "$s" --title "burst $i $RUN" --board "$BOARD" --column todo --tags kstress --repo EdgeVector/fold --json >"$tmp/b$i.out" 2>/dev/null; echo $? >"$tmp/b$i.rc" ) &
+  ( "$FK" add "$s" --title "burst $i $RUN" --board "$BOARD" --column todo --force --tags kstress --repo EdgeVector/fold --json >"$tmp/b$i.out" 2>/dev/null; echo $? >"$tmp/b$i.rc" ) &
   i=$((i+1))
 done
 wait
@@ -204,7 +203,7 @@ rm -rf "$tmp" 2>/dev/null || true
 if [ "$N" -ge 6 ]; then
   tok="kdogtok$(date +%s)"
   ss="$RUN-s1"
-  "$FK" add "$ss" --title "find me $tok" --board "$BOARD" --column todo --tags kstress --repo EdgeVector/fold >/dev/null 2>&1
+  "$FK" add "$ss" --title "find me $tok" --board "$BOARD" --column todo --force --tags kstress --repo EdgeVector/fold >/dev/null 2>&1
   created+=("$ss")
   if ! "$FK" search "$tok" --board "$BOARD" --json --all 2>/dev/null | grep -q "$ss"; then
     if [ -n "$(field "$ss" '.slug')" ]; then
