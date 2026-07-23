@@ -28,4 +28,14 @@ describe("kanban stress harness", () => {
     expect(script).toContain("partial=$partial");
     expect(script).toContain("harness interrupted before completion");
   });
+
+  test("forces scratch todo creates through the milestone gate", async () => {
+    const script = await Bun.file(scriptPath).text();
+    const todoAdds = [...script.matchAll(/\$FK" add [^\n]*--column todo[^\n]*/g)];
+
+    expect(todoAdds).toHaveLength(3);
+    for (const add of todoAdds) {
+      expect(add[0]).toContain("--force");
+    }
+  });
 });
