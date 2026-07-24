@@ -200,6 +200,9 @@ export function nextAfter(rule: RRule, after: Date): Date | null {
   const interval = rule.interval > 0 ? rule.interval : 1;
   const freq = rule.freq;
 
+  const simpleSubday = nextSimpleSubdayAfter(rule, anchor, interval, after);
+  if (simpleSubday) return simpleSubday;
+
   // Effective time-of-day expansion. A field defaults to "any value" only for
   // frequencies finer than it; otherwise it pins to the anchor's component
   // (RFC 5545 semantics for the common cases).
@@ -236,6 +239,38 @@ export function nextAfter(rule: RRule, after: Date): Date | null {
     }
   }
   return null;
+}
+
+function nextSimpleSubdayAfter(
+  rule: RRule,
+  anchor: Date,
+  interval: number,
+  after: Date,
+): Date | null {
+  if (rule.byhour || rule.byminute || rule.bysecond || rule.byday || rule.bymonthday) {
+    return null;
+  }
+
+  let stepMs: number;
+  switch (rule.freq) {
+    case "SECONDLY":
+      stepMs = interval * 1000;
+      break;
+    case "MINUTELY":
+      stepMs = interval * 60_000;
+      break;
+    case "HOURLY":
+      stepMs = interval * 3_600_000;
+      break;
+    default:
+      return null;
+  }
+
+  const anchorMs = anchor.getTime();
+  const afterMs = after.getTime();
+  const elapsed = afterMs - anchorMs;
+  const steps = elapsed < 0 ? 0 : Math.floor(elapsed / stepMs) + 1;
+  return new Date(anchorMs + steps * stepMs);
 }
 
 function range(lo: number, hi: number): number[] {

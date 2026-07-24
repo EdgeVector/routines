@@ -79,18 +79,35 @@ function tryCmd(bin: string, args: string[]): string | null {
 
 let cached: ProjectConfig | null = null;
 let cachedAt = 0;
+let cachedEnvRoot: string | undefined;
 const TTL_MS = 30_000;
 
 /** Load workspace-config (cached ~30s). Safe to call every tick. */
 export function loadProjectConfig(opts: { force?: boolean } = {}): ProjectConfig {
   const now = Date.now();
-  if (!opts.force && cached && now - cachedAt < TTL_MS) return cached;
+  const envRoot = process.env.ROUTINES_WORKSPACE_ROOT;
+  if (!opts.force && cached && cachedEnvRoot === envRoot && now - cachedAt < TTL_MS) return cached;
+
+  // Explicit env config is already authoritative for test harnesses, launchd
+  // shims, and supervised routine runs. Do not block dispatch cadence on
+  // external config helpers when callers provided the workspace directly.
+  if (envRoot && envRoot.length > 0) {
+    cached = {
+      source: "env",
+      workspaceRoot: envRoot,
+      routinesPromptsDir: process.env.ROUTINES_PROMPTS_DIR,
+    };
+    cachedAt = now;
+    cachedEnvRoot = envRoot;
+    return cached;
+  }
 
   // 1) configurations app
   const viaApp = tryCmd("configurations", ["get", "workspace-config"]);
   if (viaApp) {
     cached = parseBody(viaApp, "configurations");
     cachedAt = now;
+    cachedEnvRoot = envRoot;
     return cached;
   }
 
@@ -102,23 +119,13 @@ export function loadProjectConfig(opts: { force?: boolean } = {}): ProjectConfig
   if (viaHelper) {
     cached = parseBody(viaHelper, "last-stack-config-get");
     cachedAt = now;
-    return cached;
-  }
-
-  // 3) env overrides
-  const envRoot = process.env.ROUTINES_WORKSPACE_ROOT;
-  if (envRoot && envRoot.length > 0) {
-    cached = {
-      source: "env",
-      workspaceRoot: envRoot,
-      routinesPromptsDir: process.env.ROUTINES_PROMPTS_DIR,
-    };
-    cachedAt = now;
+    cachedEnvRoot = envRoot;
     return cached;
   }
 
   cached = { source: "none" };
   cachedAt = now;
+  cachedEnvRoot = envRoot;
   return cached;
 }
 

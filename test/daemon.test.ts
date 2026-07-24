@@ -29,6 +29,7 @@ beforeEach(() => {
   process.env = { ...savedEnv };
   home = mkdtempSync(join(tmpdir(), "routines-test-"));
   process.env.ROUTINES_HOME = home;
+  process.env.ROUTINES_WORKSPACE_ROOT = home;
   process.env.ROUTINES_ALLOW_HARNESS_BIN_OVERRIDES = "1";
   delete process.env.FOLDDB_SOCKET_PATH;
   delete process.env.FBRAIN_FOLDDB_SOCKET;
