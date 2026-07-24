@@ -72,6 +72,12 @@ describe("nextAfter", () => {
     expect(n!.getTime()).toBe(new Date(2026, 6, 12, 10, 0, 1).getTime());
   });
 
+  test("simple secondly interval stays aligned to DTSTART", () => {
+    const r = parseRRule("DTSTART=20260712T100001;FREQ=SECONDLY;INTERVAL=5");
+    const n = nextAfter(r, new Date(2026, 6, 12, 10, 0, 14, 500));
+    expect(n!.getTime()).toBe(new Date(2026, 6, 12, 10, 0, 16).getTime());
+  });
+
   test("daily at a fixed time", () => {
     const r = parseRRule("FREQ=DAILY;BYHOUR=9;BYMINUTE=30;BYSECOND=0");
     const n = nextAfter(r, new Date(2026, 6, 12, 12, 0, 0));
