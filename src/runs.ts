@@ -7,11 +7,9 @@ import { closeSync, existsSync, openSync, readFileSync, readdirSync, readSync, s
 import { join } from "node:path";
 
 import {
-  aggregateOutcomes,
   filterBenignHarnessNoise,
   outcomeFromMeta,
   parseOutcome,
-  type OutcomeStats,
   type RunOutcome,
 } from "./outcome.ts";
 import {
@@ -149,18 +147,6 @@ export function listRuns(id: string, limit = 20, options: ListRunsOptions = {}):
     .reverse()
     .slice(0, limit);
   return stamps.map((s) => summarize(id, s, join(dir, s), readMeta(join(dir, s)), options));
-}
-
-/** Rolling outcome stats over the most recent `limit` runs (default 10). */
-export function outcomeStatsFor(id: string, limit = 10): OutcomeStats {
-  const runs = listRuns(id, limit, { includeEscalate: false });
-  return aggregateOutcomes(
-    runs.map((r) => ({
-      kind: r.outcome,
-      detail: r.outcomeDetail,
-      source: r.outcomeSource,
-    })),
-  );
 }
 
 /** Read one run's detail, including a tail of stdout/stderr. `stamp` defaults to
