@@ -31,14 +31,6 @@ export function stateDir(): string {
   return join(routinesHome(), "state");
 }
 
-export function automationMemoryDir(id: string): string {
-  return join(routinesHome(), "memory", id);
-}
-
-export function automationMemoryPath(id: string): string {
-  return join(automationMemoryDir(id), "memory.md");
-}
-
 // Daemon's own stdout/stderr log directory (distinct from per-run logs).
 export function daemonLogDir(): string {
   return join(routinesHome(), "daemon");
