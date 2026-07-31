@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
+  hygieneLauncherPath,
+  renderHygieneLauncher,
   renderHygienePlist,
   runHygiene,
   selectRunsToPrune,
@@ -158,5 +160,31 @@ describe("renderHygienePlist", () => {
     expect(plist).toContain("<string>hygiene</string>");
     expect(plist).toContain("<string>--json</string>");
     expect(plist).toContain("<string>--ff-install</string>");
+  });
+
+  test("installed hygiene agent can run through a stable state launcher", () => {
+    const home = "/tmp/routines-home";
+    const launcher = hygieneLauncherPath(home);
+    const plist = renderHygienePlist({
+      program: launcher,
+      direct: true,
+      env: { ROUTINES_HOME: home },
+    });
+
+    expect(launcher).toBe("/tmp/routines-home/daemon/run-hygiene.sh");
+    expect(plist).toContain(`<string>${launcher}</string>`);
+    expect(plist).not.toContain("<string>hygiene</string>");
+    expect(plist).not.toContain("/tmp/stale-checkout");
+  });
+});
+
+describe("renderHygieneLauncher", () => {
+  test("resolves the live installed shim at runtime", () => {
+    const script = renderHygieneLauncher();
+
+    expect(script).toContain("ROUTINES_SHIM");
+    expect(script).toContain("$HOME/.local/bin/routines");
+    expect(script).toContain("exec \"$BUN_BIN\" \"$ROUTINES_CLI\" hygiene --json --ff-install");
+    expect(script).toContain("no live routines CLI resolved");
   });
 });

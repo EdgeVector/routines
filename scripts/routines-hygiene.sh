@@ -9,15 +9,21 @@ set -euo pipefail
 export PATH="${PATH:-/usr/bin:/bin}:$HOME/.local/bin:$HOME/.bun/bin:/opt/homebrew/bin:/usr/local/bin"
 export ROUTINES_HOME="${ROUTINES_HOME:-$HOME/.routines}"
 
-if command -v routines >/dev/null 2>&1; then
-  exec routines hygiene "$@"
+shim="${ROUTINES_SHIM:-$HOME/.local/bin/routines}"
+if [ -x "$shim" ]; then
+  exec "$shim" hygiene "$@"
 fi
 
-# Fallback: resolve sibling repo CLI when shim is missing.
+if command -v routines >/dev/null 2>&1; then
+  resolved="$(command -v routines)"
+  exec "$resolved" hygiene "$@"
+fi
+
+# Explicit fallback for development checkouts when no installed shim exists.
 here=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 if [ -f "$here/src/cli.ts" ] && [ -x "${ROUTINES_BUN_BIN:-$HOME/.bun/bin/bun}" ]; then
   exec "${ROUTINES_BUN_BIN:-$HOME/.bun/bin/bun}" "$here/src/cli.ts" hygiene "$@"
 fi
 
-echo "routines hygiene: neither PATH shim nor repo CLI found" >&2
+echo "routines hygiene: neither installed shim nor repo CLI found" >&2
 exit 127
