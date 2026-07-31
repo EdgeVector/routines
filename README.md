@@ -95,8 +95,9 @@ Two complementary layers:
    and runs `publish-status`. The installed hourly agent also runs
    `--ff-install`, so a clean CLI checkout fast-forwards to LastGit `main` and
    kickstarts `routinesd` after updates. Install hourly via
-   `routines install-hygiene` (label `com.edgevector.routines-hygiene`). Shell
-   wrapper: `scripts/routines-hygiene.sh`.
+   `routines install-hygiene` (label `com.edgevector.routines-hygiene`), which
+   writes a stable launcher at `~/.routines/daemon/run-hygiene.sh`. Shell
+   wrapper for manual runs: `scripts/routines-hygiene.sh`.
 2. **`routine-fleet-health`** (agent, hourly) — closes healed
    `routine-error-*` cards, safe registry timeout bumps for chronic 124s,
    dedupes against error-escalate, files pickup cards only when needed.
