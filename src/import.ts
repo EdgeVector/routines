@@ -30,7 +30,7 @@
 // in the diff table so a human resolves routing before the live cutover.
 
 import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { basename, join } from "node:path";
+import { join } from "node:path";
 import { homedir } from "node:os";
 
 import { parseEntry, type Harness, type Status } from "./registry.ts";
