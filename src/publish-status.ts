@@ -2,12 +2,11 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-import { collectStatus, type StatusRow, type StatusSnapshot } from "./status.ts";
+import { collectStatus, type StatusRow } from "./status.ts";
 import { listRuns, readRun, type RunSummary } from "./runs.ts";
 
 export const ROUTINES_APP_ID = "routines";
 
-type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 type FieldMap = Record<string, string>;
 
 export interface PublishStatusOptions {
