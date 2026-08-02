@@ -42,6 +42,7 @@ describe("groupForId", () => {
       ["brain-stress-consistency", "quality"],
       ["sentry-triage", "quality"],
       ["lastdbd-mini-telemetry-dashboard-refresh", "quality"],
+      ["last-stack-why-stopped", "ops"],
 
       ["coderings-capstone-exerciser", "product"],
       ["coderings-weekly-fold", "product"],
@@ -105,6 +106,22 @@ describe("registry group key", () => {
   test("accepts a known group", () => {
     const e = parseEntry(base + '\ngroup = "hygiene"', "/x/disk.toml");
     expect(e.group).toBe("hygiene");
+  });
+
+  test("accepts operational classifier group", () => {
+    const e = parseEntry(
+      [
+        'id = "last-stack-why-stopped"',
+        'harness = "codex"',
+        'model = "gpt-5.5"',
+        'rrule = "FREQ=HOURLY;INTERVAL=2;BYMINUTE=11;BYSECOND=0"',
+        'prompt_path = "/tmp/why-stopped.md"',
+        'group = "ops"',
+      ].join("\n"),
+      "/x/last-stack-why-stopped.toml",
+    );
+    expect(e.group).toBe("ops");
+    expect(groupForId(e.id, e.group).id).toBe("ops");
   });
 
   test("rejects an unknown group", () => {

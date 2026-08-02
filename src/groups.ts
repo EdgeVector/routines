@@ -46,6 +46,12 @@ export const GROUPS: readonly RoutineGroup[] = [
     order: 50,
   },
   {
+    id: "ops",
+    label: "Operations",
+    blurb: "Operational classifiers, incident routing, and fleet stop/recovery helpers",
+    order: 55,
+  },
+  {
     id: "product",
     label: "Product canaries",
     blurb: "External product pipeline / growth canaries",
@@ -116,6 +122,9 @@ const EXACT: Record<string, string> = {
   "routine-fleet-health": "quality",
   // Merge + post-merge deploy health (P0 pipeline backstop)
   "last-stack-pipeline-health": "quality",
+
+  // Operations classifiers
+  "last-stack-why-stopped": "ops",
 
   // Product canaries
   "coderings-capstone-exerciser": "product",
