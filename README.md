@@ -38,6 +38,7 @@ status        = "active"                         # active | paused
 timeout_min   = 30
 error_priority = "P0"                            # optional; new error cards default to P3
 heartbeat_slug = "routine-heartbeats"           # optional; runs append the fleet heartbeat line
+group         = "ops"                            # optional dashboard group override
 # fallback    = "claude:sonnet,grok:grok-4.5"  # optional; overrides fleet default tail
 ```
 

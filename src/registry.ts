@@ -157,6 +157,7 @@ export function parseEntry(text: string, sourcePath: string): RoutineEntry {
       "dogfood",
       "hygiene",
       "quality",
+      "ops",
       "product",
       "smoke",
       "other",
