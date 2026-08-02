@@ -75,7 +75,7 @@ export interface RunOptions {
   noFallback?: boolean;
 }
 
-export interface FallbackAttempt {
+interface FallbackAttempt {
   harness: string;
   model: string;
   runDir: string;
