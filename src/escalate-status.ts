@@ -13,7 +13,7 @@ import { join } from "node:path";
 
 import { runsDir } from "./paths.ts";
 
-export const TRIAGE_ID = "routine-error-triage";
+const TRIAGE_ID = "routine-error-triage";
 
 /** Machine verdict for how triage left the failure. */
 export type TriageVerdict =
