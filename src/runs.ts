@@ -75,6 +75,8 @@ function readMeta(dir: string): Record<string, unknown> {
  */
 export function resolveRunOutcome(id: string, runDir: string, meta: Record<string, unknown>): RunOutcome {
   if (typeof meta.outcome === "string" && meta.outcome !== "unknown") {
+    const staleMemoryFallback = resolveStaleMemoryFallbackOutcome(id, runDir, meta);
+    if (staleMemoryFallback) return staleMemoryFallback;
     return outcomeFromMeta(meta);
   }
   // Re-parse historical logs (or unknown meta) from captured streams.
@@ -99,6 +101,31 @@ export function resolveRunOutcome(id: string, runDir: string, meta: Record<strin
     meta.status === "running" ||
     (typeof meta.finishedAt !== "string" && !("exitCode" in meta));
   return parseOutcome(id, text, { exitCode, timedOut, startedAt, incomplete });
+}
+
+function resolveStaleMemoryFallbackOutcome(
+  id: string,
+  runDir: string,
+  meta: Record<string, unknown>,
+): RunOutcome | null {
+  if (id !== "db-perf-guard") return null;
+  if (meta.outcome !== "error") return null;
+  if (typeof meta.outcomeDetail !== "string" || !meta.outcomeDetail.includes("memory_unwritable=")) {
+    return null;
+  }
+  const exitCode = typeof meta.exitCode === "number" ? meta.exitCode : null;
+  if (exitCode !== 0 || meta.timedOut === true) return null;
+
+  const stdout = readTail(join(runDir, "stdout.log"), OUTCOME_LOG_TAIL_BYTES);
+  const stderr = filterBenignHarnessNoise(
+    readTail(join(runDir, "stderr.log"), OUTCOME_LOG_TAIL_BYTES),
+  );
+  const parsed = parseOutcome(id, `${stdout}\n${stderr}`, {
+    exitCode,
+    timedOut: false,
+    startedAt: typeof meta.startedAt === "string" ? meta.startedAt : null,
+  });
+  return parsed.kind === "error" ? null : parsed;
 }
 
 function summarize(

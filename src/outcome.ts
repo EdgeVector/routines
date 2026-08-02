@@ -368,6 +368,13 @@ export function parseOutcome(
       best,
     );
     if (dogfoodPreFeatureBlocker) return dogfoodPreFeatureBlocker;
+    const dbPerfMemoryFallback = parseDbPerfGuardMemoryFallback(
+      routineId,
+      text,
+      opts,
+      candidates,
+    );
+    if (dbPerfMemoryFallback) return dbPerfMemoryFallback;
     return { kind: best.kind, detail: best.detail, source: best.source };
   }
 
@@ -529,6 +536,37 @@ function parseDogfoodRotatePreFeatureBlocker(
     kind: "noop",
     detail: clip(`dogfood-rotate pre-feature blocker ${detail}`),
     source: "safe_skip",
+  };
+}
+
+function parseDbPerfGuardMemoryFallback(
+  routineId: string,
+  text: string,
+  opts: { exitCode?: number | null; timedOut?: boolean },
+  candidates: readonly Candidate[],
+): RunOutcome | null {
+  if (!nameMatchesRoutine("db-perf-guard", routineId)) return null;
+  if (opts.timedOut) return null;
+  if (opts.exitCode !== undefined && opts.exitCode !== null && opts.exitCode !== 0) return null;
+  if (!/\bheartbeat was appended to\b/i.test(text)) return null;
+
+  const staleMemoryError = candidates.some(
+    (c) => c.kind === "error" && /\bmemory_unwritable=/.test(c.detail ?? ""),
+  );
+  if (!staleMemoryError) return null;
+
+  const ok = candidates.find(
+    (c) =>
+      c.kind === "ok" &&
+      /\btracked=/.test(c.detail ?? "") &&
+      /\bmemory_guard=green\b/.test(c.detail ?? ""),
+  );
+  if (!ok) return null;
+
+  return {
+    kind: "ok",
+    detail: ok.detail,
+    source: ok.source,
   };
 }
 

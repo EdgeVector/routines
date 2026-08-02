@@ -149,6 +149,60 @@ test("status reparses historical outcome from bounded log tail", () => {
   expect(row?.lastOutcomeDetail).toBe("large-log-tail");
 });
 
+test("status heals db-perf-guard stale memory_unwritable meta from successful append log", () => {
+  writeRoutine("db-perf-guard");
+  const runDir = join(home, "runs/db-perf-guard", "2026-08-01T08-30-28-136Z");
+  mkdirSync(runDir, { recursive: true });
+  writeFileSync(
+    join(runDir, "meta.json"),
+    JSON.stringify(
+      {
+        startedAt: "2026-08-01T08:30:28.136Z",
+        finishedAt: "2026-08-01T09:07:53.579Z",
+        exitCode: 0,
+        timedOut: false,
+        outcome: "error",
+        outcomeDetail:
+          "memory_unwritable=/Users/tomtang/.routines/memory/db-perf-guard/memory.md tracked=db-perf-criterion-bench-profile-compile-timeout-20260801",
+        outcomeSource: "heartbeat",
+      },
+      null,
+      2,
+    ) + "\n",
+  );
+  writeFileSync(
+    join(runDir, "stdout.log"),
+    [
+      "db-perf-guard completed with a tracked finding.",
+      "",
+      "Memory guard was GREEN: `4 passed`.",
+      "",
+      "Logs are preserved in `/Users/tomtang/.routines/runs/db-perf-guard/2026-08-01T08-30-28-136Z/`.",
+      "The worktree was removed, and heartbeat was appended to `/Users/tomtang/.routines/memory/db-perf-guard/memory.md`.",
+      "",
+    ].join("\n"),
+  );
+  writeFileSync(
+    join(runDir, "stderr.log"),
+    [
+      'exec',
+      '/bin/zsh -lc "mkdir -p /Users/tomtang/.routines/memory/db-perf-guard; printf \'%s\\n\' \'db-perf-guard 2026-08-01T09:12:00Z ok tracked=db-perf-criterion-bench-profile-compile-timeout-20260801 memory_guard=green criterion=no-measurements-timeout stress=skipped teardown=ok\' >> /Users/tomtang/.routines/memory/db-perf-guard/memory.md || printf \'%s\\n\' \'db-perf-guard 2026-08-01T09:12:00Z error memory_unwritable=/Users/tomtang/.routines/memory/db-perf-guard/memory.md tracked=db-perf-criterion-bench-profile-compile-timeout-20260801\' || true"',
+      " succeeded in 773ms:",
+      "",
+    ].join("\n"),
+  );
+
+  const row = collectStatus(new Date("2026-08-01T09:30:00Z")).rows.find(
+    (r) => r.id === "db-perf-guard",
+  );
+
+  expect(row?.lastOutcome).toBe("ok");
+  expect(row?.lastOutcomeDetail).toContain(
+    "tracked=db-perf-criterion-bench-profile-compile-timeout-20260801",
+  );
+  expect(row?.outcomeError).toBe(0);
+});
+
 test("completed latest run suppresses stale running lock in status", () => {
   writeRoutine("done");
   writeLiveLock("done");

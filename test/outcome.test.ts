@@ -364,6 +364,25 @@ API Error: Connection closed mid-response. The response above may be incomplete.
     expect(timedOut.detail).toBe("timed out");
   });
 
+  test("db-perf-guard ignores memory_unwritable fallback branch after successful append", () => {
+    const text = `
+exec
+/bin/zsh -lc "mkdir -p /Users/tomtang/.routines/memory/db-perf-guard; printf '%s\\n' 'db-perf-guard 2026-08-01T09:12:00Z ok tracked=db-perf-criterion-bench-profile-compile-timeout-20260801 memory_guard=green criterion=no-measurements-timeout stress=skipped teardown=ok' >> /Users/tomtang/.routines/memory/db-perf-guard/memory.md || printf '%s\\n' 'db-perf-guard 2026-08-01T09:12:00Z error memory_unwritable=/Users/tomtang/.routines/memory/db-perf-guard/memory.md tracked=db-perf-criterion-bench-profile-compile-timeout-20260801' || true" in /Users/tomtang/code/edgevector
+ succeeded in 773ms:
+codex
+db-perf-guard completed with a tracked finding.
+
+Memory guard was GREEN: \`4 passed\`.
+
+Logs are preserved in \`/Users/tomtang/.routines/runs/db-perf-guard/2026-08-01T08-30-28-136Z/\`. The worktree was removed, and heartbeat was appended to \`/Users/tomtang/.routines/memory/db-perf-guard/memory.md\`.
+`;
+
+    const o = parseOutcome("db-perf-guard", text, { exitCode: 0 });
+    expect(o.kind).toBe("ok");
+    expect(o.detail).toContain("tracked=db-perf-criterion-bench-profile-compile-timeout-20260801");
+    expect(o.detail).toContain("memory_guard=green");
+  });
+
   test("north-star-rollup heartbeat wins over post-heartbeat timeout", () => {
     const text = `
 /bin/zsh -lc 'last-stack-brain-append-heartbeat --line "north-star-rollup $iso_ts ok active_ns=8 top_live=north-star-storage-metering-correctness:9,north-star-lastdb-deliver-data-slices:8,north-star-lastgit-native-forge:7 unattributed_live=9 orphan_live=0 html=/Users/tomtang/code/edgevector/north-star-dashboard.html"'
