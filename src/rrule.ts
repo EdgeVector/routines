@@ -14,7 +14,7 @@
 // components via a proleptic-Gregorian day counter, so day/week/month interval
 // alignment is DST-safe.
 
-export type Freq =
+type Freq =
   | "SECONDLY"
   | "MINUTELY"
   | "HOURLY"
