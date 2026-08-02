@@ -13,7 +13,7 @@ import { canonicalRoutineId } from "./kanban-id-migration.ts";
 
 export type OutcomeKind = "ok" | "noop" | "error" | "unknown";
 
-export type OutcomeSource =
+type OutcomeSource =
   | "routine_result" // explicit ROUTINE_RESULT trailer
   | "heartbeat" // ok|noop|error line / append-heartbeat --line
   | "useful_work" // routine-specific concrete work evidence in the transcript
