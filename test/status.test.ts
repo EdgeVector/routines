@@ -203,6 +203,54 @@ test("status heals db-perf-guard stale memory_unwritable meta from successful ap
   expect(row?.outcomeError).toBe(0);
 });
 
+test("status heals stale Codex model cache error meta from open-cutovers empty pass logs", () => {
+  writeRoutine("open-cutovers-driver");
+  const runDir = join(home, "runs/open-cutovers-driver", "2026-08-02T16-41-16-177Z");
+  mkdirSync(runDir, { recursive: true });
+  writeFileSync(
+    join(runDir, "meta.json"),
+    JSON.stringify(
+      {
+        startedAt: "2026-08-02T16:41:16.177Z",
+        finishedAt: "2026-08-02T16:43:34.452Z",
+        exitCode: 0,
+        timedOut: false,
+        outcome: "error",
+        outcomeDetail:
+          "codex_models_manager::manager: failed to renew cache TTL: missing field `supports_reasoning_summaries` at line 86 column 5",
+        outcomeSource: "heartbeat",
+      },
+      null,
+      2,
+    ) + "\n",
+  );
+  writeFileSync(
+    join(runDir, "stdout.log"),
+    [
+      "OPEN_CUTOVERS_LIVE=0 ADVANCED=none RESOLVED=none BLOCKED=none RESIDUE_SWEPT=none",
+      "",
+      "Completed the bounded scheduled pass. Situations preflight and fkanban read succeeded, `brain get open-cutovers --type reference` found zero live `status=open` cutovers.",
+      "",
+    ].join("\n"),
+  );
+  writeFileSync(
+    join(runDir, "stderr.log"),
+    [
+      "2026-08-02T16:41:41.868271Z ERROR codex_models_manager::manager: failed to renew cache TTL: missing field `supports_reasoning_summaries` at line 86 column 5",
+      "",
+    ].join("\n"),
+  );
+
+  const row = collectStatus(new Date("2026-08-02T17:00:00Z")).rows.find(
+    (r) => r.id === "open-cutovers-driver",
+  );
+
+  expect(row?.lastOutcome).toBe("noop");
+  expect(row?.lastOutcomeDetail).toContain("live_count=0");
+  expect(row?.outcomeNoop).toBe(1);
+  expect(row?.outcomeError).toBe(0);
+});
+
 test("completed latest run suppresses stale running lock in status", () => {
   writeRoutine("done");
   writeLiveLock("done");

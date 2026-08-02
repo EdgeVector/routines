@@ -539,6 +539,18 @@ Prior memory:
     expect(filtered).toContain("another line stays");
   });
 
+  test("filters timestamped benign Codex model-cache TTL warning", () => {
+    const text = [
+      "real failure detail stays",
+      "2026-08-02T16:41:41.868271Z ERROR codex_models_manager::manager: failed to renew cache TTL: missing field `supports_reasoning_summaries` at line 86 column 5",
+      "another line stays",
+    ].join("\n");
+    const filtered = filterBenignHarnessNoise(text);
+    expect(filtered).not.toContain("supports_reasoning_summaries");
+    expect(filtered).toContain("real failure detail stays");
+    expect(filtered).toContain("another line stays");
+  });
+
   test("filters benign Codex model-cache load warning", () => {
     const text = [
       "real failure detail stays",
@@ -571,6 +583,19 @@ ROUTINE_RESULT outcome=noop detail=idle nothing-safe
     expect(o.kind).toBe("noop");
     expect(o.source).toBe("routine_result");
     expect(o.detail).toContain("idle nothing-safe");
+  });
+
+  test("classifies open-cutovers empty pass as noop despite timestamped Codex cache warning", () => {
+    const text = `
+2026-08-02T16:41:41.868271Z ERROR codex_models_manager::manager: failed to renew cache TTL: missing field \`supports_reasoning_summaries\` at line 86 column 5
+OPEN_CUTOVERS_LIVE=0 ADVANCED=none RESOLVED=none BLOCKED=none RESIDUE_SWEPT=none
+
+Completed the bounded scheduled pass. Situations preflight and fkanban read succeeded, \`brain get open-cutovers --type reference\` found zero live \`status=open\` cutovers, and no ledger, board, Situation, Git, PR/CR, restart, upgrade, cleanup, or primary mutation was needed.
+`;
+    const o = parseOutcome("open-cutovers-driver", text, { exitCode: 0 });
+    expect(o.kind).toBe("noop");
+    expect(o.source).toBe("safe_skip");
+    expect(o.detail).toContain("live_count=0");
   });
 });
 

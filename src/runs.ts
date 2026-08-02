@@ -77,6 +77,8 @@ export function resolveRunOutcome(id: string, runDir: string, meta: Record<strin
   if (typeof meta.outcome === "string" && meta.outcome !== "unknown") {
     const staleMemoryFallback = resolveStaleMemoryFallbackOutcome(id, runDir, meta);
     if (staleMemoryFallback) return staleMemoryFallback;
+    const benignCodexCacheFallback = resolveBenignCodexCacheFallbackOutcome(id, runDir, meta);
+    if (benignCodexCacheFallback) return benignCodexCacheFallback;
     return outcomeFromMeta(meta);
   }
   // Re-parse historical logs (or unknown meta) from captured streams.
@@ -101,6 +103,35 @@ export function resolveRunOutcome(id: string, runDir: string, meta: Record<strin
     meta.status === "running" ||
     (typeof meta.finishedAt !== "string" && !("exitCode" in meta));
   return parseOutcome(id, text, { exitCode, timedOut, startedAt, incomplete });
+}
+
+function resolveBenignCodexCacheFallbackOutcome(
+  id: string,
+  runDir: string,
+  meta: Record<string, unknown>,
+): RunOutcome | null {
+  if (meta.outcome !== "error") return null;
+  if (
+    typeof meta.outcomeDetail !== "string" ||
+    !/\bcodex_models_manager::(?:manager|cache):\s+failed to (?:renew cache TTL|load models cache):\s+missing field `?supports_reasoning_summaries`?\b/i.test(
+      meta.outcomeDetail,
+    )
+  ) {
+    return null;
+  }
+  const exitCode = typeof meta.exitCode === "number" ? meta.exitCode : null;
+  if (exitCode !== 0 || meta.timedOut === true) return null;
+
+  const stdout = readTail(join(runDir, "stdout.log"), OUTCOME_LOG_TAIL_BYTES);
+  const stderr = filterBenignHarnessNoise(
+    readTail(join(runDir, "stderr.log"), OUTCOME_LOG_TAIL_BYTES),
+  );
+  const parsed = parseOutcome(id, `${stdout}\n${stderr}`, {
+    exitCode,
+    timedOut: false,
+    startedAt: typeof meta.startedAt === "string" ? meta.startedAt : null,
+  });
+  return parsed.kind === "error" ? null : parsed;
 }
 
 function resolveStaleMemoryFallbackOutcome(
