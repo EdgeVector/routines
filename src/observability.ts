@@ -39,7 +39,7 @@ type RoutinesSentryDisabledReason =
   | "shared_helper_missing"
   | "shared_helper_failed";
 
-export type RoutinesSentryResult =
+type RoutinesSentryResult =
   | { enabled: true; service: string }
   | {
       enabled: false;
