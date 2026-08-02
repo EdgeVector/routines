@@ -47,8 +47,8 @@ export interface OutcomeStats {
 const DETAIL_MAX = 240;
 
 const BENIGN_HARNESS_NOISE_LINES: RegExp[] = [
-  /^\s*ERROR\s+codex_models_manager::manager:\s+failed to renew cache TTL:\s+missing field supports_reasoning_summaries\b.*$/i,
-  /^\s*ERROR\s+codex_models_manager::cache:\s+failed to load models cache:\s+missing field supports_reasoning_summaries\b.*$/i,
+  /^\s*(?:\d{4}-\d{2}-\d{2}T[^\s]+\s+)?ERROR\s+codex_models_manager::manager:\s+failed to renew cache TTL:\s+missing field `?supports_reasoning_summaries`?\b.*$/i,
+  /^\s*(?:\d{4}-\d{2}-\d{2}T[^\s]+\s+)?ERROR\s+codex_models_manager::cache:\s+failed to load models cache:\s+missing field `?supports_reasoning_summaries`?\b.*$/i,
 ];
 
 /** Names agents historically put in heartbeats that map to a registry id. */
@@ -599,6 +599,10 @@ function parseKnownSafeSkip(
   const harnessExternalSkip = parseHarnessExternalSkip(text, opts);
   if (harnessExternalSkip) return harnessExternalSkip;
 
+  if (routineId === "open-cutovers-driver") {
+    return parseOpenCutoversEmptyPass(text, opts);
+  }
+
   if (routineId !== "codex-stale-agent-memory-cleanup") return null;
   if (opts.timedOut) return null;
   if (opts.exitCode !== undefined && opts.exitCode !== null && opts.exitCode !== 0) return null;
@@ -616,6 +620,36 @@ function parseKnownSafeSkip(
   return {
     kind: "noop",
     detail: "process-enumeration-blocked terminated=0",
+    source: "safe_skip",
+  };
+}
+
+function parseOpenCutoversEmptyPass(
+  text: string,
+  opts: { exitCode?: number | null; timedOut?: boolean },
+): RunOutcome | null {
+  if (opts.timedOut) return null;
+  if (opts.exitCode !== undefined && opts.exitCode !== null && opts.exitCode !== 0) return null;
+
+  const hasEmptyInventory =
+    /\bOPEN_CUTOVERS_LIVE=0\b/.test(text) &&
+    /\bADVANCED=none\b/.test(text) &&
+    /\bRESOLVED=none\b/.test(text) &&
+    /\bBLOCKED=none\b/.test(text);
+  if (!hasEmptyInventory) return null;
+
+  const lower = text.toLowerCase();
+  if (
+    !lower.includes("completed the bounded scheduled pass") &&
+    !lower.includes("healthy steady state") &&
+    !lower.includes("live_count=0")
+  ) {
+    return null;
+  }
+
+  return {
+    kind: "noop",
+    detail: "open-cutovers empty live_count=0",
     source: "safe_skip",
   };
 }
