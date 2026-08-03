@@ -45,7 +45,7 @@ export interface HygieneOptions {
   home?: string;
 }
 
-export interface HygienePruneItem {
+interface HygienePruneItem {
   kind: "run" | "memory" | "escalate";
   path: string;
   detail: string;
