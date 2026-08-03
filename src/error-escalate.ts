@@ -49,7 +49,7 @@ const ROUTINE_PAPERCUT_SLUG = "papercut-routine-non-p0-failures";
 /** Card upsert always; agent spawn is rate-limited. */
 const STATE_DIR_NAME = "error-escalate";
 
-export interface EscalateState {
+interface EscalateState {
   lastEscalatedAt: string;
   lastRunDir: string;
   lastCardSlug?: string;
