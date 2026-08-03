@@ -15,7 +15,7 @@ export function setStatus(entry: RoutineEntry, status: Status): RoutineEntry {
   return loadEntry(entry.id);
 }
 
-export interface RouteUpdate {
+interface RouteUpdate {
   harness?: string;
   model?: string;
 }
