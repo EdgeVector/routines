@@ -64,7 +64,7 @@ export function formatAttributionTrailers(env: {
   return lines.join("\n");
 }
 
-export type DispatchEnvelopeOptions = {
+type DispatchEnvelopeOptions = {
   /** When set, skip live `situations notices` (tests / offline). */
   noticesBanner?: string;
   /** Absolute run dir for this dispatch (optional; set when known). */
