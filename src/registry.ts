@@ -49,6 +49,12 @@ export interface RoutineEntry {
    * `claude:sonnet,grok:grok-4.5`. When unset, fleet default applies.
    */
   fallback?: string;
+  /**
+   * Optional zero-LLM pre-dispatch command. Exit 10 = proceed to harness;
+   * exit 0 = skip harness as noop (stdout should include ROUTINE_RESULT).
+   * Other non-zero exits fail the run.
+   */
+  gateCommand?: string;
   /** Absolute path of the source TOML file. */
   sourcePath: string;
 }
@@ -78,6 +84,7 @@ const KNOWN_KEYS = new Set([
   "heartbeat_slug",
   "group",
   "fallback",
+  "gate_command",
 ]);
 
 export function parseEntry(text: string, sourcePath: string): RoutineEntry {
@@ -191,6 +198,8 @@ export function parseEntry(text: string, sourcePath: string): RoutineEntry {
   if (group) entry.group = group;
   const fallback = str(raw, "fallback", sourcePath);
   if (fallback) entry.fallback = fallback;
+  const gateCommand = str(raw, "gate_command", sourcePath);
+  if (gateCommand) entry.gateCommand = gateCommand;
   return entry;
 }
 

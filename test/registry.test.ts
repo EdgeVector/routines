@@ -79,4 +79,12 @@ describe("parseEntry", () => {
       parseEntry(base + '\nerror_priority = "urgent"', "/x/disk-reclaim.toml"),
     ).toThrow(/error_priority.*P0\|P1\|P2\|P3/);
   });
+
+  test("carries optional gate_command", () => {
+    const e = parseEntry(
+      base + '\ngate_command = "/usr/local/bin/last-stack-kanban-pickup-gate"',
+      "/x/disk-reclaim.toml",
+    );
+    expect(e.gateCommand).toBe("/usr/local/bin/last-stack-kanban-pickup-gate");
+  });
 });
