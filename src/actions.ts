@@ -42,7 +42,7 @@ export function routeRoutine(entry: RoutineEntry, update: RouteUpdate): RoutineE
   return loadEntry(entry.id);
 }
 
-export interface RunNowStart {
+interface RunNowStart {
   started: boolean;
   /** Why the run was refused (only set when started=false). */
   reason?: string;
