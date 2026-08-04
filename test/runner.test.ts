@@ -337,3 +337,93 @@ describe("runRoutine heartbeat handling", () => {
     expect(meta.logMaxBytes).toBe(8192);
   });
 });
+
+describe("runRoutine gate_command", () => {
+  test("exit 0 skips harness entirely", async () => {
+    const harnessLog = join(home, "harness-should-not-run.log");
+    process.env.ROUTINES_CLAUDE_BIN = stub(
+      join(home, "should-not-run-harness"),
+      [
+        "#!/bin/sh",
+        `printf 'ran\\n' >> ${JSON.stringify(harnessLog)}`,
+        "printf '%s\\n' 'should-not-run 2026-08-04T00:00:00Z ok leaked'",
+        "exit 0",
+        "",
+      ].join("\n"),
+    );
+    const gate = stub(
+      join(home, "skip-gate"),
+      [
+        "#!/bin/sh",
+        "printf '%s\\n' 'kanban-pickup 2026-08-04T00:00:00Z noop no-eligible ready=0 no_card_claimed'",
+        "printf '%s\\n' 'ROUTINE_RESULT outcome=noop detail=no-eligible ready=0 no_card_claimed'",
+        "exit 0",
+        "",
+      ].join("\n"),
+    );
+    writeFileSync(
+      join(home, "registry", "gate-skip.toml"),
+      [
+        'harness = "claude"',
+        'model = "test-model"',
+        'rrule = "FREQ=SECONDLY"',
+        'prompt = "should not matter"',
+        'heartbeat_slug = "routine-heartbeats"',
+        "timeout_min = 1",
+        `gate_command = ${JSON.stringify(gate)}`,
+      ].join("\n") + "\n",
+    );
+
+    const result = await runRoutine(loadEntry("gate-skip"), { quiet: true, noFallback: true });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.outcome.kind).toBe("noop");
+    expect(result.harnessPid).toBeNull();
+    expect(existsSync(harnessLog)).toBe(false);
+    const meta = JSON.parse(readFileSync(join(result.runDir, "meta.json"), "utf8"));
+    expect(meta.gateSkippedHarness).toBe(true);
+    expect(meta.command).toContain("gate_command");
+  });
+
+  test("exit 10 proceeds to harness", async () => {
+    process.env.ROUTINES_CLAUDE_BIN = stub(
+      join(home, "after-gate-harness"),
+      [
+        "#!/bin/sh",
+        "printf '%s\\n' 'after-gate 2026-08-04T00:00:00Z ok worked'",
+        "printf '%s\\n' 'ROUTINE_RESULT outcome=ok detail=worked'",
+        "exit 0",
+        "",
+      ].join("\n"),
+    );
+    const gate = stub(
+      join(home, "proceed-gate"),
+      [
+        "#!/bin/sh",
+        "printf '%s\\n' 'PICKUP_GATE proceed ready=2'",
+        "exit 10",
+        "",
+      ].join("\n"),
+    );
+    writeFileSync(
+      join(home, "registry", "gate-proceed.toml"),
+      [
+        'harness = "claude"',
+        'model = "test-model"',
+        'rrule = "FREQ=SECONDLY"',
+        'prompt = "hello"',
+        'heartbeat_slug = "routine-heartbeats"',
+        "timeout_min = 1",
+        `gate_command = ${JSON.stringify(gate)}`,
+      ].join("\n") + "\n",
+    );
+
+    const result = await runRoutine(loadEntry("gate-proceed"), { quiet: true, noFallback: true });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.outcome.kind).toBe("ok");
+    expect(result.harnessPid).toBeTruthy();
+    const meta = JSON.parse(readFileSync(join(result.runDir, "meta.json"), "utf8"));
+    expect(meta.gateSkippedHarness).not.toBe(true);
+  });
+});

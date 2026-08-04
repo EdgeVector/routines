@@ -12,7 +12,7 @@
 //   stdout.log / stderr.log — captured streams (appended as data arrives)
 // This is the durable evidence the card's VERIFY asks for.
 
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { appendFileSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -281,6 +281,23 @@ function runOnce(
     ...buildRoutineAttributionEnv(entry.id, runDir),
   };
 
+  // Optional zero-LLM gate: skip expensive harness when the gate says so.
+  // Contract (last-stack-kanban-pickup-gate and friends):
+  //   exit 10 → proceed to harness
+  //   exit 0  → skip harness; treat as successful noop (ROUTINE_RESULT in stdout)
+  //   other   → fail the run (config / unexpected error)
+  if (entry.gateCommand) {
+    const gated = runPreDispatchGate(entry, {
+      cwd,
+      env: childEnv,
+      runDir,
+      trigger,
+      startedAt,
+      routeMeta,
+    });
+    if (gated) return Promise.resolve(gated);
+  }
+
   const maxLogBytes = runLogMaxBytes();
   const stdoutCapture = new BoundedLogCapture(maxLogBytes);
   const stderrCapture = new BoundedLogCapture(maxLogBytes);
@@ -519,6 +536,165 @@ export function completedExitCode(
     return 0;
   }
   return rawExitCode;
+}
+
+
+/** Exit code meaning "proceed to harness" for gate_command scripts. */
+export const GATE_PROCEED_EXIT = 10;
+
+/**
+ * Run entry.gateCommand before spawning the LLM harness.
+ * Returns a finished RunResult when the gate skips the harness; null to proceed.
+ */
+export function runPreDispatchGate(
+  entry: RoutineEntry,
+  args: {
+    cwd: string;
+    env: NodeJS.ProcessEnv;
+    runDir: string;
+    trigger: "scheduled" | "manual";
+    startedAt: Date;
+    routeMeta?: RunOnceMeta;
+  },
+): RunResult | null {
+  const cmd = entry.gateCommand;
+  if (!cmd) return null;
+
+  const timeoutMs = Math.min(entry.timeoutMin * 60_000, 120_000);
+  const result = spawnSync(cmd, {
+    cwd: args.cwd,
+    env: args.env,
+    encoding: "utf8",
+    shell: true,
+    timeout: timeoutMs,
+    maxBuffer: 2_000_000,
+  });
+
+  const stdout = result.stdout ?? "";
+  const stderr = result.stderr ?? "";
+  writeRunFile(join(args.runDir, "stdout.log"), stdout);
+  writeRunFile(join(args.runDir, "stderr.log"), stderr);
+  writeRunFile(join(args.runDir, "prompt.txt"), `(gate_command skipped prompt load)\ngate_command=${cmd}\n`);
+
+  const status = result.status;
+  // Proceed
+  if (status === GATE_PROCEED_EXIT) {
+    // Leave logs as gate evidence; harness will overwrite on spawn path... actually
+    // harness appends. Clear for clean harness capture.
+    writeRunFile(join(args.runDir, "stdout.log"), "");
+    writeRunFile(join(args.runDir, "stderr.log"), "");
+    return null;
+  }
+
+  const finishedAt = new Date();
+  const timedOut = Boolean(result.error && (result.error as NodeJS.ErrnoException).code === "ETIMEDOUT");
+  const rawExit = timedOut ? 124 : status;
+  const combined = `${stdout}\n${stderr}`;
+  let outcome: RunOutcome;
+  if (status === 0) {
+    outcome = parseOutcome(entry.id, combined, { exitCode: 0, timedOut: false });
+    if (outcome.kind !== "noop" && outcome.kind !== "ok") {
+      // Gate claimed success without a parseable trailer — still treat as noop skip.
+      outcome = {
+        kind: "noop",
+        detail: "gate-skip no_card_claimed",
+        source: "safe_skip",
+      };
+    } else {
+      outcome = {
+        kind: "noop",
+        detail: outcome.detail ?? "gate-skip no_card_claimed",
+        source: outcome.source === "routine_result" ? "routine_result" : "safe_skip",
+      };
+    }
+  } else {
+    outcome = parseOutcome(entry.id, combined, {
+      exitCode: rawExit,
+      timedOut,
+    });
+    if (outcome.kind === "unknown") {
+      outcome = {
+        kind: "error",
+        detail: `gate-command-failed rc=${status ?? "null"}`,
+        source: "exit",
+      };
+    }
+  }
+
+  const exitCode = status === 0 ? 0 : completedExitCode(rawExit, timedOut, outcome);
+  const invocation: HarnessInvocation = {
+    bin: cmd,
+    args: [],
+    display: `gate_command: ${cmd}`,
+  };
+  const runResult: RunResult = {
+    id: entry.id,
+    runDir: args.runDir,
+    invocation,
+    exitCode,
+    signal: result.signal ?? null,
+    timedOut,
+    startedAt: args.startedAt.toISOString(),
+    finishedAt: finishedAt.toISOString(),
+    durationMs: finishedAt.getTime() - args.startedAt.getTime(),
+    heartbeat: { attempted: false, ok: true },
+    outcome,
+    harnessPid: null,
+  };
+  runResult.heartbeat = writeHeartbeat(entry, runResult);
+
+  writeRunFile(
+    join(args.runDir, "meta.json"),
+    JSON.stringify(
+      {
+        id: entry.id,
+        trigger: args.trigger,
+        harness: entry.harness,
+        model: entry.model,
+        effort: entry.effort ?? null,
+        cwd: entry.cwd,
+        command: invocation.display,
+        gateCommand: cmd,
+        gateSkippedHarness: status === 0,
+        exitCode: runResult.exitCode,
+        signal: runResult.signal,
+        timedOut: runResult.timedOut,
+        startedAt: runResult.startedAt,
+        finishedAt: runResult.finishedAt,
+        durationMs: runResult.durationMs,
+        harnessPid: null,
+        daemonPid: process.pid,
+        status: "finished",
+        outcome: runResult.outcome.kind,
+        outcomeDetail: runResult.outcome.detail,
+        outcomeSource: runResult.outcome.source,
+        stdoutTail: tail(stdout, 2000),
+        stderrTail: tail(stderr, 2000),
+        heartbeat: runResult.heartbeat,
+        primaryHarness: args.routeMeta?.primaryHarness ?? entry.harness,
+        primaryModel: args.routeMeta?.primaryModel ?? entry.model,
+        routeIndex: args.routeMeta?.routeIndex ?? 0,
+        routeCount: args.routeMeta?.routeCount ?? 1,
+      },
+      null,
+      2,
+    ) + "\n",
+  );
+
+  const bootstrapManualStatus =
+    args.trigger === "manual" && runResult.exitCode === 0 && !readState(entry.id).lastRun;
+  if (args.trigger === "scheduled" || bootstrapManualStatus) {
+    patchState(entry.id, {
+      lastRun: runResult.finishedAt,
+      lastExit: runResult.exitCode,
+      lastRunDir: args.runDir,
+      lastOutcome: runResult.outcome.kind,
+      lastOutcomeDetail: runResult.outcome.detail ?? undefined,
+    });
+  }
+
+  releaseLockIfOwned(entry.id, process.pid);
+  return runResult;
 }
 
 function killChildGroup(child: ReturnType<typeof spawn>, signal: NodeJS.Signals): void {
