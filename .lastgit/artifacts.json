@@ -2,9 +2,7 @@
   "artifacts": [
     {
       "app": "routines",
-      "paths": [
-        "dist"
-      ]
+      "paths": ["bin", "dist"]
     }
   ]
 }
