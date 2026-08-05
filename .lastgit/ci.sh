@@ -33,6 +33,10 @@ if [ -f tsconfig.json ]; then
   bunx tsc --noEmit
 fi
 
+# 2c. compile host-track artifact binaries (published after green gate)
+echo "== artifact build =="
+bun run build
+
 # 3. unit tests, once any exist
 found_tests=0
 for f in test/*.test.ts src/*.test.ts; do
