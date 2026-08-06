@@ -188,3 +188,78 @@ describe("renderHygieneLauncher", () => {
     expect(script).toContain("no live routines CLI resolved");
   });
 });
+
+describe("prompt doctor probe", () => {
+  // The doctor is a last-stack binary resolved from PATH. Shim it so the probe
+  // is exercised without depending on last-stack being installed.
+  function withStubDoctor<T>(script: string | null, fn: () => T): T {
+    const dir = mkdtempSync(join(tmpdir(), "routines-doctor-stub-"));
+    if (script !== null) {
+      const p = join(dir, "last-stack-routines-prompt-doctor");
+      writeFileSync(p, script, { mode: 0o755 });
+    }
+    const prev = process.env.ROUTINES_PROMPT_DOCTOR_BIN;
+    // Point at the stub by absolute path. Setting PATH is NOT enough — Bun
+    // resolved the host's real doctor anyway, so this suite silently tested
+    // the machine it ran on instead of the fixture.
+    process.env.ROUTINES_PROMPT_DOCTOR_BIN = join(dir, "last-stack-routines-prompt-doctor");
+    try {
+      return fn();
+    } finally {
+      if (prev === undefined) delete process.env.ROUTINES_PROMPT_DOCTOR_BIN;
+      else process.env.ROUTINES_PROMPT_DOCTOR_BIN = prev;
+    }
+  }
+
+  const home = () => mkdtempSync(join(tmpdir(), "routines-hygiene-doctor-"));
+
+  test("green doctor reports zero findings and raises no warning", () => {
+    const r = withStubDoctor(
+      "#!/bin/sh\necho 'LAST_STACK_ROUTINES_PROMPT_DOCTOR status=green findings=0'\n",
+      () => runHygiene({ home: home(), dryRun: true, publishStatus: false }),
+    );
+    expect(r.promptDoctor.attempted).toBe(true);
+    expect(r.promptDoctor.status).toBe("green");
+    expect(r.promptDoctor.findings).toBe(0);
+    expect(r.warnings.some((w) => w.includes("prompt drift"))).toBe(false);
+  });
+
+  test("a red doctor exits non-zero — that is a result, not a crash", () => {
+    // This is the case that matters: the real doctor exits 1 when it finds
+    // drift, and execFileSync throws. Its findings are on stdout regardless.
+    const r = withStubDoctor(
+      "#!/bin/sh\n" +
+        "echo 'LAST_STACK_ROUTINES_PROMPT_DOCTOR status=red findings=2'\n" +
+        "echo '  FINDING kind=version-pin id=a prompt_path=/x'\n" +
+        "echo '  FINDING kind=registry-divergent-local id=b prompt_path=/y'\n" +
+        "exit 1\n",
+      () => runHygiene({ home: home(), dryRun: true, publishStatus: false }),
+    );
+    expect(r.promptDoctor.attempted).toBe(true);
+    expect(r.promptDoctor.status).toBe("red");
+    expect(r.promptDoctor.findings).toBe(2);
+    expect(r.promptDoctor.kinds.sort()).toEqual([
+      "registry-divergent-local",
+      "version-pin",
+    ]);
+    expect(r.warnings.some((w) => w.includes("prompt drift"))).toBe(true);
+  });
+
+  test("runs even under --dry-run — a dry-run must still tell the truth", () => {
+    const r = withStubDoctor(
+      "#!/bin/sh\necho 'status=red findings=1'\necho '  FINDING kind=version-pin id=a'\nexit 1\n",
+      () => runHygiene({ home: home(), dryRun: true, publishStatus: false }),
+    );
+    expect(r.dryRun).toBe(true);
+    expect(r.promptDoctor.findings).toBe(1);
+  });
+
+  test("a missing doctor is skipped, not a failure", () => {
+    const r = withStubDoctor(null, () =>
+      runHygiene({ home: home(), dryRun: true, publishStatus: false }),
+    );
+    expect(r.promptDoctor.attempted).toBe(false);
+    expect(r.promptDoctor.detail).toContain("not installed");
+    expect(r.warnings.some((w) => w.includes("prompt drift"))).toBe(false);
+  });
+});
