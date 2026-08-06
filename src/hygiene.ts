@@ -67,6 +67,13 @@ export interface HygieneResult {
     detail: string;
   };
   publish: { attempted: boolean; ok: boolean; detail: string };
+  promptDoctor: {
+    attempted: boolean;
+    status: string;
+    findings: number;
+    kinds: string[];
+    detail: string;
+  };
   installFf: {
     attempted: boolean;
     ok: boolean;
@@ -208,6 +215,66 @@ function probeDaemon(): HygieneResult["daemon"] {
       detail: `not loaded: ${(err as Error).message}`,
     };
   }
+}
+
+/**
+ * Report registry prompt drift, via last-stack's prompt doctor.
+ *
+ * The doctor detects two ways a routine can silently dispatch the wrong
+ * instructions: a registry entry loading a stale local twin instead of the
+ * installed prompt, and a prompt_path pinned into an immutable
+ * artifacts/versions/<sha>/ tree that host-track will GC. Both keep working
+ * until they don't, so nothing surfaces them on its own.
+ *
+ * On 2026-08-06 that cost real damage: the LastDB canary nightly was still
+ * dispatching an Aug-4 prompt telling agents to take the newest GitHub
+ * prerelease — the instruction behind a four-day rollback of the primary — for
+ * a full day after the fix had merged. The doctor found it in one second. It
+ * had simply never been run, because nothing called it.
+ *
+ * READ-ONLY, and runs even under --dry-run: a dry-run should still tell the
+ * truth about drift. It only reports; hygiene never rewrites a registry.
+ * A missing doctor (last-stack not installed) is not a failure.
+ */
+function probePromptDoctor(): HygieneResult["promptDoctor"] {
+  const empty = { attempted: false, status: "", findings: 0, kinds: [] as string[] };
+  // Explicit override rather than PATH: mutating process.env.PATH does NOT
+  // reliably redirect execFileSync lookup under Bun, so a PATH-based test stub
+  // silently exercises the host's real doctor instead of the fixture.
+  const bin = process.env.ROUTINES_PROMPT_DOCTOR_BIN || "last-stack-routines-prompt-doctor";
+  let out = "";
+  try {
+    out = execFileSync(bin, [], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 60_000,
+    });
+  } catch (err) {
+    const e = err as { status?: number; stdout?: string; code?: string };
+    if (e.code === "ENOENT") {
+      return { ...empty, detail: `skipped (${bin} not installed)` };
+    }
+    // The doctor exits non-zero when it finds something — that is a result,
+    // not a crash, and its findings are on stdout.
+    out = e.stdout ?? "";
+    if (!out) {
+      return { ...empty, attempted: true, detail: `unreadable: ${(err as Error).message}` };
+    }
+  }
+
+  const status = out.match(/status=(\S+)/)?.[1] ?? "unknown";
+  const findings = Number(out.match(/findings=(\d+)/)?.[1] ?? "0");
+  const kinds = [...new Set([...out.matchAll(/FINDING kind=(\S+)/g)].map((m) => m[1]!))];
+  return {
+    attempted: true,
+    status,
+    findings: Number.isFinite(findings) ? findings : 0,
+    kinds,
+    detail:
+      findings > 0
+        ? `status=${status} findings=${findings} kinds=${kinds.join(",")}`
+        : `status=${status} findings=0`,
+  };
 }
 
 function tryPublishStatus(dryRun: boolean): HygieneResult["publish"] {
@@ -472,6 +539,11 @@ export function runHygiene(opts: HygieneOptions = {}): HygieneResult {
     : { attempted: false, ok: true, detail: "skipped (--no-publish)" };
   if (publish.attempted && !publish.ok) warnings.push(publish.detail);
 
+  const promptDoctor = probePromptDoctor();
+  if (promptDoctor.attempted && promptDoctor.findings > 0) {
+    warnings.push(`routine prompt drift: ${promptDoctor.detail}`);
+  }
+
   const installFf = opts.ffInstall
     ? tryFfInstall(dryRun, opts.restartDaemonAfterFf !== false)
     : {
@@ -492,6 +564,7 @@ export function runHygiene(opts: HygieneOptions = {}): HygieneResult {
     items,
     daemon,
     publish,
+    promptDoctor,
     installFf,
     warnings,
   };

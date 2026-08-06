@@ -809,6 +809,7 @@ function printHygieneHuman(r: HygieneResult): void {
   );
   console.log(`  daemon: ${r.daemon.detail}`);
   console.log(`  publish: ${r.publish.detail}`);
+  console.log(`  prompt_doctor: ${r.promptDoctor.detail}`);
   console.log(`  install_ff: ${r.installFf.detail}`);
   if (r.warnings.length > 0) {
     console.log("  warnings:");
