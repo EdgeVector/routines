@@ -8,6 +8,7 @@ import { join } from "node:path";
 
 import {
   filterBenignHarnessNoise,
+  OUTCOME_SINK_FILENAME,
   outcomeFromMeta,
   parseOutcome,
   type RunOutcome,
@@ -19,6 +20,23 @@ import {
 import { runsDir } from "./paths.ts";
 
 const OUTCOME_LOG_TAIL_BYTES = 40_000;
+/** A verdict line is tiny; refuse to slurp a runaway sink file. */
+const OUTCOME_SINK_MAX_BYTES = 8_192;
+
+/**
+ * Read `<runDir>/outcome.txt` — the explicit verdict a routine writes for
+ * itself. Absent/unreadable is normal (most routines don't write one yet).
+ */
+export function readOutcomeSink(runDir: string): string | null {
+  const path = join(runDir, OUTCOME_SINK_FILENAME);
+  try {
+    if (!existsSync(path)) return null;
+    if (statSync(path).size > OUTCOME_SINK_MAX_BYTES) return null;
+    return readFileSync(path, "utf8");
+  } catch {
+    return null;
+  }
+}
 
 export interface RunSummary {
   stamp: string;
@@ -102,7 +120,13 @@ export function resolveRunOutcome(id: string, runDir: string, meta: Record<strin
   const incomplete =
     meta.status === "running" ||
     (typeof meta.finishedAt !== "string" && !("exitCode" in meta));
-  return parseOutcome(id, text, { exitCode, timedOut, startedAt, incomplete });
+  return parseOutcome(id, text, {
+    exitCode,
+    timedOut,
+    startedAt,
+    incomplete,
+    sink: readOutcomeSink(runDir),
+  });
 }
 
 function resolveBenignCodexCacheFallbackOutcome(
@@ -130,6 +154,7 @@ function resolveBenignCodexCacheFallbackOutcome(
     exitCode,
     timedOut: false,
     startedAt: typeof meta.startedAt === "string" ? meta.startedAt : null,
+    sink: readOutcomeSink(runDir),
   });
   return parsed.kind === "error" ? null : parsed;
 }
@@ -155,6 +180,7 @@ function resolveStaleMemoryFallbackOutcome(
     exitCode,
     timedOut: false,
     startedAt: typeof meta.startedAt === "string" ? meta.startedAt : null,
+    sink: readOutcomeSink(runDir),
   });
   return parsed.kind === "error" ? null : parsed;
 }

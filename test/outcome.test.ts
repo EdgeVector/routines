@@ -5,6 +5,7 @@ import {
   filterBenignHarnessNoise,
   nameMatchesRoutine,
   parseOutcome,
+  parseOutcomeSink,
 } from "../src/outcome.ts";
 
 describe("nameMatchesRoutine", () => {
@@ -623,5 +624,110 @@ describe("aggregateOutcomes", () => {
     ]);
     expect(stats.noopRate).toBeNull();
     expect(stats.usefulRate).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Regression: outcomeDetail must never be text the agent merely READ.
+// All three fixtures are verbatim excerpts from real corrupted runs on
+// 2026-08-08 (see brain papercut-routine-outcome-extractor-scrapes-wrong-text).
+// ---------------------------------------------------------------------------
+describe("parseOutcome cross-routine contamination", () => {
+  test("ignores a ROUTINE_RESULT echoed from another routine's script source", () => {
+    // last-stack-feature-prove picked this up while grepping ~/.routines/runs/**.
+    // It is disk-reclaim's *script*, so ${FINAL_GIB} is still unexpanded.
+    const text =
+      'appended heartbeat to file /Users/tomtang/.last-stack/logs/routine-heartbeats.log' +
+      ' (label=routine-heartbeats)\\n} >> \\"$MEM\\" 2>&1 && echo \\"memory_appended=1\\"' +
+      ' || echo \\"memory_unwritable=$MEM\\"\\n\\necho \\"ROUTINE_RESULT outcome=noop' +
+      ' reclaimed_gb=0 worktrees_pruned=0 backups_pruned=0 lastdb_copies_pruned=0' +
+      ' final_free=${FINAL_GIB}Gi\\"';
+    const o = parseOutcome("last-stack-feature-prove", text, { exitCode: 0 });
+    expect(o.detail ?? "").not.toContain("reclaimed_gb");
+    expect(o.detail ?? "").not.toContain("FINAL_GIB");
+  });
+
+  test("ignores a trailer harvested from another routine's run directory", () => {
+    const text =
+      '/Users/tomtang/.routines/runs/last-stack-disk-reclaim/2026-08-06T03-12-21-000Z/stderr.log:5573:' +
+      'ROUTINE_RESULT outcome=ok reclaimed_gb=2 worktrees_pruned=2';
+    const o = parseOutcome("last-stack-feature-prove", text, { exitCode: 0 });
+    expect(o.detail ?? "").not.toContain("reclaimed_gb");
+  });
+
+  test("ignores a foreign heartbeat carried in grep -n output", () => {
+    // backup-restore-probe's detail contained a routine-fleet-health line from July.
+    const text =
+      'harness=claude model=sonnet exit=1 dur=518.8s\\n' +
+      '7472:routine-fleet-health 2026-07-21T19:33:12Z noop reds=3 open_error_cards=5';
+    const o = parseOutcome("backup-restore-probe", text, { exitCode: 0 });
+    expect(o.detail ?? "").not.toContain("routine-fleet-health");
+    expect(o.detail ?? "").not.toContain("reds=3");
+  });
+
+  test("rejects an unexpanded $placeholder heartbeat detail", () => {
+    // last-stack-fkanban-watch reported the literal string "$outcome".
+    const text =
+      'last-stack-brain-append-heartbeat --label routine-heartbeats' +
+      ' --line "kanban-watch 2026-08-08T16:03:00Z noop $outcome"';
+    const o = parseOutcome("last-stack-fkanban-watch", text, {
+      exitCode: 0,
+      startedAt: "2026-08-08T16:00:00Z",
+    });
+    expect(o.detail).not.toBe("$outcome");
+    expect(o.detail ?? "").not.toContain("$outcome");
+  });
+
+  test("still accepts this routine's own genuine trailer", () => {
+    const text = "work done\nROUTINE_RESULT outcome=ok detail=merged=2 filed=1";
+    const o = parseOutcome("last-stack-feature-prove", text, { exitCode: 0 });
+    expect(o.kind).toBe("ok");
+    expect(o.source).toBe("routine_result");
+    expect(o.detail).toContain("merged=2");
+  });
+
+  test("does not mistake a dollar amount for a shell placeholder", () => {
+    const text = "ROUTINE_RESULT outcome=ok detail=spend=$42 saved=$7";
+    const o = parseOutcome("aws-cost-hygiene", text, { exitCode: 0 });
+    expect(o.kind).toBe("ok");
+    expect(o.detail).toContain("$42");
+  });
+});
+
+describe("parseOutcomeSink", () => {
+  test("bare verdict line", () => {
+    const o = parseOutcomeSink("ok cards=3 filed=1\n");
+    expect(o?.kind).toBe("ok");
+    expect(o?.source).toBe("sink");
+    expect(o?.detail).toContain("cards=3");
+  });
+
+  test("outcome= form with explicit detail=", () => {
+    const o = parseOutcomeSink("outcome=noop detail=queue empty");
+    expect(o?.kind).toBe("noop");
+    expect(o?.detail).toBe("queue empty");
+  });
+
+  test("tolerates ROUTINE_RESULT prefix, comments and blank lines", () => {
+    const o = parseOutcomeSink("# written by the routine\n\nROUTINE_RESULT outcome=error detail=declare 503\n");
+    expect(o?.kind).toBe("error");
+    expect(o?.detail).toBe("declare 503");
+  });
+
+  test("null for absent/blank/unparseable", () => {
+    expect(parseOutcomeSink(null)).toBeNull();
+    expect(parseOutcomeSink("")).toBeNull();
+    expect(parseOutcomeSink("just some prose\n")).toBeNull();
+  });
+
+  test("sink beats a contaminated transcript outright", () => {
+    const text = 'echo \\"ROUTINE_RESULT outcome=ok reclaimed_gb=99\\"';
+    const o = parseOutcome("last-stack-feature-prove", text, {
+      exitCode: 0,
+      sink: "noop no-eligible-cards",
+    });
+    expect(o.kind).toBe("noop");
+    expect(o.source).toBe("sink");
+    expect(o.detail).toBe("no-eligible-cards");
   });
 });

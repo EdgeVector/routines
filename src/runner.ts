@@ -35,6 +35,7 @@ import { buildRoutineAttributionEnv, resolveDispatchPrompt } from "./prompt.ts";
 import { runsDir } from "./paths.ts";
 import { writeHeartbeat, type HeartbeatOutcome } from "./heartbeat.ts";
 import { filterBenignHarnessNoise, parseOutcome, type RunOutcome } from "./outcome.ts";
+import { readOutcomeSink } from "./runs.ts";
 import { patchState, readState } from "./state.ts";
 import { envFromProjectConfig, loadProjectConfig, resolveRoutineCwd } from "./project-config.ts";
 import { discoveredRoutineSocketEnv } from "./socket-env.ts";
@@ -415,6 +416,7 @@ function runOnce(
       const outcome = parseOutcome(entry.id, `${stdout}\n${filteredStderr}`, {
         exitCode: rawExitCode,
         timedOut,
+        sink: readOutcomeSink(runDir),
       });
       const exitCode = completedExitCode(rawExitCode, timedOut, outcome);
       const result: RunResult = {
@@ -592,7 +594,11 @@ export function runPreDispatchGate(
   const combined = `${stdout}\n${stderr}`;
   let outcome: RunOutcome;
   if (status === 0) {
-    outcome = parseOutcome(entry.id, combined, { exitCode: 0, timedOut: false });
+    outcome = parseOutcome(entry.id, combined, {
+      exitCode: 0,
+      timedOut: false,
+      sink: readOutcomeSink(args.runDir),
+    });
     if (outcome.kind !== "noop" && outcome.kind !== "ok") {
       // Gate claimed success without a parseable trailer — still treat as noop skip.
       outcome = {
@@ -604,13 +610,17 @@ export function runPreDispatchGate(
       outcome = {
         kind: "noop",
         detail: outcome.detail ?? "gate-skip no_card_claimed",
-        source: outcome.source === "routine_result" ? "routine_result" : "safe_skip",
+        source:
+          outcome.source === "sink" || outcome.source === "routine_result"
+            ? outcome.source
+            : "safe_skip",
       };
     }
   } else {
     outcome = parseOutcome(entry.id, combined, {
       exitCode: rawExit,
       timedOut,
+      sink: readOutcomeSink(args.runDir),
     });
     if (outcome.kind === "unknown") {
       outcome = {
