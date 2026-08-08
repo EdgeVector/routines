@@ -14,6 +14,7 @@ import { canonicalRoutineId } from "./kanban-id-migration.ts";
 export type OutcomeKind = "ok" | "noop" | "error" | "unknown";
 
 type OutcomeSource =
+  | "sink" // explicit $ROUTINES_RUN_DIR/outcome.txt written by the routine itself
   | "routine_result" // explicit ROUTINE_RESULT trailer
   | "heartbeat" // ok|noop|error line / append-heartbeat --line
   | "useful_work" // routine-specific concrete work evidence in the transcript
@@ -239,6 +240,9 @@ function stripToolResultPayloads(raw: string): string {
  *   lines that typically come from dumping memory.md; only trust strong trailers
  *   / explicit append-heartbeat commands so the dashboard cannot go red mid-run
  *   from historical memory.
+ * @param opts.sink contents of `$ROUTINES_RUN_DIR/outcome.txt` when present.
+ *   A parseable sink WINS outright: it is the only channel the routine wrote
+ *   deliberately, so it cannot be contaminated by text the agent merely read.
  */
 export function parseOutcome(
   routineId: string,
@@ -248,8 +252,13 @@ export function parseOutcome(
     timedOut?: boolean;
     startedAt?: string | null;
     incomplete?: boolean;
+    sink?: string | null;
   } = {},
 ): RunOutcome {
+  // Explicit sink beats every transcript heuristic below.
+  const sink = parseOutcomeSink(opts.sink);
+  if (sink) return sink;
+
   text = filterBenignHarnessNoise(text);
   const candidates: Candidate[] = [];
   const startedAtMs = heartbeatTsMs(opts.startedAt ?? null);
@@ -267,6 +276,8 @@ export function parseOutcome(
     const detail = detailM ? clip(detailM[1]!) : rest || null;
     // Prompt fixtures / prose about the trailer format must not win.
     if (isPromptFixtureDetail(detail)) continue;
+    // Foreign text the agent merely read (grep hits, other routines' scripts).
+    if (isForeignOrTemplateMatch(ownText, m.index ?? 0, detail, routineId)) continue;
     candidates.push({
       kind,
       detail,
@@ -282,6 +293,7 @@ export function parseOutcome(
     if (!kind) continue;
     const rest = clip(m[2] ?? "");
     if (isPromptFixtureDetail(rest)) continue;
+    if (isForeignOrTemplateMatch(ownText, m.index ?? 0, rest, routineId)) continue;
     candidates.push({
       kind,
       detail: rest || null,
@@ -297,6 +309,7 @@ export function parseOutcome(
     if (!kind) continue;
     const rest = clip(m[2] ?? "");
     if (isPromptFixtureDetail(rest)) continue;
+    if (isForeignOrTemplateMatch(ownText, m.index ?? 0, rest, routineId)) continue;
     candidates.push({
       kind,
       detail: rest || null,
@@ -312,6 +325,9 @@ export function parseOutcome(
     const parsed = parseHeartbeatPhrase(inner, routineId);
     if (parsed) {
       if (isPreRunHeartbeat(parsed.tsMs, startedAtMs)) continue;
+      // The append-line scanner sees the shell command BEFORE expansion, so an
+      // unsubstituted `$outcome` placeholder reaches us as the literal detail.
+      if (isForeignOrTemplateMatch(text, m.index ?? 0, parsed.detail, routineId)) continue;
       candidates.push({
         ...parsed,
         source: "heartbeat",
@@ -338,6 +354,7 @@ export function parseOutcome(
       // quote other routines' ok/error lines; those must not steal the outcome.
       if (!nameMatchesRoutine(name, routineId)) continue;
       if (isPreRunHeartbeat(tsMs, startedAtMs)) continue;
+      if (isForeignOrTemplateMatch(text, m.index ?? 0, detail, routineId)) continue;
       candidates.push({
         kind,
         detail,
@@ -719,6 +736,97 @@ function isFalsePositiveName(name: string): boolean {
   return ban.has(n);
 }
 
+/** Name of the explicit outcome sink a routine may write into its run dir. */
+export const OUTCOME_SINK_FILENAME = "outcome.txt";
+
+/**
+ * Parse the explicit outcome sink (`$ROUTINES_RUN_DIR/outcome.txt`).
+ *
+ * This is the ONLY unambiguous channel: the routine wrote it on purpose, so
+ * unlike a transcript scan it cannot pick up text the agent merely *read*.
+ * Accepted forms (first non-empty, non-comment line wins):
+ *
+ *   ok cards=3 filed=1
+ *   outcome=noop detail=queue empty
+ *   ROUTINE_RESULT outcome=error detail=declare 503
+ *
+ * Returns null when absent/blank/unparseable so the caller falls back.
+ */
+export function parseOutcomeSink(raw: string | null | undefined): RunOutcome | null {
+  if (!raw) return null;
+  for (const rawLine of raw.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) continue;
+
+    const stripped = line.replace(/^ROUTINE_RESULT\s+/i, "");
+    // `outcome=<kind> [detail=...]` / `outcome: <kind> ...`
+    const kv = stripped.match(/^outcome\s*[=:]\s*(ok|noop|error|unknown)\b(.*)$/i);
+    if (kv) {
+      const kind = asKind(kv[1]!) ?? "unknown";
+      const rest = kv[2] ?? "";
+      const detailM = rest.match(/\bdetail\s*[=:]\s*(.+)$/i);
+      const detail = clip(detailM ? detailM[1]! : rest) || null;
+      return { kind, detail, source: "sink" };
+    }
+    // bare `<kind> [detail]`
+    const bare = stripped.match(/^(ok|noop|error|unknown)\b(.*)$/i);
+    if (bare) {
+      const kind = asKind(bare[1]!) ?? "unknown";
+      return { kind, detail: clip(bare[2] ?? "") || null, source: "sink" };
+    }
+    // First meaningful line was not a verdict — do not guess.
+    return null;
+  }
+  return null;
+}
+
+/** Chars of preceding transcript inspected to judge a match's provenance. */
+const PROVENANCE_LOOKBACK = 240;
+
+/**
+ * True when a matched trailer/heartbeat plainly did NOT come from this run's
+ * own agent narrative, but from text the agent happened to be *reading*.
+ *
+ * Fleet-introspection routines (feature-prove, why-stopped, retro,
+ * fleet-health) routinely `grep` across `~/.routines/runs/**` and `cat` other
+ * routines' scripts. Everything they read lands in their own transcript, and
+ * the strongest patterns here (ROUTINE_RESULT) are deliberately NOT scoped by
+ * routine name, so foreign text wins on score. Structure-aware stripping only
+ * covers the Claude stream-json harness; codex output is not line-JSON at all,
+ * so it gets no protection from stripToolResultPayloads().
+ */
+function isForeignOrTemplateMatch(
+  text: string,
+  matchIndex: number,
+  detail: string | null,
+  routineId: string,
+): boolean {
+  const before = text.slice(Math.max(0, matchIndex - PROVENANCE_LOOKBACK), matchIndex);
+  const d = detail ?? "";
+
+  // 1. Unexpanded shell placeholders => this is script SOURCE, not script OUTPUT.
+  //    `$5`-style money is safe: a letter/underscore must follow the sigil.
+  if (/\$\{[A-Za-z_][A-Za-z0-9_]*\}/.test(d)) return true;
+  if (/(?:^|[\s=,(])\$[A-Za-z_][A-Za-z0-9_]*/.test(d)) return true;
+
+  // 2. grep/rg output: "<path>:<lineno>:" or a bare "<lineno>:" immediately before.
+  if (/(?:^|[\s"'])\d+:\s*$/.test(before)) return true;
+  if (/[^\s:]+:\d+:\s*$/.test(before)) return true;
+
+  // 3. The agent is quoting ANOTHER routine's run artifacts.
+  for (const seg of before.match(/\/runs\/([A-Za-z0-9._-]+)\//g) ?? []) {
+    const other = seg.slice("/runs/".length, -1);
+    if (!nameMatchesRoutine(other, routineId)) return true;
+  }
+
+  // 4. The trailer sits inside an `echo`/`printf` argument — i.e. the line that
+  //    WOULD emit a trailer, not an emitted one. Kept tight (immediate vicinity)
+  //    because escaped `\n` in JSON transcripts defeats line anchoring.
+  if (/\b(?:echo|printf)\b\s*(?:-[A-Za-z]+\s+)?\\?["']?\s*$/.test(before.slice(-48))) return true;
+
+  return false;
+}
+
 /**
  * Prompt / docs text that mentions the trailer format without being a real
  * machine result (e.g. "example-from-prompt fixture from the Codex stderr").
@@ -799,6 +907,7 @@ export function outcomeFromMeta(meta: Record<string, unknown>): RunOutcome {
   const detail = typeof meta.outcomeDetail === "string" ? meta.outcomeDetail : null;
   const sourceRaw = typeof meta.outcomeSource === "string" ? meta.outcomeSource : "none";
   const source: OutcomeSource =
+    sourceRaw === "sink" ||
     sourceRaw === "routine_result" ||
     sourceRaw === "heartbeat" ||
     sourceRaw === "useful_work" ||
