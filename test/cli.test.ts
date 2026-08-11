@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -67,4 +67,67 @@ test("status --json keeps rows and entries for stale jq consumers", async () => 
   expect(parsed.entries.map((r: any) => r.id)).toEqual(["alpha"]);
   expect(parsed.entries).toEqual(parsed.rows);
   expect(parsed.rows[0].timeoutMin).toBe(5);
+});
+
+test("import writes fresh entries paused and force re-import keeps them paused", async () => {
+  const codexDir = join(home, "legacy-codex");
+  const automationDir = join(codexDir, "imported-routine");
+  const claudeRegistry = join(home, "scheduled-tasks.json");
+  mkdirSync(automationDir, { recursive: true });
+  writeFileSync(
+    join(automationDir, "automation.toml"),
+    [
+      'id = "imported-routine"',
+      'status = "ACTIVE"',
+      'rrule = "FREQ=DAILY;BYHOUR=3;BYMINUTE=0;BYSECOND=0"',
+      'model = "gpt-5.6-terra"',
+      'prompt = "fixture"',
+      `cwds = ["${home}"]`,
+      "",
+    ].join("\n"),
+  );
+  writeFileSync(claudeRegistry, JSON.stringify({ scheduledTasks: [] }));
+
+  expect(
+    await main([
+      "import",
+      "--write",
+      "--codex-dir",
+      codexDir,
+      "--claude-registry",
+      claudeRegistry,
+      "--out",
+      join(home, "registry"),
+    ]),
+  ).toBe(0);
+  const importedPath = join(home, "registry", "imported-routine.toml");
+  expect(readFileSync(importedPath, "utf8")).toContain('status = "paused"');
+
+  expect(
+    await main([
+      "import",
+      "--write",
+      "--force",
+      "--replace-routing",
+      "--codex-dir",
+      codexDir,
+      "--claude-registry",
+      claudeRegistry,
+      "--out",
+      join(home, "registry"),
+    ]),
+  ).toBe(0);
+  expect(readFileSync(importedPath, "utf8")).toContain('status = "paused"');
+
+  const logs: string[] = [];
+  const originalLog = console.log;
+  console.log = (value?: unknown, ...rest: unknown[]) => {
+    logs.push([value, ...rest].map(String).join(" "));
+  };
+  try {
+    expect(await main(["list"])).toBe(0);
+  } finally {
+    console.log = originalLog;
+  }
+  expect(logs).toContain("imported-routine\tpaused\tcodex/gpt-5.6-terra\tFREQ=DAILY;BYHOUR=3;BYMINUTE=0;BYSECOND=0");
 });

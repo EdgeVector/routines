@@ -192,6 +192,7 @@ describe("planImport (fixtures)", () => {
     expect(created).toContain("sentry-triage");
     expect(created).not.toContain("program-driver"); // dropped duplicate
     expect(created).not.toContain("last-stack-program-rollup"); // paused
+    expect(plan.candidates.filter((c) => c.action === "create").every((c) => c.status === "paused")).toBe(true);
   });
 
   test("cross-scheduler duplicate detected with codex precedence", () => {
@@ -295,7 +296,7 @@ describe("renderToml round-trips through the real registry parser", () => {
     expect(e.prompt).toBe('line one\nline "two" with C:\\path and a # hash');
   });
 
-  test("force refresh can preserve an existing local route", () => {
+  test("force refresh preserves an existing local route and paused posture", () => {
     const reg = writeClaudeRegistry(tmp());
     const plan = planImport({ codexDir: tmp(), claudeRegistry: reg });
     const imported = plan.candidates.find((c) => c.id === "sentry-triage")!;
@@ -305,6 +306,7 @@ describe("renderToml round-trips through the real registry parser", () => {
       model: "gpt-5.5",
       effort: "medium",
       tier: "spine",
+      status: "paused",
     });
 
     const preserved = preserveExistingRouting(imported, existing, "/reg/sentry-triage.toml");
@@ -314,7 +316,22 @@ describe("renderToml round-trips through the real registry parser", () => {
     expect(e.model).toBe("gpt-5.5");
     expect(e.effort).toBe("medium");
     expect(e.tier).toBe("spine");
+    expect(e.status).toBe("paused");
     expect(renderToml(preserved)).toContain("preserved local route codex/gpt-5.5");
+  });
+
+  test("replacing routing still preserves an existing paused posture", () => {
+    const reg = writeClaudeRegistry(tmp());
+    const plan = planImport({ codexDir: tmp(), claudeRegistry: reg });
+    const imported = plan.candidates.find((c) => c.id === "sentry-triage")!;
+    const existing = renderToml({ ...imported, status: "paused", harness: "codex", model: "gpt-5.5" });
+
+    const preserved = preserveExistingRouting(imported, existing, "/reg/sentry-triage.toml", true);
+    const e = parseEntry(renderToml(preserved), "/reg/sentry-triage.toml");
+
+    expect(e.harness).toBe(imported.harness);
+    expect(e.model).toBe(imported.model);
+    expect(e.status).toBe("paused");
   });
 });
 
