@@ -28,6 +28,15 @@ import { join } from "node:path";
 
 /** How many recent runs feed the rolling noop/useful rates. */
 const OUTCOME_WINDOW = 10;
+/** Keep CLI/dashboard snapshots below their 20s caller budget. */
+const STATUS_SITUATIONS_TIMEOUT_MS = 5_000;
+/** One live run plus ten outcomes is normal; tolerate bounded stale residue. */
+const STATUS_HISTORY_MAX_CANDIDATES = 25;
+
+export interface StatusOptions {
+  situationsTimeoutMs?: number;
+  historyMaxCandidates?: number;
+}
 
 interface LatestRunDir {
   stamp: string;
@@ -127,6 +136,7 @@ export interface StatusRow {
   effectiveModel: string;
   effort: string | null;
   rrule: string;
+  timeoutMin: number;
   cwd: string;
   nextFire: string | null;
   lastRun: string | null;
@@ -173,16 +183,27 @@ export interface StatusSnapshot {
 }
 
 /** Compute the current status of every registered routine. */
-export function collectStatus(now: Date = new Date()): StatusSnapshot {
+export function collectStatus(now: Date = new Date(), options: StatusOptions = {}): StatusSnapshot {
   reconcileOrphanedRuns(now);
   const { entries, errors } = loadAll();
-  const check = loadActiveSituations();
+  const situationsTimeoutMs = Math.max(
+    1,
+    Math.floor(options.situationsTimeoutMs ?? STATUS_SITUATIONS_TIMEOUT_MS),
+  );
+  const historyMaxCandidates = Math.max(
+    OUTCOME_WINDOW,
+    Math.floor(options.historyMaxCandidates ?? STATUS_HISTORY_MAX_CANDIDATES),
+  );
+  const check = loadActiveSituations(situationsTimeoutMs);
   const rows: StatusRow[] = entries.map((e) => {
     const st = readState(e.id);
     const next = e.status === "active" ? nextAfter(e.parsedRrule, now) : null;
     const fence = fenceFor(e.id, check.situations);
     const group = groupForId(e.id, e.group);
-    const recent = listRuns(e.id, OUTCOME_WINDOW, { includeEscalate: false });
+    const recent = listRuns(e.id, OUTCOME_WINDOW, {
+      includeEscalate: false,
+      maxCandidates: historyMaxCandidates,
+    });
     clearDeadLockForCompletedRun(e.id, recent[0]);
     const stats = aggregateOutcomes(
       recent.map((r) => ({
@@ -224,6 +245,7 @@ export function collectStatus(now: Date = new Date()): StatusSnapshot {
       effectiveModel: route.model,
       effort: e.effort ?? null,
       rrule: e.rrule,
+      timeoutMin: e.timeoutMin,
       cwd: e.cwd,
       nextFire: next ? next.toISOString() : null,
       lastRun: st.lastRun ?? null,

@@ -54,7 +54,7 @@ function fsituationsBinary(): string {
   );
 }
 
-function runSituations(args: string[]): {
+function runSituations(args: string[], timeoutMs = 30_000): {
   ok: boolean;
   stdout: string;
   error?: string;
@@ -62,7 +62,7 @@ function runSituations(args: string[]): {
   const bin = fsituationsBinary();
   const res = spawnSync(bin, args, {
     encoding: "utf8",
-    timeout: 30_000,
+    timeout: timeoutMs,
   });
   if (res.error) {
     return { ok: false, stdout: "", error: `${bin}: ${res.error.message}` };
@@ -72,7 +72,7 @@ function runSituations(args: string[]): {
     if (bin === "situations") {
       const fallback = spawnSync("fsituations", args, {
         encoding: "utf8",
-        timeout: 30_000,
+        timeout: timeoutMs,
       });
       if (!fallback.error && fallback.status === 0) {
         return { ok: true, stdout: fallback.stdout ?? "" };
@@ -87,8 +87,8 @@ function runSituations(args: string[]): {
   return { ok: true, stdout: res.stdout ?? "" };
 }
 
-export function loadActiveSituations(): SituationCheck {
-  const res = runSituations(["list", "--json"]);
+export function loadActiveSituations(timeoutMs = 30_000): SituationCheck {
+  const res = runSituations(["list", "--json"], timeoutMs);
   if (!res.ok) {
     return { ok: false, situations: [], error: res.error };
   }
