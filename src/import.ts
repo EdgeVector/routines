@@ -12,8 +12,9 @@
 //
 // The import is a right-sized one-time migration (no shipped back-compat). It
 // PRESERVES each routine's prompt / rrule / model / cwd / harness faithfully,
-// with two normalizations that are required for the entries to actually parse
-// and dispatch:
+// but writes fresh registry entries PAUSED. Importing configuration must never
+// itself authorize execution; activation remains an explicit `routines resume`
+// action. Two normalizations are required for entries to parse and dispatch:
 //   - a stray "RRULE:" content-line prefix (some Codex automations carry one)
 //     is stripped so the value is a bare RFC 5545 recurrence;
 //   - 5-field cron expressions from Claude tasks are converted to the same
@@ -445,7 +446,7 @@ export function readClaudeTasks(
       model: claudeModel,
       rrule,
       cwd: t.cwd ?? process.cwd(),
-      status: "active",
+      status: "paused",
       timeoutMin: defaultTimeoutMin(t.id),
     };
     // The Claude scheduler stores no per-task prompt inline; the task's SKILL.md
@@ -485,7 +486,7 @@ export function planImport(opts: PlanOptions = {}): ImportPlan {
       ...(a.effort ? { effort: a.effort } : {}),
       rrule: a.rrule,
       cwd: a.cwd,
-      status: "active",
+      status: "paused",
       prompt: a.prompt,
       timeoutMin: defaultTimeoutMin(a.id),
     });
@@ -573,17 +574,24 @@ export function preserveExistingRouting(
   c: ImportCandidate,
   existingToml: string,
   existingPath: string,
+  replaceRouting = false,
 ): ImportCandidate {
   const existing = parseEntry(existingToml, existingPath);
   const next: ImportCandidate = {
     ...c,
-    harness: existing.harness,
-    model: existing.model,
+    status: existing.status,
     note: appendNote(
       c.note,
-      `preserved local route ${existing.harness}/${existing.model} from existing registry file`,
+      `preserved live status ${existing.status} from existing registry file`,
     ),
   };
+  if (replaceRouting) return next;
+  next.harness = existing.harness;
+  next.model = existing.model;
+  next.note = appendNote(
+    next.note,
+    `preserved local route ${existing.harness}/${existing.model} from existing registry file`,
+  );
   if (existing.effort) next.effort = existing.effort;
   else delete next.effort;
   if (existing.tier) next.tier = existing.tier;
@@ -604,7 +612,7 @@ export function renderDiffTable(plan: ImportPlan): string {
   out.push(`  ${create.length} to create · ${dup.length} skip-duplicate · ${plan.skipped.length} skip-inactive`);
   out.push("");
 
-  out.push("WILL CREATE:");
+  out.push("WILL CREATE (paused — use `routines resume <id>` to activate):");
   out.push(pad("  ID", 40) + pad("HARNESS/MODEL", 22) + "RRULE");
   for (const c of create) {
     out.push(pad("  " + c.id, 40) + pad(`${c.harness}/${c.model}`, 22) + c.rrule);

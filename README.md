@@ -285,8 +285,12 @@ exercising the full dispatch → spawn → log → heartbeat path that routines 
 
 ## Migration (one-time cutover)
 
-`routines import` reads the two **legacy** schedulers and generates registry
-entries, preserving each routine's prompt / rrule / model / cwd / harness:
+`routines import` reads the two **legacy** schedulers and generates **paused**
+registry entries, preserving each routine's prompt / rrule / model / cwd /
+harness. Importing configuration never activates it: inspect the result, then
+use `routines resume <id>` for each routine that should run. Force re-imports
+preserve an existing entry's live active/paused posture (including with
+`--replace-routing`).
 
 - `~/.codex/automations/*/automation.toml` — only the **ACTIVE** crons (PAUSED
   ones are already off). A stray `RRULE:` value prefix is stripped; the huge

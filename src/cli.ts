@@ -97,7 +97,8 @@ Environment:
 Import:
   --force                     refresh existing registry files
   --replace-routing           with --force, also replace existing harness/model
-                              instead of preserving local route edits
+                              instead of preserving local route edits; live
+                              active/paused status is always preserved
 
 Hygiene:
   --dry-run                   report only; do not delete/truncate
@@ -377,10 +378,9 @@ function cmdImport(rest: string[]): number {
         skippedExisting.push(c.id);
         continue;
       }
-      const candidate =
-        existsSync(dest) && values["replace-routing"] !== true
-          ? preserveExistingRouting(c, readFileSync(dest, "utf8"), dest)
-          : c;
+      const candidate = existsSync(dest)
+        ? preserveExistingRouting(c, readFileSync(dest, "utf8"), dest, values["replace-routing"] === true)
+        : c;
       writeFileSync(dest, renderToml(candidate));
       written.push(c.id);
     }
@@ -393,7 +393,14 @@ function cmdImport(rest: string[]): number {
           prefer: plan.prefer,
           outDir,
           write: values.write === true,
-          create: toCreate.map((c) => ({ id: c.id, source: c.source, harness: c.harness, model: c.model, rrule: c.rrule })),
+          create: toCreate.map((c) => ({
+            id: c.id,
+            source: c.source,
+            harness: c.harness,
+            model: c.model,
+            rrule: c.rrule,
+            status: c.status,
+          })),
           duplicates: plan.duplicates,
           skipped: plan.skipped,
           // Every LIVE legacy entry (created + skip-duplicate) — the exact set
