@@ -120,6 +120,73 @@ test("status prefers reparsed latest run outcome over persisted unknown state", 
   expect(row.outcomeUnknown).toBe(0);
 });
 
+test("status stays bounded and complete with 36 in-flight routines", () => {
+  writeFileSync(situationsBin, "#!/bin/sh\nwhile :; do :; done\n");
+
+  const stateDir = join(home, "state");
+  mkdirSync(stateDir, { recursive: true });
+  for (let i = 0; i < 36; i += 1) {
+    const id = `in-flight-${String(i).padStart(2, "0")}`;
+    writeRoutine(id);
+    writeLiveLock(id);
+    const completed = join(home, "runs", id, "2026-08-08T03-00-00-000Z");
+    mkdirSync(completed, { recursive: true });
+    writeFileSync(
+      join(completed, "meta.json"),
+      JSON.stringify({
+        startedAt: "2026-08-08T03:00:00.000Z",
+        finishedAt: "2026-08-08T03:05:00.000Z",
+        exitCode: 0,
+        timedOut: false,
+        outcome: "ok",
+        outcomeDetail: "last-finished",
+      }),
+    );
+    const current = join(home, "runs", id, "2026-08-08T04-00-00-000Z");
+    mkdirSync(current, { recursive: true });
+    writeFileSync(
+      join(current, "meta.json"),
+      JSON.stringify({
+        status: "running",
+        startedAt: "2026-08-08T04:00:00.000Z",
+        harnessPid: process.pid,
+        exitCode: null,
+        finishedAt: null,
+      }),
+    );
+    writeFileSync(
+      join(stateDir, `${id}.json`),
+      JSON.stringify({
+        id,
+        lastRun: "2026-08-08T03:05:00.000Z",
+        lastExit: 0,
+        lastRunDir: completed,
+        lastOutcome: "ok",
+        lastOutcomeDetail: "last-finished",
+      }),
+    );
+  }
+
+  const started = performance.now();
+  const snapshot = collectStatus(new Date("2026-08-08T04:10:00.000Z"), {
+    situationsTimeoutMs: 50,
+  });
+  const elapsedMs = performance.now() - started;
+
+  expect(elapsedMs).toBeLessThan(5_000);
+  expect(snapshot.situationsOk).toBe(false);
+  expect(snapshot.rows).toHaveLength(36);
+  for (const row of snapshot.rows) {
+    expect(row.running).toBe(true);
+    expect(row.status).toBe("active");
+    expect(row.timeoutMin).toBe(30);
+    expect(row.lastExit).toBe(0);
+    expect(row.lastOutcome).toBe("ok");
+    expect(row.lastOutcomeDetail).toBe("last-finished");
+    expect(row.nextFire).not.toBeNull();
+  }
+});
+
 test("status reparses historical outcome from bounded log tail", () => {
   writeRoutine("large-log-history");
   const runDir = join(home, "runs/large-log-history", "2026-07-16T15-58-40-903Z");

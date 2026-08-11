@@ -66,4 +66,5 @@ test("status --json keeps rows and entries for stale jq consumers", async () => 
   expect(parsed.rows.map((r: any) => r.id)).toEqual(["alpha"]);
   expect(parsed.entries.map((r: any) => r.id)).toEqual(["alpha"]);
   expect(parsed.entries).toEqual(parsed.rows);
+  expect(parsed.rows[0].timeoutMin).toBe(5);
 });

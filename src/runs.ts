@@ -70,6 +70,8 @@ export interface RunDetail extends RunSummary {
 
 interface ListRunsOptions {
   includeEscalate?: boolean;
+  /** Stop after examining this many newest run directories. */
+  maxCandidates?: number;
 }
 
 function runDirFor(id: string): string {
@@ -222,15 +224,22 @@ function isCompleteRunDir(runDir: string, meta: Record<string, unknown>): boolea
 export function listRuns(id: string, limit = 20, options: ListRunsOptions = {}): RunSummary[] {
   const dir = runDirFor(id);
   if (!existsSync(dir)) return [];
-  const stamps = readdirSync(dir)
-    .filter((s) => {
-      const rd = join(dir, s);
-      return isCompleteRunDir(rd, readMeta(rd));
-    })
-    .sort()
-    .reverse()
-    .slice(0, limit);
-  return stamps.map((s) => summarize(id, s, join(dir, s), readMeta(join(dir, s)), options));
+  const stamps = readdirSync(dir).sort().reverse();
+  const maxCandidates =
+    options.maxCandidates == null
+      ? Number.POSITIVE_INFINITY
+      : Math.max(0, Math.floor(options.maxCandidates));
+  const runs: RunSummary[] = [];
+  let examined = 0;
+  for (const stamp of stamps) {
+    if (runs.length >= limit || examined >= maxCandidates) break;
+    examined += 1;
+    const runDir = join(dir, stamp);
+    const meta = readMeta(runDir);
+    if (!isCompleteRunDir(runDir, meta)) continue;
+    runs.push(summarize(id, stamp, runDir, meta, options));
+  }
+  return runs;
 }
 
 /** Read one run's detail, including a tail of stdout/stderr. `stamp` defaults to
