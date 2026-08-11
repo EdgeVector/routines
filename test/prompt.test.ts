@@ -52,7 +52,12 @@ describe("dispatch prompt envelope", () => {
     expect(text).toContain("Driven-By: routine");
     expect(text).toContain("Automation-Id: last-stack-fkanban-pickup");
     expect(text).toContain("Attribution (required");
+    expect(text).toContain("Foreground command ownership (required)");
+    expect(text).toContain("keep polling that same call until it reaches a");
+    expect(text).toContain("A tool's first-yield");
+    expect(text).toContain("timeout is not the command's exit status");
     expect(text.indexOf("Dispatch envelope")).toBeLessThan(text.indexOf("Do work."));
+    expect(text.indexOf("Foreground command ownership")).toBeLessThan(text.indexOf("Do work."));
   });
 
   test("envelope includes run directory and Run-Id when provided", () => {
