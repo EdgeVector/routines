@@ -11,6 +11,7 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -296,10 +297,128 @@ function tryPublishStatus(dryRun: boolean): HygieneResult["publish"] {
   }
 }
 
+export interface ArtifactDaemonRefreshOptions {
+  dryRun: boolean;
+  restart: boolean;
+  currentExecutable: string;
+  currentAliases?: string[];
+  launchctlPrint: string;
+  reinstall: () => void;
+}
+
+/** Refresh a daemon whose launchd arguments still name a previous artifact. */
+export function refreshArtifactDaemonIfStale(
+  opts: ArtifactDaemonRefreshOptions,
+): HygieneResult["installFf"] {
+  const aliases = new Set([opts.currentExecutable, ...(opts.currentAliases ?? [])]);
+  const loadedPaths = opts.launchctlPrint
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith("/"));
+  if (loadedPaths.some((path) => aliases.has(path))) {
+    return {
+      attempted: false,
+      ok: true,
+      detail: `artifact daemon current (${opts.currentExecutable})`,
+      restarted: false,
+    };
+  }
+  if (!opts.restart) {
+    return {
+      attempted: false,
+      ok: true,
+      detail: `artifact daemon stale; reload skipped (--no-restart)`,
+      restarted: false,
+    };
+  }
+  if (opts.dryRun) {
+    return {
+      attempted: true,
+      ok: true,
+      detail: `would reinstall routinesd onto current artifact ${opts.currentExecutable}`,
+      restarted: false,
+    };
+  }
+  try {
+    opts.reinstall();
+    return {
+      attempted: true,
+      ok: true,
+      detail: `routinesd reinstalled onto current artifact ${opts.currentExecutable}`,
+      restarted: true,
+    };
+  } catch (err) {
+    return {
+      attempted: true,
+      ok: false,
+      detail: `artifact routinesd reinstall failed: ${(err as Error).message}`,
+      restarted: false,
+    };
+  }
+}
+
+function tryArtifactDaemonRefresh(
+  dryRun: boolean,
+  restart: boolean,
+): HygieneResult["installFf"] | null {
+  const currentLink = join(homedir(), ".host-track", "apps", "routines", "current", "dist", "routines");
+  if (!existsSync(currentLink)) return null;
+
+  let currentExecutable: string;
+  try {
+    currentExecutable = realpathSync(currentLink);
+  } catch {
+    return null;
+  }
+  let runningExecutable: string;
+  try {
+    runningExecutable = realpathSync(process.execPath);
+  } catch {
+    runningExecutable = process.execPath;
+  }
+  // Never repoint RUN state at an ad-hoc compiled DEV binary.
+  if (runningExecutable !== currentExecutable) return null;
+
+  const uid = process.getuid?.() ?? 0;
+  let launchctlPrint: string;
+  try {
+    launchctlPrint = execFileSync(
+      "launchctl",
+      ["print", `gui/${uid}/com.edgevector.routinesd`],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+    );
+  } catch (err) {
+    return {
+      attempted: true,
+      ok: false,
+      detail: `cannot inspect routinesd launchd arguments: ${(err as Error).message}`,
+      restarted: false,
+    };
+  }
+
+  return refreshArtifactDaemonIfStale({
+    dryRun,
+    restart,
+    currentExecutable,
+    currentAliases: [currentLink],
+    launchctlPrint,
+    reinstall: () => {
+      execFileSync(currentExecutable, ["install-daemon"], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+        timeout: 30_000,
+        env: process.env,
+      });
+    },
+  });
+}
+
 function tryFfInstall(
   dryRun: boolean,
   restart: boolean,
 ): HygieneResult["installFf"] {
+  const artifactRefresh = tryArtifactDaemonRefresh(dryRun, restart);
+  if (artifactRefresh) return artifactRefresh;
   // Resolve the live CLI tree from the running binary / argv.
   const entry = process.argv[1] ?? "";
   let root: string | null = null;
@@ -599,24 +718,15 @@ if [ -f "\$HOME/.config/secrets.env" ]; then
   set +a
 fi
 
-if [ -z "\${ROUTINES_CLI:-}" ]; then
-  shim="\${ROUTINES_SHIM:-$HOME/.local/bin/routines}"
-  if [ -L "\$shim" ] || [ -f "\$shim" ]; then
-    resolved="\$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "\$shim" 2>/dev/null || true)"
-    if [ -n "\$resolved" ]; then
-      root="\$(CDPATH= cd -- "\$(dirname -- "\$resolved")/.." && pwd 2>/dev/null || true)"
-      if [ -n "\$root" ]; then
-        ROUTINES_CLI="\$root/src/cli.ts"
-      fi
-    fi
-  fi
-fi
-
-if [ -z "\${ROUTINES_CLI:-}" ] || [ ! -f "\$ROUTINES_CLI" ]; then
+ROUTINES_CLI="\${ROUTINES_CLI:-\${ROUTINES_SHIM:-$HOME/.local/bin/routines}}"
+if [ ! -f "\$ROUTINES_CLI" ] && [ ! -L "\$ROUTINES_CLI" ]; then
   echo "routines hygiene: no live routines CLI resolved from ROUTINES_CLI/ROUTINES_SHIM; install or refresh ~/.local/bin/routines" >&2
   exit 127
 fi
 
+if [ -x "\$ROUTINES_CLI" ]; then
+  exec "\$ROUTINES_CLI" hygiene --json --ff-install
+fi
 BUN_BIN="\${ROUTINES_BUN_BIN:-\$HOME/.bun/bin/bun}"
 exec "\$BUN_BIN" "\$ROUTINES_CLI" hygiene --json --ff-install
 `;

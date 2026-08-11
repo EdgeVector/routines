@@ -22,6 +22,8 @@ export interface PlistOptions {
   program: string;
   /** Runtime that runs the entrypoint (default: the current bun/node exec). */
   runtime?: string;
+  /** The program is already a standalone executable; do not prepend a runtime. */
+  direct?: boolean;
   /** Extra env to inject (e.g. LASTGIT_SOCKET, ROUTINES_HOME). */
   env?: Record<string, string>;
 }
@@ -36,7 +38,7 @@ function xmlEscape(s: string): string {
 export function renderPlist(opts: PlistOptions): string {
   const runtime = opts.runtime ?? process.execPath;
   const logDir = daemonLogDir();
-  const args = [runtime, opts.program, "daemon"];
+  const args = opts.direct ? [opts.program, "daemon"] : [runtime, opts.program, "daemon"];
   const argXml = args.map((a) => `    <string>${xmlEscape(a)}</string>`).join("\n");
 
   const env = { ROUTINES_HOME: routinesHome(), ...(opts.env ?? {}) };
@@ -71,6 +73,28 @@ ${envXml}
 </dict>
 </plist>
 `;
+}
+
+/**
+ * Build launchd options for either a source CLI or Bun's compiled executable.
+ *
+ * A compiled Bun program reports an embedded `/$bunfs/...` argv[1]. Passing
+ * that pseudo-path back to the binary makes it look like a user argument, so
+ * launchd must execute process.execPath directly instead.
+ */
+export function plistOptionsForEntrypoint(opts: {
+  execPath: string;
+  entrypoint: string;
+  env?: Record<string, string>;
+}): PlistOptions {
+  if (opts.entrypoint.startsWith("/$bunfs/") || opts.entrypoint.startsWith("$bunfs/")) {
+    return { program: opts.execPath, direct: true, env: opts.env };
+  }
+  return {
+    program: opts.entrypoint,
+    runtime: opts.execPath,
+    env: opts.env,
+  };
 }
 
 export interface InstallResult {

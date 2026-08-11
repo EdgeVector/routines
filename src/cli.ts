@@ -27,7 +27,13 @@ import {
   releaseLock,
   startDaemon,
 } from "./daemon.ts";
-import { installDaemon, plistPath, renderPlist, uninstallDaemon } from "./launchd.ts";
+import {
+  installDaemon,
+  plistOptionsForEntrypoint,
+  plistPath,
+  renderPlist,
+  uninstallDaemon,
+} from "./launchd.ts";
 import {
   installHygieneDaemon,
   runHygiene,
@@ -768,7 +774,13 @@ function launchdEnv(): Record<string, string> {
 }
 
 function cmdInstallDaemon(): number {
-  const res = installDaemon({ program: selfProgram(), env: launchdEnv() });
+  const res = installDaemon(
+    plistOptionsForEntrypoint({
+      execPath: process.execPath,
+      entrypoint: selfProgram(),
+      env: launchdEnv(),
+    }),
+  );
   console.log(`plist: ${res.plistPath}`);
   console.log(res.message);
   return res.loaded ? 0 : 1;
@@ -859,7 +871,14 @@ function printHygieneHuman(r: HygieneResult): void {
 }
 
 function cmdPrintPlist(): number {
-  console.log(renderPlist({ program: selfProgram() }));
+  console.log(
+    renderPlist(
+      plistOptionsForEntrypoint({
+        execPath: process.execPath,
+        entrypoint: selfProgram(),
+      }),
+    ),
+  );
   return 0;
 }
 
