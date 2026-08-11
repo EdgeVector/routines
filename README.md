@@ -199,6 +199,15 @@ it survives session exit. Each tick it:
 Per-run evidence lands at `$ROUTINES_HOME/runs/<id>/<ts>/`
 (`meta.json`, `prompt.txt`, `stdout.log`, `stderr.log`).
 
+### Explicit outcome contract
+
+Every dispatched routine prompt requires one final, single-line verdict in
+`$ROUTINES_RUN_DIR/outcome.txt`: `ok <detail>`, `noop <detail>`, or
+`error <detail>`. This sink is authoritative over transcript heuristics and is
+reported by `routines status --json` as `outcomeSource="sink"`. Routines still
+print their `ROUTINE_RESULT outcome=...` trailer as a compatibility fallback
+for older runners and prompts that have not yet adopted the sink.
+
 ```sh
 routines install-daemon                          # bootstrap under launchd
 routines daemon --once --catchup 60              # single evaluation pass (testing / e2e)
