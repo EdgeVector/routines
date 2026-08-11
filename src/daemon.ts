@@ -35,6 +35,7 @@ import { isHarnessOutaged } from "./harness-outage.ts";
 import { routesForFire, runRoutine, type RunResult } from "./runner.ts";
 import { loadProjectConfig } from "./project-config.ts";
 import { captureRoutineRunFailure, captureRoutinesException } from "./observability.ts";
+import { loadCapacityPolicy, planCapacity, type CapacityPolicy } from "./capacity.ts";
 
 function harnessFromOutageSituation(slug: string): string | null {
   const m = slug.match(/^harness-outage-(.+)$/);
@@ -69,6 +70,8 @@ export interface DaemonOptions {
   catchupMs?: number;
   /** Structured log sink (default: stderr JSON lines). */
   log?: (event: DaemonEvent) => void;
+  /** Tier-aware quota admission. Defaults to the routines-owned policy file. */
+  capacityPolicy?: CapacityPolicy | false;
 }
 
 export interface DaemonEvent {
@@ -80,6 +83,8 @@ export interface DaemonEvent {
     | "skip-fence"
     | "skip-single-flight"
     | "skip-cap"
+    | "skip-capacity-policy"
+    | "capacity"
     | "warmup"
     | "registry-error"
     | "situations-degraded"
@@ -542,7 +547,42 @@ export function dispatchDue(opts: DispatchPassOptions = {}): Promise<RunResult>[
     if (ka !== kb) return ka - kb;
     return a.entry.id.localeCompare(b.entry.id);
   });
-  for (const { entry, occ } of due) {
+  let policy: CapacityPolicy;
+  try {
+    policy = opts.capacityPolicy === false
+      ? { enabled: false, staleAfterSeconds: 1, unsetTier: "shed", harnesses: {} }
+      : (opts.capacityPolicy ?? loadCapacityPolicy());
+  } catch (err) {
+    // A malformed policy must fail closed for non-spine work without taking
+    // the essential shipping loop down with it.
+    policy = { enabled: true, staleAfterSeconds: 1, unsetTier: "shed", harnesses: {} };
+    log({
+      ts: now.toISOString(),
+      kind: "capacity",
+      detail: `invalid policy; spine-only fail-closed: ${(err as Error).message}`,
+    });
+  }
+  const capacityPlan = planCapacity(due, policy, now);
+  for (const allowance of capacityPlan.allowances) {
+    log({
+      ts: now.toISOString(),
+      kind: "capacity",
+      detail: `${allowance.harness} ${allowance.state} ${allowance.detail} slots=${allowance.fireSlots}`,
+    });
+  }
+  for (const decision of capacityPlan.decisions) {
+    const entry = decision.entry;
+    const occ = due.find((item) => item.entry.id === entry.id)?.occ;
+    if (!occ) continue;
+    if (!decision.admitted) {
+      log({
+        ts: now.toISOString(),
+        kind: "skip-capacity-policy",
+        id: entry.id,
+        detail: `tier=${decision.tier} ${decision.reason}`,
+      });
+      continue;
+    }
     tryDispatch(entry, occ, deps);
   }
 

@@ -5,6 +5,7 @@
 // harness (claude|codex|grok) and model.
 
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 
@@ -42,6 +43,7 @@ import { startServer } from "./server.ts";
 import { loadProjectConfig } from "./project-config.ts";
 import { deliverFleetStatus, publishFleetStatus, type DeliveryRecipient } from "./publish-status.ts";
 import { initRoutinesSentry } from "./observability.ts";
+import { runCapacityControllerTick } from "./capacity-runtime.ts";
 
 const HELP = `routines ${pkg.version} — one scheduler for agent routines (claude|codex)
 
@@ -67,6 +69,7 @@ Commands:
   web                         serve the local dashboard (localhost); --port, --host
   doctor                      validate the registry + environment (+ configurations)
   daemon                      run the scheduler loop (launchd entrypoint); --once, --catchup <s>
+  capacity-controller         run one quota + idle-ladder controller tick; --dry-run, --json
   install-daemon              install + load the launchd user agent
   uninstall-daemon            unload + remove the launchd user agent
   install-hygiene             install + load hourly mechanical hygiene launchd agent
@@ -146,6 +149,8 @@ async function main(argv: string[]): Promise<number> {
       return cmdDoctor();
     case "daemon":
       return cmdDaemon(rest);
+    case "capacity-controller":
+      return cmdCapacityController(rest);
     case "install-daemon":
       return cmdInstallDaemon();
     case "uninstall-daemon":
@@ -692,6 +697,36 @@ async function cmdDaemon(rest: string[]): Promise<number> {
     `routinesd started (tick=${tickMs}ms concurrency=${capLabel} free-slot-pool=on home=${routinesHome()})`,
   );
   await handle.done;
+  return 0;
+}
+
+function cmdCapacityController(rest: string[]): number {
+  const { values } = parseArgs({
+    args: rest,
+    options: {
+      "dry-run": { type: "boolean" },
+      json: { type: "boolean" },
+    },
+    allowPositionals: true,
+  });
+  const result = runCapacityControllerTick({
+    dryRun: values["dry-run"] === true,
+    runRoutine: (id) => {
+      const program = process.argv[1];
+      if (!program) throw new Error("cannot resolve routines CLI entrypoint");
+      execFileSync(process.execPath, [program, "run", id, "--quiet"], {
+        stdio: "inherit",
+        timeout: 30 * 60_000,
+      });
+    },
+  });
+  if (values.json) console.log(JSON.stringify(result, null, 2));
+  else {
+    const action = result.decision?.action ?? "disabled-idle-ladder";
+    console.log(
+      `capacity-controller action=${action} ready=${result.ready ?? "unreadable"} fired=${result.fired ?? "none"} dry_run=${result.dryRun}`,
+    );
+  }
   return 0;
 }
 

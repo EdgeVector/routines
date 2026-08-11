@@ -49,6 +49,29 @@ first class a capacity controller may skip. Omitting it preserves legacy
 behavior; controllers must treat an unset tier explicitly rather than guessing
 from the routine id.
 
+### Capacity controller
+
+An optional `${ROUTINES_HOME}/capacity-controller.json` policy makes routinesd
+admission quota-aware. Each harness snapshot supplies `usedPercent`, live
+`resetAt`, `observedAt`, and measured `percentPerFire`; routinesd computes
+`(100 - usedPercent) / hoursUntilReset` and admits due work in
+`spine -> worker -> opportunistic` order. Spine always runs. Missing, stale,
+expired, or malformed quota data fails closed for every non-spine tier. The
+`unsetTier` policy is mandatory and explicit (`shed` is the safe migration
+default). See `docs/capacity-controller.example.json`.
+
+`routines capacity-controller --dry-run --json` runs the companion ready-count
+idle ladder without mutating its hysteresis/cooldown state. The ladder reads
+`kanban pickup status --json`, leaves state untouched when the board is
+unreadable, and tries one rung per tick in this order: unblock, promote, derive,
+invent, harvest, entropy. Every tick is appended to
+`${ROUTINES_HOME}/logs/capacity-controller.jsonl`.
+
+Use `scripts/migrate-capacity-controller.sh` to prove the replacement in dry-run
+mode. Its explicit `--apply` path installs the one routines-owned controller
+and only then retires the vacation pilot and standalone idle-ladder launchd
+jobs.
+
 ### Harness fallback chain
 
 When a run fails because the **harness itself** is out of service (usage limit /

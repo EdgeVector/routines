@@ -1,0 +1,25 @@
+{
+  "enabled": true,
+  "staleAfterSeconds": 14400,
+  "unsetTier": "shed",
+  "harnesses": {
+    "codex": {
+      "usedPercent": 25,
+      "resetAt": "2026-08-15T20:30:00.000Z",
+      "observedAt": "2026-08-11T10:00:00.000Z",
+      "percentPerFire": 0.058
+    }
+  },
+  "idleLadder": {
+    "readyFloor": 0,
+    "dryTicksNeeded": 2,
+    "rungs": [
+      { "name": "unblock", "cooldownSeconds": 7200, "routineIds": ["last-stack-human-gate-audit"] },
+      { "name": "promote", "cooldownSeconds": 7200, "routineIds": ["last-stack-groom-board"] },
+      { "name": "derive", "cooldownSeconds": 14400, "routineIds": ["last-stack-milestone-driver"] },
+      { "name": "invent", "cooldownSeconds": 86400, "routineIds": ["last-stack-north-star-driver"] },
+      { "name": "harvest", "cooldownSeconds": 21600, "routineIds": ["last-stack-papercut-reconciler"] },
+      { "name": "entropy", "cooldownSeconds": 43200, "routineIds": ["dead-code-reaper"] }
+    ]
+  }
+}
