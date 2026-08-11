@@ -18,7 +18,7 @@ import { compareGrouped, groupForId } from "./groups.ts";
 import { effectiveRoute } from "./harness-outage.ts";
 import { aggregateOutcomes, type OutcomeKind } from "./outcome.ts";
 import { fenceFor, loadActiveSituations } from "./situations.ts";
-import { loadAll, type Harness, type Status } from "./registry.ts";
+import { loadAll, type Harness, type RoutineTier, type Status } from "./registry.ts";
 import { listRuns, type RunSummary } from "./runs.ts";
 import { routinesHome, runsDir } from "./paths.ts";
 import { nextAfter } from "./rrule.ts";
@@ -135,6 +135,7 @@ export interface StatusRow {
   effectiveHarness: Harness;
   effectiveModel: string;
   effort: string | null;
+  tier: RoutineTier | null;
   rrule: string;
   timeoutMin: number;
   cwd: string;
@@ -244,6 +245,7 @@ export function collectStatus(now: Date = new Date(), options: StatusOptions = {
       effectiveHarness: route.harness,
       effectiveModel: route.model,
       effort: e.effort ?? null,
+      tier: e.tier ?? null,
       rrule: e.rrule,
       timeoutMin: e.timeoutMin,
       cwd: e.cwd,

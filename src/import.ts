@@ -33,7 +33,7 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 
-import { parseEntry, type Harness, type Status } from "./registry.ts";
+import { parseEntry, type Harness, type RoutineTier, type Status } from "./registry.ts";
 import { canonicalRoutineId } from "./kanban-id-migration.ts";
 import { parseRRule } from "./rrule.ts";
 
@@ -46,6 +46,7 @@ export interface ImportCandidate {
   harness: Harness;
   model: string;
   effort?: string;
+  tier?: RoutineTier;
   rrule: string;
   cwd: string;
   status: Status;
@@ -555,6 +556,7 @@ export function renderToml(c: ImportCandidate): string {
   lines.push(`harness = "${c.harness}"`);
   lines.push(`model = "${escapeTomlBasic(c.model)}"`);
   if (c.effort) lines.push(`effort = "${escapeTomlBasic(c.effort)}"`);
+  if (c.tier) lines.push(`tier = "${c.tier}"`);
   lines.push(`rrule = "${escapeTomlBasic(c.rrule)}"`);
   lines.push(`cwd = "${escapeTomlBasic(c.cwd)}"`);
   lines.push(`status = "${c.status}"`);
@@ -584,6 +586,8 @@ export function preserveExistingRouting(
   };
   if (existing.effort) next.effort = existing.effort;
   else delete next.effort;
+  if (existing.tier) next.tier = existing.tier;
+  else delete next.tier;
   return next;
 }
 

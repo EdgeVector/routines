@@ -304,6 +304,7 @@ describe("renderToml round-trips through the real registry parser", () => {
       harness: "codex",
       model: "gpt-5.5",
       effort: "medium",
+      tier: "spine",
     });
 
     const preserved = preserveExistingRouting(imported, existing, "/reg/sentry-triage.toml");
@@ -312,6 +313,7 @@ describe("renderToml round-trips through the real registry parser", () => {
     expect(e.harness).toBe("codex");
     expect(e.model).toBe("gpt-5.5");
     expect(e.effort).toBe("medium");
+    expect(e.tier).toBe("spine");
     expect(renderToml(preserved)).toContain("preserved local route codex/gpt-5.5");
   });
 });

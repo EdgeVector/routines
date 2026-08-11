@@ -69,6 +69,19 @@ describe("parseEntry", () => {
     expect(e.heartbeatSlug).toBe("routine-heartbeats");
   });
 
+  test("accepts the three capacity tiers", () => {
+    for (const tier of ["spine", "worker", "opportunistic"] as const) {
+      const e = parseEntry(base + `\ntier = "${tier}"`, "/x/disk-reclaim.toml");
+      expect(e.tier).toBe(tier);
+    }
+  });
+
+  test("rejects an invalid capacity tier", () => {
+    expect(() => parseEntry(base + '\ntier = "critical"', "/x/disk-reclaim.toml")).toThrow(
+      /tier.*spine\|worker\|opportunistic/,
+    );
+  });
+
   test("accepts an explicit routine error priority", () => {
     const e = parseEntry(base + '\nerror_priority = "P0"', "/x/disk-reclaim.toml");
     expect(e.errorPriority).toBe("P0");

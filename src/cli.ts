@@ -846,6 +846,7 @@ function summarize(e: RoutineEntry) {
     harness: e.harness,
     model: e.model,
     effort: e.effort ?? null,
+    tier: e.tier ?? null,
     rrule: e.rrule,
     cwd: e.cwd,
     status: e.status,

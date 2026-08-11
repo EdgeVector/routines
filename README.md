@@ -31,6 +31,7 @@ and heartbeats still flow to fbrain.
 harness       = "claude"                       # claude | codex | grok
 model         = "claude-opus-4-8"              # e.g. sonnet | gpt-5.5 | grok-4.5
 effort        = "medium"                        # optional (codex reasoning effort)
+tier          = "worker"                        # optional: spine | worker | opportunistic
 rrule         = "FREQ=HOURLY;INTERVAL=2"        # RFC 5545, same dialect as Codex automations
 prompt_path   = "/Users/you/.last-stack/routines/disk-reclaim.md"   # or inline `prompt = "..."`
 cwd           = "/Users/you/code/edgevector"
@@ -41,6 +42,12 @@ heartbeat_slug = "routine-heartbeats"           # optional; runs append the flee
 group         = "ops"                            # optional dashboard group override
 # fallback    = "claude:sonnet,grok:grok-4.5"  # optional; overrides fleet default tail
 ```
+
+`tier` is the shared capacity-control priority. `spine` is the essential
+shipping loop, `worker` is normal product work, and `opportunistic` is the
+first class a capacity controller may skip. Omitting it preserves legacy
+behavior; controllers must treat an unset tier explicitly rather than guessing
+from the routine id.
 
 ### Harness fallback chain
 
