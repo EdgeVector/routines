@@ -26,7 +26,7 @@ afterEach(() => {
   rmSync(home, { recursive: true, force: true });
 });
 
-function writeRoutine(id: string): void {
+function writeRoutine(id: string, tier?: "spine" | "worker" | "opportunistic"): void {
   writeFileSync(
     join(home, "registry", `${id}.toml`),
     [
@@ -34,11 +34,21 @@ function writeRoutine(id: string): void {
       'model = "gpt-5"',
       'rrule = "FREQ=HOURLY"',
       'prompt = "hello"',
+      ...(tier ? [`tier = "${tier}"`] : []),
       `cwd = "${home}"`,
       "",
     ].join("\n"),
   );
 }
+
+test("status exposes capacity tier without guessing a default", () => {
+  writeRoutine("pickup-worker", "worker");
+  writeRoutine("legacy-unclassified");
+
+  const rows = collectStatus(new Date("2026-08-08T04:10:00.000Z")).rows;
+  expect(rows.find((row) => row.id === "pickup-worker")?.tier).toBe("worker");
+  expect(rows.find((row) => row.id === "legacy-unclassified")?.tier).toBeNull();
+});
 
 function writeLiveLock(id: string): void {
   mkdirSync(join(home, "locks"), { recursive: true });

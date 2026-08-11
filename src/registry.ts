@@ -15,6 +15,8 @@ import { parseToml, type TomlValue } from "./toml.ts";
 export const HARNESSES = ["claude", "codex", "grok"] as const;
 export type Harness = (typeof HARNESSES)[number];
 export type Status = "active" | "paused";
+export const ROUTINE_TIERS = ["spine", "worker", "opportunistic"] as const;
+export type RoutineTier = (typeof ROUTINE_TIERS)[number];
 export const ERROR_PRIORITIES = ["P0", "P1", "P2", "P3"] as const;
 export type ErrorPriority = (typeof ERROR_PRIORITIES)[number];
 
@@ -31,6 +33,8 @@ export interface RoutineEntry {
   harness: Harness;
   model: string;
   effort?: string;
+  /** Capacity priority: spine is never shed, opportunistic is shed first. */
+  tier?: RoutineTier;
   rrule: string;
   parsedRrule: RRule;
   cwd: string;
@@ -76,6 +80,7 @@ const KNOWN_KEYS = new Set([
   "harness",
   "model",
   "effort",
+  "tier",
   "rrule",
   "cwd",
   "status",
@@ -192,6 +197,16 @@ export function parseEntry(text: string, sourcePath: string): RoutineEntry {
   if (prompt) entry.prompt = prompt;
   const effort = str(raw, "effort", sourcePath);
   if (effort) entry.effort = effort;
+  const tier = str(raw, "tier", sourcePath);
+  if (tier !== undefined) {
+    if (!(ROUTINE_TIERS as readonly string[]).includes(tier)) {
+      throw new RegistryError(
+        `invalid tier ${JSON.stringify(tier)} (${ROUTINE_TIERS.join("|")})`,
+        sourcePath,
+      );
+    }
+    entry.tier = tier as RoutineTier;
+  }
   const heartbeatSlug = str(raw, "heartbeat_slug", sourcePath);
   if (heartbeatSlug) entry.heartbeatSlug = heartbeatSlug;
   if (errorPriorityRaw) entry.errorPriority = errorPriorityRaw as ErrorPriority;
