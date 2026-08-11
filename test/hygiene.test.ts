@@ -5,6 +5,7 @@ import { join } from "node:path";
 
 import {
   hygieneLauncherPath,
+  refreshArtifactDaemonIfStale,
   renderHygieneLauncher,
   renderHygienePlist,
   runHygiene,
@@ -184,8 +185,43 @@ describe("renderHygieneLauncher", () => {
 
     expect(script).toContain("ROUTINES_SHIM");
     expect(script).toContain("$HOME/.local/bin/routines");
+    expect(script).toContain("exec \"$ROUTINES_CLI\" hygiene --json --ff-install");
     expect(script).toContain("exec \"$BUN_BIN\" \"$ROUTINES_CLI\" hygiene --json --ff-install");
     expect(script).toContain("no live routines CLI resolved");
+  });
+});
+
+describe("artifact daemon refresh", () => {
+  const current = "/host-track/apps/routines/versions/current/dist/routines";
+
+  test("does nothing when launchd already names the current artifact", () => {
+    let reinstalls = 0;
+    const result = refreshArtifactDaemonIfStale({
+      dryRun: false,
+      restart: true,
+      currentExecutable: current,
+      launchctlPrint: `arguments = {\n\t${current}\n\tdaemon\n}`,
+      reinstall: () => reinstalls++,
+    });
+    expect(result.attempted).toBe(false);
+    expect(result.restarted).toBe(false);
+    expect(reinstalls).toBe(0);
+  });
+
+  test("performs one supervised reinstall when launchd names an old artifact", () => {
+    let reinstalls = 0;
+    const result = refreshArtifactDaemonIfStale({
+      dryRun: false,
+      restart: true,
+      currentExecutable: current,
+      launchctlPrint:
+        "arguments = {\n\t/host-track/apps/routines/versions/old/src/cli.ts\n\tdaemon\n}",
+      reinstall: () => reinstalls++,
+    });
+    expect(result.ok).toBe(true);
+    expect(result.attempted).toBe(true);
+    expect(result.restarted).toBe(true);
+    expect(reinstalls).toBe(1);
   });
 });
 
