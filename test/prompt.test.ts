@@ -56,8 +56,44 @@ describe("dispatch prompt envelope", () => {
     expect(text).toContain("keep polling that same call until it reaches a");
     expect(text).toContain("A tool's first-yield");
     expect(text).toContain("timeout is not the command's exit status");
+    expect(text).toContain("Explicit routine outcome (required)");
+    expect(text).toContain('$ROUTINES_RUN_DIR/outcome.txt');
+    expect(text).toContain('outcomeSource="sink"');
+    expect(text).toContain("legacy");
+    expect(text).toContain("ROUTINE_RESULT outcome=...");
+    expect(text).toContain("fallback");
     expect(text.indexOf("Dispatch envelope")).toBeLessThan(text.indexOf("Do work."));
     expect(text.indexOf("Foreground command ownership")).toBeLessThan(text.indexOf("Do work."));
+    expect(text.indexOf("Explicit routine outcome")).toBeLessThan(text.indexOf("Do work."));
+  });
+
+  test("injects the outcome sink contract into the four initial adopter prompts", () => {
+    tmp = mkdtempSync(join(tmpdir(), "routines-outcome-sink-"));
+    process.env.ROUTINES_HOME = tmp;
+    process.env.ROUTINES_SKIP_NOTICES = "1";
+
+    for (const id of [
+      "last-stack-fkanban-watch",
+      "last-stack-feature-prove",
+      "backup-restore-probe",
+      "last-stack-pipeline-health",
+    ]) {
+      const entry = parseEntry(
+        ['harness = "codex"', 'model = "m1"', 'rrule = "FREQ=HOURLY"', `prompt = "Run ${id}."`].join(
+          "\n",
+        ),
+        join(tmp, `${id}.toml`),
+      );
+      const runDir = join(tmp, "runs", id, "2026-08-11T07-20-01-501Z");
+      const text = resolveDispatchPrompt(entry, { runDir });
+
+      expect(text).toContain(`Automation ID: ${id}`);
+      expect(text).toContain(`Run directory: ${runDir}`);
+      expect(text).toContain('$ROUTINES_RUN_DIR/outcome.txt');
+      expect(text).toContain('outcomeSource="sink"');
+      expect(text).toContain("ROUTINE_RESULT outcome=...");
+      expect(text.indexOf("Explicit routine outcome")).toBeLessThan(text.indexOf(`Run ${id}.`));
+    }
   });
 
   test("envelope includes run directory and Run-Id when provided", () => {
