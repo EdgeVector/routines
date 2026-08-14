@@ -101,7 +101,12 @@ const CAPACITY_PATTERNS: RegExp[] = [
 const AUTH_PATTERNS: RegExp[] = [
   /invalid api key/i,
   /api key (?:is )?(?:invalid|expired|revoked)/i,
-  /authentication failed/i,
+  // Space, underscore, or hyphen — Claude stream-json uses "authentication_failed".
+  /authentication[_\s-]?failed/i,
+  /failed to authenticate/i,
+  /oauth session expired/i,
+  /could not be refreshed/i,
+  /"error"\s*:\s*"authentication_failed"/i,
   /401 unauthorized/i,
 ];
 
@@ -135,6 +140,18 @@ function matchLine(text: string, patterns: RegExp[]): string | null {
       let score = 1;
       if (/^ERROR:/i.test(line)) score += 5;
       if (/API Error:\s*Connection closed mid-response/i.test(line)) score += 5;
+      // Claude Code OAuth / auth failures arrive as stream-json one-liners with
+      // "error":"authentication_failed" or result text about OAuth expiry. Those
+      // are real harness deaths, not Situation echoes — boost before JSON demotion.
+      if (
+        /authentication[_\s-]?failed/i.test(line) ||
+        /failed to authenticate/i.test(line) ||
+        /oauth session expired/i.test(line) ||
+        /"error"\s*:\s*"authentication_failed"/i.test(line) ||
+        /"is_api_error_message"\s*:\s*true/i.test(line)
+      ) {
+        score += 8;
+      }
       if (/\b(ERROR|error)\b/.test(line) && line.length < 240) score += 2;
       // Demote Situation / JSON / card-body echoes.
       if (/"summary"\s*:/.test(line) || /"preflight_message"\s*:/.test(line)) score -= 10;

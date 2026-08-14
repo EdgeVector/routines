@@ -26,13 +26,32 @@ export function heartbeatsLogPath(): string {
 /** One heartbeat line, matching the fleet convention:
  * `<ISO> <id> <ok|error> harness=<h> model=<m> exit=<n> dur=<s>s run=<dir>` */
 export function heartbeatLine(entry: RoutineEntry, result: RunResult): string {
-  const state = result.exitCode === 0 ? "ok" : "error";
+  // Prefer outcome kind for clean harness skips (auth/capacity safe_skip → exit 0
+  // but still a noop, not a successful agent turn).
+  const state =
+    result.exitCode === 0
+      ? result.outcome.kind === "noop"
+        ? "noop"
+        : "ok"
+      : "error";
   const dur = (result.durationMs / 1000).toFixed(1);
-  return (
+  let line =
     `${result.finishedAt} ${entry.id} ${state} ` +
     `harness=${entry.harness} model=${entry.model} ` +
-    `exit=${result.exitCode ?? "null"} dur=${dur}s run=${result.runDir}`
-  );
+    `exit=${result.exitCode ?? "null"} dur=${dur}s run=${result.runDir}`;
+  // Stable fleet token for Claude OAuth / auth harness deaths (card VERIFY +
+  // multi-routine storm collapse). Prefer outcome detail; fall back to kind.
+  const detail = result.outcome.detail ?? "";
+  if (
+    /reason=harness-auth-expired|harness-auth-expired|authentication_failed|oauth session expired|failed to authenticate/i.test(
+      detail,
+    )
+  ) {
+    if (!/\breason=harness-auth-expired\b/i.test(line)) {
+      line += " reason=harness-auth-expired";
+    }
+  }
+  return line;
 }
 
 export interface HeartbeatOutcome {
