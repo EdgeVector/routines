@@ -684,7 +684,17 @@ function parseHarnessExternalSkip(
     lower.includes("you have hit your usage limit") ||
     lower.includes("usage limit");
   const providerTransient = /API Error:\s*Connection closed mid-response/i.test(text);
-  if (!capacityOrUsage && !providerTransient) return null;
+  // Claude OAuth / auth: stream-json carries "error":"authentication_failed"
+  // and prose "Failed to authenticate: OAuth session expired…". Treat as
+  // harness-level skip (not a product failure) so fallback can hop agents and
+  // multi-routine storms collapse to one stable reason token.
+  const authExpired =
+    lower.includes("authentication_failed") ||
+    lower.includes("authentication failed") ||
+    lower.includes("failed to authenticate") ||
+    lower.includes("oauth session expired") ||
+    /"error"\s*:\s*"authentication_failed"/i.test(text);
+  if (!capacityOrUsage && !providerTransient && !authExpired) return null;
 
   // Once a worker has visibly claimed work or published a review artifact,
   // the routine contract requires normal rollback/handoff handling. Treat the
@@ -699,11 +709,17 @@ function parseHarnessExternalSkip(
     /\bpr=(?:https?:\/\/|lastgit:\/\/)/i.test(text);
   if (claimedOrPublished) return null;
 
+  let detail: string;
+  if (authExpired) {
+    detail = "reason=harness-auth-expired no_card_claimed";
+  } else if (providerTransient && !capacityOrUsage) {
+    detail = "harness-transient no_card_claimed";
+  } else {
+    detail = "codex-capacity no_card_claimed";
+  }
   return {
     kind: "noop",
-    detail: providerTransient && !capacityOrUsage
-      ? "harness-transient no_card_claimed"
-      : "codex-capacity no_card_claimed",
+    detail,
     source: "safe_skip",
   };
 }

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -278,6 +278,92 @@ describe("runRoutine same-run fallback", () => {
     expect(meta.fallbackAttempts[0].outage).toBe(true);
     expect(meta.fallbackAttempts[0].outcome).toBe("noop");
     expect(isHarnessOutaged("claude")).toBe(true);
+  });
+
+  test("claude oauth authentication_failed falls back to grok; no papercut path", async () => {
+    // Stream-json shape from live Claude Code when OAuth cannot refresh.
+    const oauthJson = JSON.stringify({
+      type: "assistant",
+      message: {
+        content: [
+          {
+            type: "text",
+            text: "Failed to authenticate: OAuth session expired and could not be refreshed",
+          },
+        ],
+      },
+      error: "authentication_failed",
+      is_api_error_message: true,
+    });
+    const oauthResult = JSON.stringify({
+      is_error: true,
+      type: "result",
+      subtype: "success",
+      result: "Failed to authenticate: OAuth session expired and could not be refreshed",
+      terminal_reason: "api_error",
+    });
+    process.env.ROUTINES_CLAUDE_BIN = stub(
+      join(home, "claude-bin"),
+      [
+        "#!/bin/sh",
+        `printf '%s\\n' ${JSON.stringify(oauthJson)}`,
+        `printf '%s\\n' ${JSON.stringify(oauthResult)}`,
+        "exit 1",
+        "",
+      ].join("\n"),
+    );
+    process.env.ROUTINES_GROK_BIN = stub(
+      join(home, "grok-bin"),
+      [
+        "#!/bin/sh",
+        "printf '%s\\n' 'lastdb-canary-soak-watch 2026-08-13T13:30:00Z ok GREEN findings=0'",
+        "exit 0",
+        "",
+      ].join("\n"),
+    );
+
+    writeFileSync(
+      join(home, "registry", "lastdb-canary-soak-watch.toml"),
+      [
+        'harness = "claude"',
+        'model = "sonnet"',
+        'rrule = "FREQ=HOURLY"',
+        'prompt = "hello"',
+        "timeout_min = 0.5",
+        'heartbeat_slug = "routine-heartbeats"',
+      ].join("\n") + "\n",
+    );
+
+    process.env.ROUTINES_SITUATIONS_CLI = stub(join(home, "sit"), "#!/bin/sh\nexit 0\n");
+    process.env.ROUTINES_RA_BIN = stub(join(home, "ra"), "#!/bin/sh\nexit 0\n");
+    process.env.ROUTINES_HEARTBEATS_FILE = join(home, "heartbeats.log");
+
+    const result = await runRoutine(loadEntry("lastdb-canary-soak-watch"), {
+      quiet: true,
+      trigger: "scheduled",
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.outcome.kind).toBe("ok");
+
+    const meta = JSON.parse(readFileSync(join(result.runDir, "meta.json"), "utf8"));
+    expect(meta.harness).toBe("grok");
+    expect(meta.usedFallback).toBe(true);
+    expect(meta.primaryHarness).toBe("claude");
+    expect(meta.fallbackAttempts[0].outage).toBe(true);
+    expect(meta.fallbackAttempts[0].harness).toBe("claude");
+    // Auth failure must not leave a papercut error-escalated brain path.
+    expect(existsSync(join(meta.fallbackAttempts[0].runDir, "error-escalated.json"))).toBe(true);
+    const escalated = JSON.parse(
+      readFileSync(join(meta.fallbackAttempts[0].runDir, "error-escalated.json"), "utf8"),
+    );
+    expect(escalated.harnessOutage?.kind).toBe("auth");
+    expect(escalated.cardSlug).toBeNull();
+    expect(isHarnessOutaged("claude")).toBe(true);
+
+    // Heartbeat on the failed claude attempt carries the stable reason token.
+    const hb = readFileSync(process.env.ROUTINES_HEARTBEATS_FILE!, "utf8");
+    expect(hb).toMatch(/reason=harness-auth-expired/);
   });
 
   test("non-outage failure does not walk the chain", async () => {

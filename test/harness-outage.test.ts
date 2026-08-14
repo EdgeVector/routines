@@ -21,6 +21,11 @@ const CODEX_CAPACITY_LINE =
   "ERROR: Selected model is at capacity. Please try a different model.";
 const CLAUDE_API_DISCONNECT_LINE =
   '{"type":"message","content":[{"type":"text","text":"API Error: Connection closed mid-response. The response above may be incomplete."}],"error":"server_error"}';
+/** Real Claude Code stream-json OAuth expiry (2026-08-13 backup-restore-probe). */
+const CLAUDE_OAUTH_EXPIRED_LINE =
+  '{"type":"assistant","message":{"id":"eab9de6e-883b-48a1-b91e-fb550016a533","model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"Failed to authenticate: OAuth session expired and could not be refreshed"}]},"error":"authentication_failed","is_api_error_message":true}';
+const CLAUDE_OAUTH_RESULT_LINE =
+  '{"is_error":true,"type":"result","subtype":"success","result":"Failed to authenticate: OAuth session expired and could not be refreshed","terminal_reason":"api_error"}';
 
 let home: string;
 const prevHome = process.env.ROUTINES_HOME;
@@ -134,6 +139,23 @@ describe("classifyHarnessOutage", () => {
 
   test("invalid api key classifies as auth", () => {
     const out = classifyHarnessOutage(result("Error: invalid API key provided"));
+    expect(out?.kind).toBe("auth");
+  });
+
+  test("claude oauth session expired stream-json classifies as auth", () => {
+    // Must match even when the entire line is JSON (demotion outweighed by auth boost).
+    const out = classifyHarnessOutage(
+      result(`${CLAUDE_OAUTH_EXPIRED_LINE}\n${CLAUDE_OAUTH_RESULT_LINE}`),
+    );
+    expect(out).not.toBeNull();
+    expect(out!.kind).toBe("auth");
+    expect(out!.evidence.toLowerCase()).toMatch(
+      /authentication_failed|oauth session expired|failed to authenticate/,
+    );
+  });
+
+  test("authentication_failed underscore token classifies as auth", () => {
+    const out = classifyHarnessOutage(result("error: authentication_failed"));
     expect(out?.kind).toBe("auth");
   });
 
