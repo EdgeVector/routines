@@ -32,6 +32,13 @@ fi
 mkdir -p "$install_bin"
 ln -sf "$source_bin" "$install_bin/routines"
 
+# Zero-LLM north-star-rollup gate (optional registry gate_command target).
+ns_gate="$repo_root/scripts/north-star-rollup-gate.sh"
+if [ -f "$ns_gate" ]; then
+  chmod +x "$ns_gate" 2>/dev/null || true
+  ln -sf "$ns_gate" "$install_bin/routines-north-star-rollup-gate"
+fi
+
 # Keep launchd run-daemon on the same checkout as the PATH shim. Operators used
 # to pin ROUTINES_CLI at a disposable worktree while ~/.local/bin/routines still
 # pointed at a stale/broken tree — status then failed on import while the daemon

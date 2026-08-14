@@ -55,7 +55,8 @@ export interface RoutineEntry {
   fallback?: string;
   /**
    * Optional zero-LLM pre-dispatch command. Exit 10 = proceed to harness;
-   * exit 0 = skip harness as noop (stdout should include ROUTINE_RESULT).
+   * exit 0 = skip harness and use ROUTINE_RESULT (ok or noop) from stdout;
+   * when exit 0 has no parseable trailer, treat as noop skip.
    * Other non-zero exits fail the run.
    */
   gateCommand?: string;
