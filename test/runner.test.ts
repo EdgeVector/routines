@@ -426,4 +426,93 @@ describe("runRoutine gate_command", () => {
     const meta = JSON.parse(readFileSync(join(result.runDir, "meta.json"), "utf8"));
     expect(meta.gateSkippedHarness).not.toBe(true);
   });
+
+  test("exit 0 with ROUTINE_RESULT ok preserves outcome=ok (real work gate)", async () => {
+    const harnessLog = join(home, "harness-must-not-run-ok-gate.log");
+    process.env.ROUTINES_CLAUDE_BIN = stub(
+      join(home, "must-not-run-ok-gate"),
+      [
+        "#!/bin/sh",
+        `printf 'ran\\n' >> ${JSON.stringify(harnessLog)}`,
+        "exit 0",
+        "",
+      ].join("\n"),
+    );
+    const gate = stub(
+      join(home, "ok-work-gate"),
+      [
+        "#!/bin/sh",
+        "printf '%s\\n' 'north-star-rollup 2026-08-14T00:00:00Z ok generated=2026-08-14T00:00Z html=/tmp/x.html'",
+        "printf '%s\\n' 'ROUTINE_RESULT outcome=ok detail=generated=2026-08-14T00:00Z html=/tmp/x.html'",
+        "exit 0",
+        "",
+      ].join("\n"),
+    );
+    writeFileSync(
+      join(home, "registry", "last-stack-north-star-rollup.toml"),
+      [
+        'id = "last-stack-north-star-rollup"',
+        'harness = "claude"',
+        'model = "test-model"',
+        'rrule = "FREQ=SECONDLY"',
+        'prompt = "should not matter"',
+        'heartbeat_slug = "routine-heartbeats"',
+        "timeout_min = 5",
+        `gate_command = ${JSON.stringify(gate)}`,
+      ].join("\n") + "\n",
+    );
+
+    const result = await runRoutine(loadEntry("last-stack-north-star-rollup"), {
+      quiet: true,
+      noFallback: true,
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.outcome.kind).toBe("ok");
+    expect(result.outcome.detail).toContain("generated=");
+    expect(result.harnessPid).toBeNull();
+    expect(existsSync(harnessLog)).toBe(false);
+    const meta = JSON.parse(readFileSync(join(result.runDir, "meta.json"), "utf8"));
+    expect(meta.gateSkippedHarness).toBe(true);
+  });
+});
+
+describe("enrichGateEnv", () => {
+  test("sets dashboard cmd timeout for north-star-rollup when unset", async () => {
+    const { enrichGateEnv } = await import("../src/runner.ts");
+    const env = enrichGateEnv(
+      {
+        id: "last-stack-north-star-rollup",
+        harness: "codex",
+        model: "x",
+        rrule: "FREQ=HOURLY",
+        parsedRrule: { freq: "HOURLY" } as never,
+        cwd: "/",
+        status: "active",
+        timeoutMin: 20,
+        sourcePath: "/tmp/x.toml",
+      },
+      { PATH: "/usr/bin" },
+    );
+    expect(env.LAST_STACK_NORTH_STAR_DASHBOARD_CMD_TIMEOUT).toBe("120");
+  });
+
+  test("does not override an explicit dashboard cmd timeout", async () => {
+    const { enrichGateEnv } = await import("../src/runner.ts");
+    const env = enrichGateEnv(
+      {
+        id: "last-stack-north-star-rollup",
+        harness: "codex",
+        model: "x",
+        rrule: "FREQ=HOURLY",
+        parsedRrule: { freq: "HOURLY" } as never,
+        cwd: "/",
+        status: "active",
+        timeoutMin: 20,
+        sourcePath: "/tmp/x.toml",
+      },
+      { LAST_STACK_NORTH_STAR_DASHBOARD_CMD_TIMEOUT: "45" },
+    );
+    expect(env.LAST_STACK_NORTH_STAR_DASHBOARD_CMD_TIMEOUT).toBe("45");
+  });
 });

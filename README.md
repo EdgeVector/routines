@@ -41,7 +41,24 @@ error_priority = "P0"                            # optional; new error cards def
 heartbeat_slug = "routine-heartbeats"           # optional; runs append the fleet heartbeat line
 group         = "ops"                            # optional dashboard group override
 # fallback    = "claude:sonnet,grok:grok-4.5"  # optional; overrides fleet default tail
+# gate_command = "routines-north-star-rollup-gate"  # optional zero-LLM pre-dispatch
 ```
+
+Optional `gate_command` runs **before** the LLM harness (zero-LLM):
+
+| exit | meaning |
+|------|---------|
+| **10** | proceed to the configured harness |
+| **0** | skip harness; honor `ROUTINE_RESULT outcome=ok\|noop` (missing trailer → noop) |
+| other | fail the run |
+
+Gate wall-clock is `timeout_min` (capped at 15 minutes). For
+`last-stack-north-star-rollup`, set
+`gate_command = "routines-north-star-rollup-gate"` after `scripts/install-shim.sh`
+so the dashboard regenerates without an LLM (avoids false
+`dashboard-script-crash-prior-snapshot-retained` from first-yield shells). The
+runner also injects `LAST_STACK_NORTH_STAR_DASHBOARD_CMD_TIMEOUT=120` for that
+routine id when unset (dashboard default is 30s per subprocess).
 
 `tier` is the shared capacity-control priority. `spine` is the essential
 shipping loop, `worker` is normal product work, and `opportunistic` is the

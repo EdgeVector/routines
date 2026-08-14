@@ -276,16 +276,16 @@ function runOnce(
   const project = loadProjectConfig();
   const cwd = resolveRoutineCwd(entry.cwd, project);
   const configuredEnv = { ...process.env, ...envFromProjectConfig(project) };
-  const childEnv = {
+  const childEnv = enrichGateEnv(entry, {
     ...configuredEnv,
     ...discoveredRoutineSocketEnv(configuredEnv),
     ...buildRoutineAttributionEnv(entry.id, runDir),
-  };
+  });
 
   // Optional zero-LLM gate: skip expensive harness when the gate says so.
   // Contract (last-stack-kanban-pickup-gate and friends):
   //   exit 10 → proceed to harness
-  //   exit 0  → skip harness; treat as successful noop (ROUTINE_RESULT in stdout)
+  //   exit 0  → skip harness; honor ROUTINE_RESULT outcome=ok|noop (else noop)
   //   other   → fail the run (config / unexpected error)
   if (entry.gateCommand) {
     const gated = runPreDispatchGate(entry, {
@@ -545,6 +545,34 @@ export function completedExitCode(
 export const GATE_PROCEED_EXIT = 10;
 
 /**
+ * Hard ceiling for gate wall clock (minutes of timeout_min can be large).
+ * Default 15m is enough for sequential board/brain dashboard rebuilds without
+ * letting a wedged gate hold the daemon slot forever.
+ */
+export const GATE_TIMEOUT_CAP_MS = 15 * 60_000;
+
+/**
+ * Env enrichment for zero-LLM gates / dashboard-adjacent routines.
+ * North-star rollup's dashboard binary defaults to 30s per subprocess; under
+ * board load `kanban list --all` regularly exceeds that and the LLM harness
+ * then heartbeats dashboard-script-crash-prior-snapshot-retained.
+ */
+export function enrichGateEnv(
+  entry: RoutineEntry,
+  base: NodeJS.ProcessEnv,
+): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...base };
+  const id = entry.id.toLowerCase();
+  if (
+    id.includes("north-star-rollup") &&
+    !env.LAST_STACK_NORTH_STAR_DASHBOARD_CMD_TIMEOUT
+  ) {
+    env.LAST_STACK_NORTH_STAR_DASHBOARD_CMD_TIMEOUT = "120";
+  }
+  return env;
+}
+
+/**
  * Run entry.gateCommand before spawning the LLM harness.
  * Returns a finished RunResult when the gate skips the harness; null to proceed.
  */
@@ -562,7 +590,12 @@ export function runPreDispatchGate(
   const cmd = entry.gateCommand;
   if (!cmd) return null;
 
-  const timeoutMs = Math.min(entry.timeoutMin * 60_000, 120_000);
+  // Honor timeout_min fully (capped). The old 120s hard cap aborted real work
+  // gates such as north-star dashboard rebuild (~3 min under load).
+  const timeoutMs = Math.min(
+    Math.max(1, entry.timeoutMin) * 60_000,
+    GATE_TIMEOUT_CAP_MS,
+  );
   const result = spawnSync(cmd, {
     cwd: args.cwd,
     env: args.env,
@@ -599,21 +632,24 @@ export function runPreDispatchGate(
       timedOut: false,
       sink: readOutcomeSink(args.runDir),
     });
-    if (outcome.kind !== "noop" && outcome.kind !== "ok") {
+    if (outcome.kind === "ok" || outcome.kind === "noop") {
+      // Preserve the gate's explicit ROUTINE_RESULT / sink classification.
+      // Prior code forced every exit-0 gate to noop, which made real work
+      // gates (dashboard regenerate) report false noops forever.
+      outcome = {
+        kind: outcome.kind,
+        detail: outcome.detail ?? (outcome.kind === "ok" ? "gate-ok" : "gate-skip"),
+        source:
+          outcome.source === "sink" || outcome.source === "routine_result"
+            ? outcome.source
+            : "safe_skip",
+      };
+    } else {
       // Gate claimed success without a parseable trailer — still treat as noop skip.
       outcome = {
         kind: "noop",
         detail: "gate-skip no_card_claimed",
         source: "safe_skip",
-      };
-    } else {
-      outcome = {
-        kind: "noop",
-        detail: outcome.detail ?? "gate-skip no_card_claimed",
-        source:
-          outcome.source === "sink" || outcome.source === "routine_result"
-            ? outcome.source
-            : "safe_skip",
       };
     }
   } else {
