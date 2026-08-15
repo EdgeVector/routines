@@ -39,6 +39,13 @@ if [ -f "$ns_gate" ]; then
   ln -sf "$ns_gate" "$install_bin/routines-north-star-rollup-gate"
 fi
 
+# Zero-LLM cloud-sync-health-fix observe gate (avoids 45m exit-124 with no metrics).
+cshf_gate="$repo_root/scripts/cloud-sync-health-fix-gate.sh"
+if [ -f "$cshf_gate" ]; then
+  chmod +x "$cshf_gate" 2>/dev/null || true
+  ln -sf "$cshf_gate" "$install_bin/routines-cloud-sync-health-fix-gate"
+fi
+
 # Keep launchd run-daemon on the same checkout as the PATH shim. Operators used
 # to pin ROUTINES_CLI at a disposable worktree while ~/.local/bin/routines still
 # pointed at a stale/broken tree — status then failed on import while the daemon

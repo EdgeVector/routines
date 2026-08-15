@@ -60,6 +60,16 @@ so the dashboard regenerates without an LLM (avoids false
 runner also injects `LAST_STACK_NORTH_STAR_DASHBOARD_CMD_TIMEOUT=120` for that
 routine id when unset (dashboard default is 30s per subprocess).
 
+For `cloud-sync-health-fix`, set
+`gate_command = "routines-cloud-sync-health-fix-gate"` (see
+`examples/cloud-sync-health-fix.toml`) so the default path is a **bounded
+zero-LLM observe** that always heartbeats staging / upload_queue /
+degraded_reasons / backup durability. That stops overnight ×3 exit-124
+(45m harness kill with no metrics) when the agent digresses under load.
+The gate only exits 10 (LLM fix lane) on hard signals (auth/quota, staging
+≥50%, `last_success=never`). Probe timeouts flush
+`outcome=timeout_partial` and exit 0.
+
 `tier` is the shared capacity-control priority. `spine` is the essential
 shipping loop, `worker` is normal product work, and `opportunistic` is the
 first class a capacity controller may skip. Omitting it preserves legacy
