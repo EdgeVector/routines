@@ -1,0 +1,23 @@
+# cloud-sync-health-fix — zero-LLM observe by default (2026-08-15).
+#
+# Copy/adapt into $ROUTINES_HOME/registry/cloud-sync-health-fix.toml.
+# After `scripts/install-shim.sh`, gate_command can be the PATH name
+# `routines-cloud-sync-health-fix-gate`.
+#
+# Gate contract:
+#   exit 0  → skip harness (healthy / soft degraded observe / timeout_partial)
+#   exit 10 → proceed to LLM fix lane (hard signal only)
+# Gate wall-clock is timeout_min capped at 15m by the runner.
+
+id = "cloud-sync-health-fix"
+harness = "grok"
+model = "grok-4.5"
+rrule = "FREQ=HOURLY;INTERVAL=2;BYMINUTE=27;BYSECOND=0"
+cwd = "/Users/tomtang/code/edgevector"
+status = "active"
+timeout_min = 15
+prompt_path = "/Users/tomtang/.routines/prompts/cloud-sync-health-fix.md"
+# Prefer the installed shim name; absolute path also works.
+gate_command = "routines-cloud-sync-health-fix-gate"
+heartbeat_slug = "routine-heartbeats"
+group = "quality"
