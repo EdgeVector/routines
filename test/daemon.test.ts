@@ -82,6 +82,75 @@ function writeRoutine(id: string, harness: string, fields: string[] = []) {
 }
 
 describe("daemon evaluateOnce", () => {
+  test("matrix availability follows outage Situations while explicit pins stay fixed", async () => {
+    const situationState = join(home, "situations.json");
+    writeFileSync(situationState, "[]\n");
+    process.env.ROUTINES_FSITUATIONS_BIN = stub(
+      join(home, "availability-situations"),
+      `#!/bin/sh\ncat ${JSON.stringify(situationState)}\n`,
+    );
+    process.env.ROUTINES_ROUTING_MATRIX_PATH = join(home, "routing-matrix.json");
+    writeFileSync(process.env.ROUTINES_ROUTING_MATRIX_PATH, JSON.stringify({
+      version: 4,
+      providerOrder: ["grok", "codex", "claude"],
+      matrix: {
+        fast: { grok: { model: "g-fast" }, codex: { model: "c-fast" }, claude: { model: "a-fast" } },
+        normal: { grok: { model: "g-normal" }, codex: { model: "c-normal" }, claude: { model: "a-normal" } },
+        hard: { grok: { model: "g-hard" }, codex: { model: "c-hard" }, claude: { model: "a-hard" } },
+      },
+    }));
+    const matrixRegistry = 'difficulty = "normal"\nrrule = "FREQ=SECONDLY"\nprompt = "matrix"\n';
+    writeFileSync(join(home, "registry", "matrix-live.toml"), matrixRegistry);
+    writeFileSync(
+      join(home, "registry", "smoke-grok.toml"),
+      'pin = true\nharness = "grok"\nmodel = "grok-smoke"\nrrule = "FREQ=SECONDLY"\nprompt = "pin"\n',
+    );
+
+    const fire = async () => {
+      for (const id of ["matrix-live", "smoke-grok"]) {
+        writeState({ id, lastFire: "2000-01-01T00:00:00.000Z" });
+      }
+      const results = await evaluateOnce({ once: true, catchupMs: 60_000, log: () => {} });
+      return new Map(results.map((result) => [
+        result.id,
+        JSON.parse(readFileSync(join(result.runDir, "meta.json"), "utf8")),
+      ]));
+    };
+
+    let meta = await fire();
+    expect(meta.get("matrix-live")).toMatchObject({
+      harness: "grok",
+      resolvedBy: "matrix",
+      matrixResolution: { version: 4, difficulty: "normal", harness: "grok", model: "g-normal" },
+    });
+
+    writeFileSync(situationState, JSON.stringify([{
+      slug: "harness-outage-grok",
+      status: "active",
+      scope_routines: ["matrix-live"],
+    }]));
+    meta = await fire();
+    expect(meta.get("matrix-live")).toMatchObject({
+      harness: "codex",
+      resolvedBy: "matrix",
+      matrixResolution: { version: 4, difficulty: "normal", harness: "codex", model: "c-normal" },
+    });
+    expect(meta.get("smoke-grok")).toMatchObject({
+      harness: "grok",
+      resolvedBy: "pin",
+      matrixResolution: null,
+    });
+    expect(readFileSync(join(home, "registry", "matrix-live.toml"), "utf8")).toBe(matrixRegistry);
+
+    writeFileSync(situationState, "[]\n");
+    meta = await fire();
+    expect(meta.get("matrix-live")).toMatchObject({
+      harness: "grok",
+      resolvedBy: "matrix",
+      matrixResolution: { harness: "grok", model: "g-normal" },
+    });
+  });
+
   test("fires both harnesses, writes run logs + heartbeats, honors the fence", async () => {
     writeRoutine("e2e-claude", "claude");
     writeRoutine("e2e-codex", "codex");

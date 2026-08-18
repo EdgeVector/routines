@@ -79,9 +79,16 @@ export function loadDifficultyMatrix(): DifficultyMatrix {
   return validateDifficultyMatrix(parsed, path);
 }
 
-export function resolveDifficulty(difficulty: Difficulty): MatrixResolution {
+export function resolveDifficulty(
+  difficulty: Difficulty,
+  unavailable: Iterable<Harness> = [],
+): MatrixResolution {
   const config = loadDifficultyMatrix();
-  const harness = config.providerOrder[0]!;
+  const excluded = new Set(unavailable);
+  // If every provider is fenced, keep the configured primary. The runner's
+  // existing recovery chain can then probe for a provider that has recovered.
+  const harness = config.providerOrder.find((provider) => !excluded.has(provider))
+    ?? config.providerOrder[0]!;
   const cell = config.matrix[difficulty][harness];
   return { version: config.version, difficulty, harness, model: cell.model };
 }
