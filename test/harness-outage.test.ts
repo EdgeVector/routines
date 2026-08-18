@@ -41,6 +41,7 @@ function entry(id = "last-stack-pipeline-health", harness: "codex" | "claude" = 
     id,
     harness,
     model: harness === "codex" ? "gpt-5.5" : "opus",
+    resolvedBy: "pin",
     rrule: "FREQ=HOURLY",
     parsedRrule: parseRRule("FREQ=HOURLY"),
     cwd: home,

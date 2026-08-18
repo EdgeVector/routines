@@ -1,8 +1,9 @@
 # routines
 
 Unified scheduler + dispatcher for agent routines (Claude Code / Codex), with
-per-routine model routing. **One scheduler owns dispatch; each routine's on-disk
-config declares its harness and model.** Spec of record:
+global difficulty routing. **One scheduler owns dispatch; non-pinned routines
+declare only `difficulty = "fast" | "normal" | "hard"`, while explicit provider
+smokes use `pin = true` with `harness` and `model`.** Spec of record:
 `fbrain get design-routines-orchestrator`.
 
 Today routine configs are split across three registries with two live
@@ -26,11 +27,17 @@ One TOML file per routine at `$ROUTINES_HOME/registry/<id>.toml` (default
 scheduler must keep firing — or fail loudly — during a brain outage. Run history
 and heartbeats still flow to fbrain.
 
+The versioned 3×3 provider/model matrix has one optional fleet owner at
+`$ROUTINES_HOME/routing-matrix.json`. If it is absent, the checked-in version 1
+bootstrap matrix is used. `providerOrder` selects the primary cell today; the
+availability chooser may skip unavailable providers without rewriting registry
+files. Migrate a routine by replacing its `harness`/`model` lines with one
+`difficulty` line. Legacy route pairs remain pinned during migration. Provider
+smokes should make that intent explicit with `pin = true`.
+
 ```toml
 # ~/.routines/registry/disk-reclaim.toml   (filename stem = id)
-harness       = "claude"                       # claude | codex | grok
-model         = "claude-opus-4-8"              # e.g. sonnet | gpt-5.5 | grok-4.5
-effort        = "medium"                        # optional (codex reasoning effort)
+difficulty    = "normal"                       # fast | normal | hard
 tier          = "worker"                        # optional: spine | worker | opportunistic
 rrule         = "FREQ=HOURLY;INTERVAL=2"        # RFC 5545, same dialect as Codex automations
 prompt_path   = "/Users/you/.last-stack/routines/disk-reclaim.md"   # or inline `prompt = "..."`
@@ -42,6 +49,14 @@ heartbeat_slug = "routine-heartbeats"           # optional; runs append the flee
 group         = "ops"                            # optional dashboard group override
 # fallback    = "claude:sonnet,grok:grok-4.5"  # optional; overrides fleet default tail
 # gate_command = "routines-north-star-rollup-gate"  # optional zero-LLM pre-dispatch
+```
+
+An intentional provider smoke is pinned explicitly:
+
+```toml
+pin = true
+harness = "grok"
+model = "grok-4.5"
 ```
 
 Optional `gate_command` runs **before** the LLM harness (zero-LLM):

@@ -74,6 +74,55 @@ function writeRoutine(id: string): void {
 }
 
 describe("runRoutine heartbeat handling", () => {
+  test("run metadata records matrix versus pin resolution", async () => {
+    process.env.ROUTINES_CLAUDE_BIN = stub(join(home, "meta-claude"), "#!/bin/sh\nexit 0\n");
+    process.env.ROUTINES_CODEX_BIN = stub(join(home, "meta-codex"), "#!/bin/sh\nexit 0\n");
+    process.env.ROUTINES_GROK_BIN = stub(join(home, "meta-grok"), "#!/bin/sh\nexit 0\n");
+    const matrixPath = join(home, "routing-matrix.json");
+    writeFileSync(matrixPath, JSON.stringify({
+      version: 3,
+      providerOrder: ["codex", "grok", "claude"],
+      matrix: {
+        fast: { codex: { model: "c-fast" }, grok: { model: "g-fast" }, claude: { model: "a-fast" } },
+        normal: { codex: { model: "c-normal" }, grok: { model: "g-normal" }, claude: { model: "a-normal" } },
+        hard: { codex: { model: "c-hard" }, grok: { model: "g-hard" }, claude: { model: "a-hard" } },
+      },
+    }));
+    process.env.ROUTINES_ROUTING_MATRIX_PATH = matrixPath;
+    writeFileSync(
+      join(home, "registry", "matrix-run.toml"),
+      'difficulty = "fast"\nrrule = "FREQ=DAILY"\nprompt = "hi"\n',
+    );
+    const pinnedRoutes = [["smoke-claude", "claude"], ["smoke-codex", "codex"], ["smoke-grok", "grok"]] as const;
+    for (const [id, harness] of pinnedRoutes) {
+      writeFileSync(
+        join(home, "registry", `${id}.toml`),
+        `pin = true\nharness = "${harness}"\nmodel = "pinned-${harness}"\nrrule = "FREQ=DAILY"\nprompt = "hi"\n`,
+      );
+    }
+
+    const matrixResult = await runRoutine(loadEntry("matrix-run"), {
+      quiet: true,
+      noFallback: true,
+      trigger: "manual",
+    });
+    const matrixMeta = JSON.parse(readFileSync(join(matrixResult.runDir, "meta.json"), "utf8"));
+    expect(matrixMeta.resolvedBy).toBe("matrix");
+    expect(matrixMeta.matrixResolution).toEqual({
+      version: 3,
+      difficulty: "fast",
+      harness: "codex",
+      model: "c-fast",
+    });
+    for (const [id, harness] of pinnedRoutes) {
+      const result = await runRoutine(loadEntry(id), { quiet: true, noFallback: true, trigger: "manual" });
+      const meta = JSON.parse(readFileSync(join(result.runDir, "meta.json"), "utf8"));
+      expect(meta.resolvedBy).toBe("pin");
+      expect(meta.harness).toBe(harness);
+      expect(meta.matrixResolution).toBeNull();
+    }
+  });
+
   test("explicit ok heartbeat completes a run", async () => {
     process.env.ROUTINES_CLAUDE_BIN = stub(
       join(home, "ok-harness"),
@@ -485,6 +534,7 @@ describe("enrichGateEnv", () => {
         id: "last-stack-north-star-rollup",
         harness: "codex",
         model: "x",
+        resolvedBy: "pin",
         rrule: "FREQ=HOURLY",
         parsedRrule: { freq: "HOURLY" } as never,
         cwd: "/",
@@ -504,6 +554,7 @@ describe("enrichGateEnv", () => {
         id: "last-stack-north-star-rollup",
         harness: "codex",
         model: "x",
+        resolvedBy: "pin",
         rrule: "FREQ=HOURLY",
         parsedRrule: { freq: "HOURLY" } as never,
         cwd: "/",

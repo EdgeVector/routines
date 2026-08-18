@@ -22,10 +22,10 @@ interface RouteUpdate {
 
 export class ActionError extends Error {}
 
-/** Re-route a routine's harness and/or model, writing the registry TOML in
- * place (comments + unrelated lines survive). Returns the reloaded entry. */
+/** Re-route a routine's harness and/or model as an explicit pin, writing the
+ * registry TOML in place (comments + unrelated lines survive). */
 export function routeRoutine(entry: RoutineEntry, update: RouteUpdate): RoutineEntry {
-  const updates: Record<string, string> = {};
+  const updates: Record<string, string | boolean> = { pin: true };
   if (update.harness !== undefined && update.harness !== "") {
     if (!isHarness(update.harness)) {
       throw new ActionError(`invalid harness: ${update.harness} (claude|codex|grok)`);
@@ -35,7 +35,7 @@ export function routeRoutine(entry: RoutineEntry, update: RouteUpdate): RoutineE
   if (update.model !== undefined && update.model !== "") {
     updates.model = update.model;
   }
-  if (Object.keys(updates).length === 0) {
+  if (Object.keys(updates).length === 1) {
     throw new ActionError("nothing to change (set harness and/or model)");
   }
   setKeys(entry.sourcePath, updates);

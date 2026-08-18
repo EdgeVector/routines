@@ -38,6 +38,9 @@ beforeEach(() => {
   delete process.env.LASTDB_HOME;
   delete process.env.FOLDDB_HOME;
   delete process.env.ROUTINES_SITUATIONS_CLI;
+  // Tests that assert the built-in fallback order must not inherit a live
+  // fleet profile from the developer's shell.
+  delete process.env.ROUTINES_FALLBACK_CHAIN;
   mkdirSync(join(home, "registry"), { recursive: true });
 
   const harnessStub = stub(

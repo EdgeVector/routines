@@ -18,6 +18,7 @@ function makeEntry(overrides: Partial<RoutineEntry> = {}): RoutineEntry {
     id: "unit-routine",
     harness: "codex",
     model: "gpt-test",
+    resolvedBy: "pin",
     rrule: "FREQ=SECONDLY",
     parsedRrule: { freq: "SECONDLY", interval: 1, raw: "FREQ=SECONDLY" },
     cwd: "/tmp",
