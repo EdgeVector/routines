@@ -26,6 +26,12 @@ const CLAUDE_OAUTH_EXPIRED_LINE =
   '{"type":"assistant","message":{"id":"eab9de6e-883b-48a1-b91e-fb550016a533","model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"Failed to authenticate: OAuth session expired and could not be refreshed"}]},"error":"authentication_failed","is_api_error_message":true}';
 const CLAUDE_OAUTH_RESULT_LINE =
   '{"is_error":true,"type":"result","subtype":"success","result":"Failed to authenticate: OAuth session expired and could not be refreshed","terminal_reason":"api_error"}';
+/** Real Grok CLI 402 stderr (2026-08-18 lastdb-canary-soak-watch, 12 fires misclassified). */
+const GROK_BALANCE_STDERR =
+  'Error: Internal error: {\n  "message": "API error (status 402 Payment Required): Grok Build usage balance exhausted",\n  "http_status": 402\n}';
+/** Same failure as the grok CLI's streaming-json stdout one-liner. */
+const GROK_BALANCE_STDOUT_LINE =
+  '{"type":"error","message":"Internal error: {\\n  \\"message\\": \\"API error (status 402 Payment Required): Grok Build usage balance exhausted\\",\\n  \\"http_status\\": 402\\n}"}';
 
 let home: string;
 const prevHome = process.env.ROUTINES_HOME;
@@ -128,6 +134,25 @@ describe("classifyHarnessOutage", () => {
   test("insufficient_quota classifies as usage-limit", () => {
     const out = classifyHarnessOutage(result("openai error: insufficient_quota"));
     expect(out?.kind).toBe("usage-limit");
+  });
+
+  test("grok 402 usage-balance-exhausted stderr classifies as usage-limit", () => {
+    const out = classifyHarnessOutage(result(GROK_BALANCE_STDERR));
+    expect(out).not.toBeNull();
+    expect(out!.kind).toBe("usage-limit");
+    expect(out!.evidence).toContain("usage balance exhausted");
+  });
+
+  test("grok 402 streaming-json stdout line classifies as usage-limit", () => {
+    // Whole line is JSON — the billing boost must outweigh the JSON demotion.
+    const out = classifyHarnessOutage(result(GROK_BALANCE_STDOUT_LINE));
+    expect(out?.kind).toBe("usage-limit");
+  });
+
+  test("ignores grok 402 text quoted inside a filed Situation summary", () => {
+    const quoted =
+      '{"slug":"harness-outage-grok","summary":"The grok harness is out of service (usage-limit); evidence: \\"API error (status 402 Payment Required): Grok Build usage balance exhausted\\". Filed by routinesd harness-outage; Tom paged via Telegram."}';
+    expect(classifyHarnessOutage(result(quoted))).toBeNull();
   });
 
   test("codex selected-model capacity classifies as capacity", () => {
