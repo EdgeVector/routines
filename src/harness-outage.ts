@@ -91,6 +91,11 @@ const USAGE_LIMIT_PATTERNS: RegExp[] = [
   /insufficient[_\s]quota/i,
   /exceeded your current quota/i,
   /credit balance is too low/i,
+  // Grok CLI billing exhaustion (2026-08-18): the whole fleet failed for 11h
+  // with `API error (status 402 Payment Required): Grok Build usage balance
+  // exhausted` classified as an ordinary error — no fence, no page, no fallback.
+  /usage balance exhausted/i,
+  /status 402 payment required/i,
 ];
 
 const CAPACITY_PATTERNS: RegExp[] = [
@@ -149,6 +154,17 @@ function matchLine(text: string, patterns: RegExp[]): string | null {
         /oauth session expired/i.test(line) ||
         /"error"\s*:\s*"authentication_failed"/i.test(line) ||
         /"is_api_error_message"\s*:\s*true/i.test(line)
+      ) {
+        score += 8;
+      }
+      // Grok CLI billing failures arrive as a JSON-ish blob (`"message": "API
+      // error (status 402 Payment Required): …usage balance exhausted"`) — a
+      // real harness death, not a Situation echo. Boost before JSON demotion;
+      // the Situation-echo demotions (-10) still outweigh this when the phrase
+      // is quoted inside a filed Situation summary.
+      if (
+        /usage balance exhausted/i.test(line) ||
+        /status 402 payment required/i.test(line)
       ) {
         score += 8;
       }
