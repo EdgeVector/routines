@@ -180,7 +180,15 @@ fi
 # Safe-upgrade / cutover notice (best-effort, short timeout).
 notices_text=""
 safe_upgrade_inflight=0
-if [ "$(remaining)" -ge "$RESERVE_SEC" ]; then
+# Fixture override, symmetric with CLOUD_SYNC_HEALTH_FIX_STATUS_FILE: the gate
+# prepends ~/.local/bin to PATH above, so tests cannot stub `situations` by
+# PATH; without this, tests read LIVE notices and any notice whose text merely
+# contains "primary…restart" (e.g. a storage notice saying "on the primary …
+# No restart") flips safe_upgrade_inflight and inverts the verdict.
+notices_text=""
+if [ -n "${CLOUD_SYNC_HEALTH_FIX_NOTICES_FILE:-}" ] && [ -f "$CLOUD_SYNC_HEALTH_FIX_NOTICES_FILE" ]; then
+  notices_text="$(cat "$CLOUD_SYNC_HEALTH_FIX_NOTICES_FILE")"
+elif [ "$(remaining)" -ge "$RESERVE_SEC" ]; then
   set +e
   notices_text="$(run_with_timeout "$NOTICES_TIMEOUT_SEC" situations notices --since 30m 2>/dev/null || true)"
   notices_rc=$?
@@ -189,12 +197,12 @@ if [ "$(remaining)" -ge "$RESERVE_SEC" ]; then
     # Do not fail the whole observe on notices timeout — continue with status metrics.
     notices_text=""
   fi
-  case "$notices_text" in
-    *safe-upgrade*|*lastdb-safe-upgrade*|*cutover*|*primary*restart*)
-      safe_upgrade_inflight=1
-      ;;
-  esac
 fi
+case "$notices_text" in
+  *safe-upgrade*|*lastdb-safe-upgrade*|*cutover*|*primary*restart*)
+    safe_upgrade_inflight=1
+    ;;
+esac
 
 # Staging fill ratio (staging=N/CAP)
 staging_n=0

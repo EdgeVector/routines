@@ -26,6 +26,15 @@ function runGate(env: Record<string, string>, statusBody: string): {
     "#!/bin/sh\n# test stub — swallow --line\nwhile [ $# -gt 0 ]; do shift; done\nexit 0\n",
   );
   chmodSync(hb, 0o755);
+  // Empty notices fixture so tests never read live notices. A PATH stub cannot
+  // do this — the gate prepends ~/.local/bin ahead of the test dir — and the 1s
+  // notices timeout is no shield either: a healthy node answers in well under a
+  // second with the real feed, and any notice whose text happens to contain
+  // "primary…restart" (e.g. a storage notice saying "on the primary … No
+  // restart") flips safe_upgrade_inflight and inverts the gate verdict
+  // (observed 2026-08-18: "hard staging pressure" expected exit 10, got 0).
+  const noticesFile = join(dir, "notices.txt");
+  writeFileSync(noticesFile, "");
   const lastStackBin = join(dir, "bin");
   spawnSync("mkdir", ["-p", lastStackBin], { stdio: "ignore" });
   spawnSync("ln", ["-sf", hb, join(lastStackBin, "last-stack-brain-append-heartbeat")], {
@@ -38,6 +47,7 @@ function runGate(env: Record<string, string>, statusBody: string): {
       PATH: `${dir}:${lastStackBin}:${process.env.PATH ?? ""}`,
       LAST_STACK_ROOT: dir,
       CLOUD_SYNC_HEALTH_FIX_STATUS_FILE: statusFile,
+      CLOUD_SYNC_HEALTH_FIX_NOTICES_FILE: noticesFile,
       // Avoid live situations / lastdb.
       CLOUD_SYNC_HEALTH_FIX_OUTER_TIMEOUT_SEC: "120",
       CLOUD_SYNC_HEALTH_FIX_STATUS_TIMEOUT_SEC: "30",
