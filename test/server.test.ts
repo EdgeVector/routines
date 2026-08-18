@@ -133,6 +133,7 @@ test("re-route rewrites the registry TOML (model + harness)", async () => {
   const toml = readFileSync(join(home, "registry/beta.toml"), "utf8");
   expect(toml).toContain('harness = "claude"');
   expect(toml).toContain('model = "claude-sonnet-4-6"');
+  expect(toml).toContain("pin = true");
   // Unrelated keys survive the in-place edit.
   expect(toml).toContain('rrule = "FREQ=DAILY"');
   expect(toml).toContain('effort = "medium"');

@@ -11,6 +11,14 @@ import { basename, join } from "node:path";
 import { registryDir } from "./paths.ts";
 import { parseRRule, type RRule } from "./rrule.ts";
 import { parseToml, type TomlValue } from "./toml.ts";
+import {
+  DIFFICULTIES,
+  DifficultyMatrixError,
+  isDifficulty,
+  resolveDifficulty,
+  type Difficulty,
+  type MatrixResolution,
+} from "./difficulty-matrix.ts";
 
 export const HARNESSES = ["claude", "codex", "grok"] as const;
 export type Harness = (typeof HARNESSES)[number];
@@ -32,6 +40,14 @@ export interface RoutineEntry {
   prompt?: string;
   harness: Harness;
   model: string;
+  /** Difficulty declaration for matrix-routed routines. */
+  difficulty?: Difficulty;
+  /** Stable provenance for the primary route chosen for this dispatch pass. */
+  resolvedBy: "matrix" | "pin";
+  /** Present only for matrix-routed entries. */
+  matrixResolution?: MatrixResolution;
+  /** True only for an explicit `pin = true`; legacy harness/model stays compatible. */
+  routingPin?: boolean;
   effort?: string;
   /** Capacity priority: spine is never shed, opportunistic is shed first. */
   tier?: RoutineTier;
@@ -80,6 +96,8 @@ const KNOWN_KEYS = new Set([
   "prompt",
   "harness",
   "model",
+  "difficulty",
+  "pin",
   "effort",
   "tier",
   "rrule",
@@ -117,16 +135,63 @@ export function parseEntry(text: string, sourcePath: string): RoutineEntry {
     throw new RegistryError("set only one of prompt_path or prompt", sourcePath);
   }
 
-  const harnessRaw = req(str(raw, "harness", sourcePath), "harness", sourcePath);
-  if (!isHarness(harnessRaw)) {
-    throw new RegistryError(
-      `invalid harness ${JSON.stringify(harnessRaw)} (${HARNESSES.join("|")})`,
-      sourcePath,
-    );
-  }
-  const harness: Harness = harnessRaw;
+  const harnessRaw = str(raw, "harness", sourcePath);
+  const modelRaw = str(raw, "model", sourcePath);
+  const difficultyRaw = str(raw, "difficulty", sourcePath);
+  const pin = bool(raw, "pin", sourcePath);
+  let harness: Harness;
+  let model: string;
+  let difficulty: Difficulty | undefined;
+  let resolvedBy: RoutineEntry["resolvedBy"];
+  let matrixResolution: MatrixResolution | undefined;
 
-  const model = req(str(raw, "model", sourcePath), "model", sourcePath);
+  if (difficultyRaw !== undefined && pin !== true) {
+    if (!isDifficulty(difficultyRaw)) {
+      throw new RegistryError(
+        `invalid difficulty ${JSON.stringify(difficultyRaw)} (${DIFFICULTIES.join("|")})`,
+        sourcePath,
+      );
+    }
+    if (harnessRaw !== undefined || modelRaw !== undefined) {
+      throw new RegistryError(
+        "difficulty-routed entries must remove harness/model (or set pin = true)",
+        sourcePath,
+      );
+    }
+    difficulty = difficultyRaw;
+    try {
+      matrixResolution = resolveDifficulty(difficulty);
+    } catch (err) {
+      if (err instanceof DifficultyMatrixError) {
+        throw new RegistryError(`invalid routing matrix: ${err.message}`, sourcePath);
+      }
+      throw err;
+    }
+    harness = matrixResolution.harness;
+    model = matrixResolution.model;
+    resolvedBy = "matrix";
+  } else {
+    if (pin === false) {
+      throw new RegistryError("pin = false requires a difficulty declaration", sourcePath);
+    }
+    if (difficultyRaw !== undefined && !isDifficulty(difficultyRaw)) {
+      throw new RegistryError(
+        `invalid difficulty ${JSON.stringify(difficultyRaw)} (${DIFFICULTIES.join("|")})`,
+        sourcePath,
+      );
+    }
+    const requiredHarness = req(harnessRaw, "harness", sourcePath);
+    if (!isHarness(requiredHarness)) {
+      throw new RegistryError(
+        `invalid harness ${JSON.stringify(requiredHarness)} (${HARNESSES.join("|")})`,
+        sourcePath,
+      );
+    }
+    harness = requiredHarness;
+    model = req(modelRaw, "model", sourcePath);
+    difficulty = difficultyRaw as Difficulty | undefined;
+    resolvedBy = "pin";
+  }
 
   const rruleStr = req(str(raw, "rrule", sourcePath), "rrule", sourcePath);
   let parsedRrule: RRule;
@@ -187,6 +252,7 @@ export function parseEntry(text: string, sourcePath: string): RoutineEntry {
     id,
     harness,
     model,
+    resolvedBy,
     rrule: rruleStr,
     parsedRrule,
     cwd,
@@ -194,6 +260,9 @@ export function parseEntry(text: string, sourcePath: string): RoutineEntry {
     timeoutMin,
     sourcePath,
   };
+  if (difficulty) entry.difficulty = difficulty;
+  if (matrixResolution) entry.matrixResolution = matrixResolution;
+  if (pin === true) entry.routingPin = true;
   if (promptPath) entry.promptPath = promptPath;
   if (prompt) entry.prompt = prompt;
   const effort = str(raw, "effort", sourcePath);
@@ -276,6 +345,13 @@ function num(raw: Record<string, TomlValue>, key: string, file: string): number 
   if (!(key in raw)) return undefined;
   const v = raw[key];
   if (typeof v !== "number") throw new RegistryError(`${key} must be a number`, file);
+  return v;
+}
+
+function bool(raw: Record<string, TomlValue>, key: string, file: string): boolean | undefined {
+  if (!(key in raw)) return undefined;
+  const v = raw[key];
+  if (typeof v !== "boolean") throw new RegistryError(`${key} must be a boolean`, file);
   return v;
 }
 

@@ -34,6 +34,7 @@ function baseEntry(over: Partial<RoutineEntry> = {}): RoutineEntry {
     id: "demo",
     harness: "codex",
     model: "gpt-5.5",
+    resolvedBy: "pin",
     rrule: "FREQ=HOURLY",
     parsedRrule: parseRRule("FREQ=HOURLY"),
     cwd: home,

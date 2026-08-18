@@ -3,13 +3,16 @@
 
 import { readFileSync, writeFileSync } from "node:fs";
 
-function quote(value: string): string {
+type TomlScalar = string | boolean;
+
+function render(value: TomlScalar): string {
+  if (typeof value === "boolean") return value ? "true" : "false";
   return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 }
 
 /** Set string keys in a registry file, preserving all other content. A key that
  * already exists is replaced on its line; a new key is appended. */
-export function setKeys(sourcePath: string, updates: Record<string, string>): void {
+export function setKeys(sourcePath: string, updates: Record<string, TomlScalar>): void {
   const text = readFileSync(sourcePath, "utf8");
   const lines = text.split(/\r?\n/);
   const remaining = new Map(Object.entries(updates));
@@ -22,14 +25,14 @@ export function setKeys(sourcePath: string, updates: Record<string, string>): vo
     const key = trimmed.slice(0, eq).trim();
     if (remaining.has(key)) {
       const indent = line.slice(0, line.length - trimmed.length);
-      lines[i] = `${indent}${key} = ${quote(remaining.get(key)!)}`;
+      lines[i] = `${indent}${key} = ${render(remaining.get(key)!)}`;
       remaining.delete(key);
     }
   }
 
   const appended: string[] = [];
   for (const [key, value] of remaining) {
-    appended.push(`${key} = ${quote(value)}`);
+    appended.push(`${key} = ${render(value)}`);
   }
 
   let out = lines.join("\n");

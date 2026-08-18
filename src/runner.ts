@@ -101,6 +101,9 @@ export function writeEarlyMeta(args: {
   startedAt: string;
   harnessPid: number | null;
   status?: "running" | "spawn_failed";
+  resolvedBy?: "matrix" | "pin";
+  difficulty?: string;
+  matrixResolution?: RoutineEntry["matrixResolution"];
 }): void {
   writeRunFile(
     join(args.runDir, "meta.json"),
@@ -117,6 +120,9 @@ export function writeEarlyMeta(args: {
         harnessPid: args.harnessPid,
         daemonPid: process.pid,
         status: args.status ?? "running",
+        resolvedBy: args.resolvedBy ?? "pin",
+        difficulty: args.difficulty ?? null,
+        matrixResolution: args.matrixResolution ?? null,
         exitCode: null,
         finishedAt: null,
       },
@@ -330,6 +336,9 @@ function runOnce(
       command: invocation.display,
       startedAt: startedAt.toISOString(),
       harnessPid,
+      resolvedBy: entry.resolvedBy,
+      difficulty: entry.difficulty,
+      matrixResolution: entry.matrixResolution,
     });
 
     let timedOut = false;
@@ -390,6 +399,9 @@ function runOnce(
         startedAt: startedAt.toISOString(),
         harnessPid,
         status: "spawn_failed",
+        resolvedBy: entry.resolvedBy,
+        difficulty: entry.difficulty,
+        matrixResolution: entry.matrixResolution,
       });
       finalize(null, null);
     });
@@ -468,6 +480,9 @@ function runOnce(
             primaryModel: routeMeta?.primaryModel ?? entry.model,
             routeIndex: routeMeta?.routeIndex ?? 0,
             routeCount: routeMeta?.routeCount ?? 1,
+            resolvedBy: entry.resolvedBy,
+            difficulty: entry.difficulty ?? null,
+            matrixResolution: entry.matrixResolution ?? null,
           },
           null,
           2,
@@ -721,6 +736,9 @@ export function runPreDispatchGate(
         primaryModel: args.routeMeta?.primaryModel ?? entry.model,
         routeIndex: args.routeMeta?.routeIndex ?? 0,
         routeCount: args.routeMeta?.routeCount ?? 1,
+        resolvedBy: entry.resolvedBy,
+        difficulty: entry.difficulty ?? null,
+        matrixResolution: entry.matrixResolution ?? null,
       },
       null,
       2,
