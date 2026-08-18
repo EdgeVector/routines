@@ -29,11 +29,17 @@ and heartbeats still flow to fbrain.
 
 The versioned 3×3 provider/model matrix has one optional fleet owner at
 `$ROUTINES_HOME/routing-matrix.json`. If it is absent, the checked-in version 1
-bootstrap matrix is used. `providerOrder` selects the primary cell today; the
-availability chooser may skip unavailable providers without rewriting registry
-files. Migrate a routine by replacing its `harness`/`model` lines with one
+bootstrap matrix is used. `providerOrder` selects the first available cell.
+At each routinesd dispatch pass, an active Situation named
+`harness-outage-<provider>` makes that provider unavailable to matrix-routed
+routines; clearing the Situation restores the configured order. This is an
+ephemeral choice: registry TOML is never rewritten, and `meta.json` retains
+`resolvedBy = "matrix"` with the selected cell in `matrixResolution`. Explicit
+and legacy pins do not rotate, so provider smokes keep exercising their named
+harness. Migrate a routine by replacing its `harness`/`model` lines with one
 `difficulty` line. Legacy route pairs remain pinned during migration. Provider
-smokes should make that intent explicit with `pin = true`.
+smokes should make that intent explicit with `pin = true`. Provider recovery
+therefore uses the outage Situation rather than a routine-by-routine TOML sweep.
 
 ```toml
 # ~/.routines/registry/disk-reclaim.toml   (filename stem = id)

@@ -27,7 +27,8 @@ import {
 import { join } from "node:path";
 
 import { fenceFor, loadActiveSituations, type ActiveSituation } from "./situations.ts";
-import { loadAll, type RoutineEntry } from "./registry.ts";
+import { isHarness, loadAll, type Harness, type RoutineEntry } from "./registry.ts";
+import { resolveDifficulty } from "./difficulty-matrix.ts";
 import { locksDir, runsDir } from "./paths.ts";
 import { nextAfter } from "./rrule.ts";
 import { patchState, readState } from "./state.ts";
@@ -40,6 +41,30 @@ import { loadCapacityPolicy, planCapacity, type CapacityPolicy } from "./capacit
 function harnessFromOutageSituation(slug: string): string | null {
   const m = slug.match(/^harness-outage-(.+)$/);
   return m?.[1] ?? null;
+}
+
+/**
+ * Resolve a matrix route against the active provider-outage Situations for
+ * this dispatch pass. Explicit and legacy pins are deliberately unchanged.
+ */
+export function routeForAvailability(
+  entry: RoutineEntry,
+  situations: ActiveSituation[],
+): RoutineEntry {
+  if (entry.resolvedBy !== "matrix" || !entry.difficulty) return entry;
+  const unavailable = new Set<Harness>();
+  for (const situation of situations) {
+    const harness = harnessFromOutageSituation(situation.slug);
+    if (harness && isHarness(harness)) unavailable.add(harness);
+  }
+  const resolution = resolveDifficulty(entry.difficulty, unavailable);
+  if (resolution.harness === entry.harness && resolution.model === entry.model) return entry;
+  return {
+    ...entry,
+    harness: resolution.harness,
+    model: resolution.model,
+    matrixResolution: resolution,
+  };
 }
 
 /** True when the route the runner would select avoids the fenced harness. */
@@ -500,7 +525,7 @@ export function dispatchDue(opts: DispatchPassOptions = {}): Promise<RunResult>[
   const inFlight = opts.inFlight ?? new Set<string>();
   const emitTick = opts.emitTick !== false;
 
-  const { entries, errors } = loadAll();
+  const { entries: registryEntries, errors } = loadAll();
   for (const e of errors) {
     log({ ts: now.toISOString(), kind: "registry-error", detail: e.message });
   }
@@ -512,6 +537,7 @@ export function dispatchDue(opts: DispatchPassOptions = {}): Promise<RunResult>[
   if (!check.ok) {
     log({ ts: now.toISOString(), kind: "situations-degraded", detail: check.error });
   }
+  const entries = registryEntries.map((entry) => routeForAvailability(entry, check.situations));
 
   const running: Promise<RunResult>[] = [];
   const deps: DispatchDeps = {
