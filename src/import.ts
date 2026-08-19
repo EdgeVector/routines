@@ -580,9 +580,14 @@ export function preserveExistingRouting(
   const next: ImportCandidate = {
     ...c,
     status: existing.status,
+    // Fleet-health / human timeout bumps are live source of truth. Import
+    // always rewrites timeout_min from defaultTimeoutMin (usually 30), so
+    // keep the existing value even under --force. See
+    // papercut-routines-import-resets-timeout-min-bumps.
+    timeoutMin: existing.timeoutMin,
     note: appendNote(
       c.note,
-      `preserved live status ${existing.status} from existing registry file`,
+      `preserved live status ${existing.status} and timeout_min ${existing.timeoutMin} from existing registry file`,
     ),
   };
   if (replaceRouting) return next;

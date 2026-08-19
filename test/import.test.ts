@@ -333,6 +333,50 @@ describe("renderToml round-trips through the real registry parser", () => {
     expect(e.model).toBe(imported.model);
     expect(e.status).toBe("paused");
   });
+
+  test("force refresh preserves a live timeout_min bump", () => {
+    const reg = writeClaudeRegistry(tmp());
+    const plan = planImport({ codexDir: tmp(), claudeRegistry: reg });
+    const imported = plan.candidates.find((c) => c.id === "sentry-triage")!;
+    expect(imported.timeoutMin).toBe(30);
+    const existing = renderToml({
+      ...imported,
+      status: "active",
+      timeoutMin: 90,
+      harness: "codex",
+      model: "gpt-5.6-terra",
+    });
+
+    const preserved = preserveExistingRouting(imported, existing, "/reg/sentry-triage.toml");
+    const e = parseEntry(renderToml(preserved), "/reg/sentry-triage.toml");
+
+    expect(e.timeoutMin).toBe(90);
+    expect(e.status).toBe("active");
+    expect(e.harness).toBe("codex");
+    expect(renderToml(preserved)).toContain("timeout_min = 90");
+    expect(renderToml(preserved)).toContain("preserved live status active and timeout_min 90");
+  });
+
+  test("replace-routing still keeps the live timeout_min", () => {
+    const reg = writeClaudeRegistry(tmp());
+    const plan = planImport({ codexDir: tmp(), claudeRegistry: reg });
+    const imported = plan.candidates.find((c) => c.id === "sentry-triage")!;
+    const existing = renderToml({
+      ...imported,
+      status: "active",
+      timeoutMin: 90,
+      harness: "codex",
+      model: "gpt-5.5",
+    });
+
+    const preserved = preserveExistingRouting(imported, existing, "/reg/sentry-triage.toml", true);
+    const e = parseEntry(renderToml(preserved), "/reg/sentry-triage.toml");
+
+    expect(e.timeoutMin).toBe(90);
+    expect(e.status).toBe("active");
+    expect(e.harness).toBe(imported.harness);
+    expect(e.model).toBe(imported.model);
+  });
 });
 
 describe("renderDiffTable", () => {

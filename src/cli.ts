@@ -98,7 +98,8 @@ Import:
   --force                     refresh existing registry files
   --replace-routing           with --force, also replace existing harness/model
                               instead of preserving local route edits; live
-                              active/paused status is always preserved
+                              active/paused status and timeout_min are always
+                              preserved (fleet-health bumps must survive import)
 
 Hygiene:
   --dry-run                   report only; do not delete/truncate
