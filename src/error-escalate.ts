@@ -33,6 +33,7 @@ import {
   handleHarnessOutage,
   type HarnessOutageOptions,
 } from "./harness-outage.ts";
+import { stripUnresolvedSentryLocators } from "./observability.ts";
 import { buildRoutineAttributionEnv } from "./prompt.ts";
 import type { ErrorPriority, RoutineEntry } from "./registry.ts";
 import { routinesHome, runsDir } from "./paths.ts";
@@ -650,10 +651,10 @@ function dispatchTriageAgent(
     const stderrFd = openSync(stderrPath, "a");
     const child = spawn(bin, args, {
       cwd: entry.cwd || process.cwd(),
-      env: {
+      env: stripUnresolvedSentryLocators({
         ...process.env,
         ...buildRoutineAttributionEnv(TRIAGE_ID, triageDir),
-      },
+      }),
       stdio: [stdin !== undefined ? "pipe" : "ignore", stdoutFd, stderrFd],
       detached: true,
     });

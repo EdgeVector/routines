@@ -18,6 +18,7 @@ import { join } from "node:path";
 
 import { buildInvocation, type HarnessInvocation } from "./adapters.ts";
 import { releaseLockIfOwned, setLockOwnerPid } from "./daemon.ts";
+import { stripUnresolvedSentryLocators } from "./observability.ts";
 import {
   buildRouteChain,
   entryForRoute,
@@ -282,11 +283,13 @@ function runOnce(
   const project = loadProjectConfig();
   const cwd = resolveRoutineCwd(entry.cwd, project);
   const configuredEnv = { ...process.env, ...envFromProjectConfig(project) };
-  const childEnv = enrichGateEnv(entry, {
-    ...configuredEnv,
-    ...discoveredRoutineSocketEnv(configuredEnv),
-    ...buildRoutineAttributionEnv(entry.id, runDir),
-  });
+  const childEnv = stripUnresolvedSentryLocators(
+    enrichGateEnv(entry, {
+      ...configuredEnv,
+      ...discoveredRoutineSocketEnv(configuredEnv),
+      ...buildRoutineAttributionEnv(entry.id, runDir),
+    }),
+  );
 
   // Optional zero-LLM gate: skip expensive harness when the gate says so.
   // Contract (last-stack-kanban-pickup-gate and friends):
