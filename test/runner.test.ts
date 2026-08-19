@@ -526,6 +526,35 @@ describe("runRoutine gate_command", () => {
   });
 });
 
+describe("child env Sentry locators", () => {
+  test("spawned harness does not inherit lastsecrets OBS_SENTRY_DSN", async () => {
+    const dump = join(home, "child-env.dump");
+    process.env.OBS_SENTRY_DSN = "lastsecrets://obs-sentry-dsn-routines";
+    process.env.SENTRY_DSN = "lastsecrets://obs-sentry-dsn-routines";
+    process.env.ROUTINES_CLAUDE_BIN = stub(
+      join(home, "env-dump-harness"),
+      [
+        "#!/bin/sh",
+        `env > ${JSON.stringify(dump)}`,
+        "exit 0",
+        "",
+      ].join("\n"),
+    );
+    writeRoutine("sentry-locator-child");
+
+    const result = await runRoutine(loadEntry("sentry-locator-child"), {
+      quiet: true,
+      noFallback: true,
+    });
+    expect(result.timedOut).toBe(false);
+    expect(existsSync(dump)).toBe(true);
+    const dumped = readFileSync(dump, "utf8");
+    expect(dumped).not.toMatch(/^OBS_SENTRY_DSN=lastsecrets:/m);
+    expect(dumped).not.toMatch(/^SENTRY_DSN=lastsecrets:/m);
+    expect(dumped).not.toContain("lastsecrets://obs-sentry-dsn-routines");
+  });
+});
+
 describe("enrichGateEnv", () => {
   test("sets dashboard cmd timeout for north-star-rollup when unset", async () => {
     const { enrichGateEnv } = await import("../src/runner.ts");

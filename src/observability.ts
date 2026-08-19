@@ -53,6 +53,34 @@ export interface RoutinesSentryTestDeps {
   helperPath?: string;
 }
 
+const SENTRY_DSN_CHILD_KEYS = ["OBS_SENTRY_DSN", "SENTRY_DSN"] as const;
+
+/** True when a value is a LastSecrets locator, not a Sentry DSN. */
+export function isLastSecretsLocator(value: string | undefined): boolean {
+  const raw = value?.trim() ?? "";
+  return raw.startsWith("lastsecrets://") || raw.startsWith("lastsecrets:");
+}
+
+/**
+ * Drop unresolved LastSecrets Sentry locators from a child env copy.
+ *
+ * routinesd keeps `OBS_SENTRY_DSN=lastsecrets://…` on the daemon so it can
+ * resolve Sentry for itself. Copying that into grok/claude/CLI children
+ * makes every child warn or panic. Resolve at the daemon boundary; omit the
+ * locator from spawned processes.
+ */
+export function stripUnresolvedSentryLocators<T extends Record<string, string | undefined>>(
+  env: T,
+): T {
+  const out: T = { ...env };
+  for (const key of SENTRY_DSN_CHILD_KEYS) {
+    if (isLastSecretsLocator(out[key])) {
+      delete out[key];
+    }
+  }
+  return out;
+}
+
 let initialized = false;
 let captureModule: SentryCaptureModule | null = null;
 
