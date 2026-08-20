@@ -5,7 +5,7 @@
 // `routines` command are the same code path.
 
 import { loadEntry, RegistryError } from "./registry.ts";
-import { collectStatus } from "./status.ts";
+import type { StatusSnapshot } from "./status.ts";
 import { listRuns, readRun } from "./runs.ts";
 import { routeRoutine, setStatus, startRunNow, ActionError } from "./actions.ts";
 import { PAGE } from "./page.ts";
@@ -16,6 +16,76 @@ export interface ServerOptions {
   port?: number;
   /** Bind address. Localhost only by default — the dashboard has no auth. */
   host?: string;
+  /** Command that produces the status snapshot as JSON. */
+  statusCommand?: string[];
+  /** Bound one status collection before the child is killed. */
+  statusTimeoutMs?: number;
+}
+
+function defaultStatusCommand(): string[] {
+  const entrypoint = process.argv[1];
+  if (entrypoint && /\.[cm]?[jt]sx?$/.test(entrypoint)) {
+    return [process.execPath, entrypoint, "status", "--json"];
+  }
+  return [process.execPath, "status", "--json"];
+}
+
+class StatusCollector {
+  private inFlight: Promise<StatusSnapshot> | null = null;
+  private child: ReturnType<typeof Bun.spawn> | null = null;
+
+  constructor(
+    private readonly command: string[],
+    private readonly timeoutMs: number,
+  ) {}
+
+  collect(): Promise<StatusSnapshot> {
+    if (this.inFlight) return this.inFlight;
+    this.inFlight = this.run().finally(() => {
+      this.inFlight = null;
+    });
+    return this.inFlight;
+  }
+
+  close(): void {
+    this.child?.kill();
+    this.child = null;
+  }
+
+  private run(): Promise<StatusSnapshot> {
+    return new Promise((resolve, reject) => {
+      const child = Bun.spawn(this.command, { stdout: "pipe", stderr: "pipe", env: process.env });
+      this.child = child;
+      let settled = false;
+      let timer: ReturnType<typeof setTimeout>;
+      const finish = (error: Error | null, snapshot?: StatusSnapshot) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (this.child === child) this.child = null;
+        if (error) reject(error);
+        else resolve(snapshot!);
+      };
+      timer = setTimeout(() => {
+        child.kill();
+        finish(new Error(`status collection timed out after ${this.timeoutMs}ms`));
+      }, this.timeoutMs);
+
+      Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()])
+        .then(([exitCode, stdout, stderr]) => {
+          if (exitCode !== 0) {
+            finish(new Error(`status command exited ${exitCode}: ${stderr.trim()}`));
+            return;
+          }
+          try {
+            finish(null, JSON.parse(stdout) as StatusSnapshot);
+          } catch (error) {
+            finish(new Error(`status command returned invalid JSON: ${String(error)}`));
+          }
+        })
+        .catch((error) => finish(error instanceof Error ? error : new Error(String(error))));
+    });
+  }
 }
 
 export interface ServerHandle {
@@ -32,7 +102,7 @@ function json(body: unknown, status = 200): Response {
   });
 }
 
-async function handle(req: Request): Promise<Response> {
+async function handle(req: Request, statuses: StatusCollector): Promise<Response> {
   const url = new URL(req.url);
   const path = url.pathname;
   const method = req.method.toUpperCase();
@@ -43,7 +113,7 @@ async function handle(req: Request): Promise<Response> {
 
   // GET /api/routines — the single-pane status snapshot.
   if (path === "/api/routines" && method === "GET") {
-    return json(collectStatus());
+    return json(await statuses.collect());
   }
 
   // /api/routines/:id/...
@@ -113,11 +183,15 @@ async function handle(req: Request): Promise<Response> {
 export function startServer(opts: ServerOptions = {}): ServerHandle {
   const host = opts.host ?? "127.0.0.1";
   const port = opts.port ?? 4778;
+  const statuses = new StatusCollector(
+    opts.statusCommand ?? defaultStatusCommand(),
+    opts.statusTimeoutMs ?? 8_000,
+  );
   const server = Bun.serve({
     hostname: host,
     port,
     fetch: (req) =>
-      handle(req).catch((err) => {
+      handle(req, statuses).catch((err) => {
         captureRoutinesException(err, {
           tags: {
             service: "routines-web",
@@ -133,6 +207,9 @@ export function startServer(opts: ServerOptions = {}): ServerHandle {
     port: actualPort,
     host,
     url: `http://${host}:${actualPort}/`,
-    stop: () => server.stop(true),
+    stop: () => {
+      statuses.close();
+      server.stop(true);
+    },
   };
 }

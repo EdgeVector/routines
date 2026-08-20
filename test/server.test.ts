@@ -16,6 +16,7 @@ let home: string;
 let server: ServerHandle;
 let stubHarness: string;
 let stubSituations: string;
+const statusCommand = [process.execPath, new URL("./fixtures/status-command.ts", import.meta.url).pathname];
 
 beforeAll(() => {
   // A stub harness that exits 0 quickly — no API credits, but the full
@@ -68,7 +69,7 @@ beforeEach(() => {
     ].join("\n"),
   );
 
-  server = startServer({ port: 0 });
+  server = startServer({ port: 0, statusCommand });
 });
 
 afterEach(() => {
@@ -107,6 +108,39 @@ test("GET /api/routines returns the status snapshot for every routine", async ()
   expect(beta.status).toBe("paused");
   expect(beta.nextFire).toBeNull(); // paused → no next fire
 }, 30_000);
+
+test("GET / stays responsive while one coalesced status collection is in flight", async () => {
+  server.stop();
+  const counter = join(home, "status-command-count");
+  process.env.ROUTINES_TEST_STATUS_DELAY_MS = "250";
+  process.env.ROUTINES_TEST_STATUS_COUNTER = counter;
+  server = startServer({
+    port: 0,
+    statusCommand,
+    statusTimeoutMs: 2_000,
+  });
+
+  const firstStatus = fetch(u("/api/routines"));
+  const secondStatus = fetch(u("/api/routines"));
+  await Bun.sleep(25);
+
+  const startedAt = performance.now();
+  const page = await fetch(u("/"));
+  const elapsedMs = performance.now() - startedAt;
+  expect(page.status).toBe(200);
+  expect(await page.text()).toContain("<title>routines &middot; dashboard</title>");
+  expect(elapsedMs).toBeLessThan(200);
+
+  const [first, second] = await Promise.all([firstStatus, secondStatus]);
+  const [firstBody, secondBody] = await Promise.all([first.json(), second.json()]);
+  expect(first.status).toBe(200);
+  expect(second.status).toBe(200);
+  expect(firstBody.home).toBe(home);
+  expect(secondBody.home).toBe(home);
+  expect(readFileSync(counter, "utf8").trim().split("\n")).toHaveLength(1);
+  delete process.env.ROUTINES_TEST_STATUS_DELAY_MS;
+  delete process.env.ROUTINES_TEST_STATUS_COUNTER;
+}, 5_000);
 
 test("unknown routine → 404", async () => {
   const res = await fetch(u("/api/routines/nope/run"), { method: "POST" });
