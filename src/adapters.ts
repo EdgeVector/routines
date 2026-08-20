@@ -74,11 +74,16 @@ export function buildInvocation(entry: RoutineEntry, prompt: string): HarnessInv
       // clap on current codex. Effort via config override (no --reasoning-effort).
       // --skip-git-repo-check: fleet cwds may be workspace roots, not a git repo.
       // --ephemeral: no session persist noise for scheduled runs.
-      // --add-dir: automation memory + LastDB socket homes live outside the
-      // workspace cwd; without these, agents report memory_unwritable and cannot
-      // talk to socket-backed CLIs that need writeable state dirs.
+      // --sandbox workspace-write: `codex exec` defaults to read-only, in which
+      // --add-dir is readable-only. Writes to ~/.routines (outcome.txt),
+      // mkdir under TMPDIR, and connect() to folddb.sock then EPERM.
+      // --add-dir: extra writable roots outside the routine cwd.
+      // network_access: unix-socket connect to LastDB is otherwise denied
+      // even when the socket file is visible under --add-dir ~/.lastdb.
       args = [
         "exec",
+        "--sandbox",
+        "workspace-write",
         "--model",
         entry.model,
         "--skip-git-repo-check",
@@ -87,6 +92,7 @@ export function buildInvocation(entry: RoutineEntry, prompt: string): HarnessInv
       for (const dir of codexWritableDirs()) {
         args.push("--add-dir", dir);
       }
+      args.push("-c", "sandbox_workspace_write.network_access=true");
       if (entry.effort) {
         args.push("-c", `model_reasoning_effort=${JSON.stringify(entry.effort)}`);
       }

@@ -44,14 +44,17 @@ describe("buildInvocation", () => {
     const inv = buildInvocation(entry("codex", 'effort = "high"'), "hello\n---\nfrontmatter");
     expect(inv.bin).toBe("codex");
     // Prefix is stable; --add-dir list is host-dependent (ROUTINES_HOME/HOME).
-    expect(inv.args.slice(0, 5)).toEqual([
+    expect(inv.args.slice(0, 7)).toEqual([
       "exec",
+      "--sandbox",
+      "workspace-write",
       "--model",
       "m1",
       "--skip-git-repo-check",
       "--ephemeral",
     ]);
     expect(inv.args).toContain("--add-dir");
+    expect(inv.args).toContain("sandbox_workspace_write.network_access=true");
     expect(inv.args.at(-3)).toBe("-c");
     expect(inv.args.at(-2)).toBe('model_reasoning_effort="high"');
     expect(inv.args.at(-1)).toBe("-");
@@ -61,8 +64,10 @@ describe("buildInvocation", () => {
 
   test("codex without effort omits -c", () => {
     const inv = buildInvocation(entry("codex"), "hi");
-    expect(inv.args.slice(0, 5)).toEqual([
+    expect(inv.args.slice(0, 7)).toEqual([
       "exec",
+      "--sandbox",
+      "workspace-write",
       "--model",
       "m1",
       "--skip-git-repo-check",
@@ -70,7 +75,9 @@ describe("buildInvocation", () => {
     ]);
     expect(inv.args).toContain("--add-dir");
     expect(inv.args.at(-1)).toBe("-");
-    expect(inv.args).not.toContain("-c");
+    expect(inv.args).toContain("-c");
+    expect(inv.args).toContain("sandbox_workspace_write.network_access=true");
+    expect(inv.args.join("\n")).not.toContain("model_reasoning_effort");
     expect(inv.stdin).toBe("hi");
   });
 

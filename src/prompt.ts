@@ -10,7 +10,7 @@
 // LastGit CRs) can be distinguished from interactive agent work after the fact.
 
 import { mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 
 import { memoryPathFor } from "./paths.ts";
 import { resolvePrompt, type RoutineEntry } from "./registry.ts";
@@ -47,6 +47,13 @@ export function buildRoutineAttributionEnv(
     const parts = runDir.replace(/\\/g, "/").split("/");
     const stamp = parts[parts.length - 1] || "";
     if (stamp) env.ROUTINES_RUN_ID = stamp;
+    // Codex workspace-write still denies host /tmp. Pin scratch under the
+    // run dir (already --add-dir ~/.routines) so git/xcrun, os.tmpdir(),
+    // and helpers that honor TMPDIR do not mkdir /tmp.
+    const scratch = join(runDir, "scratch");
+    env.TMPDIR = scratch;
+    env.TMP = scratch;
+    env.TEMP = scratch;
   }
   return env;
 }
