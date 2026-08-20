@@ -5,7 +5,7 @@ import { join } from "node:path";
 
 import { acquireLock, readLockPid, releaseLock } from "../src/daemon.ts";
 import { loadEntry } from "../src/registry.ts";
-import { appendRunLog, runRoutine, writeEarlyMeta } from "../src/runner.ts";
+import { appendRunLog, completedExitCode, runRoutine, writeEarlyMeta } from "../src/runner.ts";
 
 let home: string;
 let outageSituationLog: string;
@@ -348,6 +348,57 @@ describe("runRoutine heartbeat handling", () => {
     expect(meta.trigger).toBe("manual");
     expect(meta.status).toBe("running");
     expect(readFileSync(join(runDir, "stdout.log"), "utf8")).toBe("hello-live\n");
+  });
+
+  test("completedExitCode remaps a sink ok after SIGTERM or timeout", () => {
+    expect(
+      completedExitCode(124, true, { kind: "ok", detail: "merged", source: "sink" }),
+    ).toBe(0);
+    expect(
+      completedExitCode(null, false, { kind: "ok", detail: "merged", source: "sink" }),
+    ).toBe(0);
+    expect(
+      completedExitCode(1, false, { kind: "error", detail: "boom", source: "sink" }),
+    ).toBe(1);
+  });
+
+  test("stops the harness when outcome.txt is written instead of waiting out the budget", async () => {
+    process.env.ROUTINES_SINK_STOP_GRACE_MS = "50";
+    process.env.ROUTINES_SIGKILL_GRACE_MS = "50";
+    process.env.ROUTINES_CLAUDE_BIN = stub(
+      join(home, "linger-after-sink"),
+      [
+        "#!/bin/sh",
+        "printf '%s\\n' 'ok worked=demo result=merged' > \"$ROUTINES_RUN_DIR/outcome.txt\"",
+        "printf '%s\\n' 'ROUTINE_RESULT outcome=ok detail=worked=demo'",
+        "sleep 30",
+        "",
+      ].join("\n"),
+    );
+    writeFileSync(
+      join(home, "registry", "linger-after-sink.toml"),
+      [
+        'harness = "claude"',
+        'model = "test-model"',
+        'rrule = "FREQ=SECONDLY"',
+        'prompt = "hello"',
+        'heartbeat_slug = "routine-heartbeats"',
+        "timeout_min = 1",
+      ].join("\n") + "\n",
+    );
+
+    const started = Date.now();
+    const result = await runRoutine(loadEntry("linger-after-sink"), {
+      quiet: true,
+      noFallback: true,
+    });
+    const elapsedMs = Date.now() - started;
+
+    expect(elapsedMs).toBeLessThan(8_000);
+    expect(result.timedOut).toBe(false);
+    expect(result.exitCode).toBe(0);
+    expect(result.outcome.kind).toBe("ok");
+    expect(result.outcome.source).toBe("sink");
   });
 
   test("appendRunLog is best-effort when the log path cannot be written", () => {

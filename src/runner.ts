@@ -13,7 +13,15 @@
 // This is the durable evidence the card's VERIFY asks for.
 
 import { spawn, spawnSync } from "node:child_process";
-import { appendFileSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync,
+  mkdirSync,
+  readFileSync,
+  statSync,
+  watch,
+  writeFileSync,
+  type FSWatcher,
+} from "node:fs";
 import { join } from "node:path";
 
 import { buildInvocation, type HarnessInvocation } from "./adapters.ts";
@@ -35,7 +43,12 @@ import type { RoutineEntry } from "./registry.ts";
 import { buildRoutineAttributionEnv, resolveDispatchPrompt } from "./prompt.ts";
 import { runsDir } from "./paths.ts";
 import { writeHeartbeat, type HeartbeatOutcome } from "./heartbeat.ts";
-import { filterBenignHarnessNoise, parseOutcome, type RunOutcome } from "./outcome.ts";
+import {
+  filterBenignHarnessNoise,
+  parseOutcome,
+  parseOutcomeSink,
+  type RunOutcome,
+} from "./outcome.ts";
 import { readOutcomeSink } from "./runs.ts";
 import { patchState, readState } from "./state.ts";
 import { envFromProjectConfig, loadProjectConfig, resolveRoutineCwd } from "./project-config.ts";
@@ -362,7 +375,11 @@ function runOnce(
     });
 
     let timedOut = false;
+    let sinkStop = false;
     let killTimer: ReturnType<typeof setTimeout> | null = null;
+    let sinkStopTimer: ReturnType<typeof setTimeout> | null = null;
+    let sinkPoll: ReturnType<typeof setInterval> | null = null;
+    let sinkWatcher: FSWatcher | null = null;
     const timeoutMs = entry.timeoutMin * 60_000;
     const timer = setTimeout(() => {
       timedOut = true;
@@ -371,6 +388,30 @@ function runOnce(
       killTimer = setTimeout(() => killChildGroup(child, "SIGKILL"), sigkillGraceMs());
       killTimer.unref();
     }, timeoutMs);
+
+    const requestSinkStop = (): void => {
+      if (sinkStop || timedOut) return;
+      if (!parseOutcomeSink(readOutcomeSink(runDir))) return;
+      sinkStop = true;
+      sinkStopTimer = setTimeout(() => {
+        if (timedOut) return;
+        killChildGroup(child, "SIGTERM");
+        killTimer = setTimeout(() => killChildGroup(child, "SIGKILL"), sigkillGraceMs());
+        killTimer.unref();
+      }, sinkStopGraceMs());
+      sinkStopTimer.unref();
+    };
+
+    try {
+      sinkWatcher = watch(runDir, () => requestSinkStop());
+      sinkWatcher.on("error", () => {
+        /* poll remains */
+      });
+    } catch {
+      /* watch is best-effort; poll covers create-after-open */
+    }
+    sinkPoll = setInterval(() => requestSinkStop(), 250);
+    sinkPoll.unref();
 
     if (invocation.stdin !== undefined) {
       child.stdin?.write(invocation.stdin);
@@ -433,6 +474,15 @@ function runOnce(
     function finalize(code: number | null, signal: NodeJS.Signals | null): void {
       clearTimeout(timer);
       if (killTimer) clearTimeout(killTimer);
+      if (sinkStopTimer) clearTimeout(sinkStopTimer);
+      if (sinkPoll) clearInterval(sinkPoll);
+      if (sinkWatcher) {
+        try {
+          sinkWatcher.close();
+        } catch {
+          /* ignore */
+        }
+      }
       const finishedAt = new Date();
       const stdout = stdoutCapture.text();
       const stderr = stderrCapture.text();
@@ -561,12 +611,12 @@ export function completedExitCode(
   timedOut: boolean,
   outcome: RunOutcome,
 ): number | null {
-  if (
-    rawExitCode !== null &&
-    rawExitCode !== 0 &&
+  const declaredOk =
     (outcome.kind === "ok" || outcome.kind === "noop") &&
-    (outcome.source === "heartbeat" || outcome.source === "routine_result")
-  ) {
+    (outcome.source === "heartbeat" ||
+      outcome.source === "routine_result" ||
+      outcome.source === "sink");
+  if (declaredOk && rawExitCode !== 0) {
     return 0;
   }
   if (!timedOut && outcome.kind === "noop" && outcome.source === "safe_skip") {
@@ -798,6 +848,14 @@ function sigkillGraceMs(): number {
   if (!raw) return 5_000;
   const n = Number(raw);
   return Number.isFinite(n) && n >= 0 ? n : 5_000;
+}
+
+/** After a terminal outcome.txt, wait this long for trailing stdout, then SIGTERM. */
+function sinkStopGraceMs(): number {
+  const raw = process.env.ROUTINES_SINK_STOP_GRACE_MS;
+  if (!raw) return 1_500;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : 1_500;
 }
 
 function runLogMaxBytes(): number {
