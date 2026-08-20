@@ -7,6 +7,8 @@ import {
   buildDeliveryStageRequest,
   buildFleetPublication,
   deliverFleetStatus,
+  newLastDbDeliveryClient,
+  newLastDbPublisherClient,
   publishFleetStatus,
   type LastDbDeliveryClient,
   type LastDbPublisherClient,
@@ -169,6 +171,72 @@ test("deliverFleetStatus publishes, stages, and optionally approves", async () =
   expect(delivery.approvedIds).toEqual(["delivery-1"]);
   expect(result.staged?.deliveryId).toBe("delivery-1");
   expect(result.approved?.shared).toBe(2);
+});
+
+test("LastDB publisher identifies socket requests and preserves auth and JSON headers", async () => {
+  const socketPath = join(home, "lastdb.sock");
+  writeFileSync(socketPath, "");
+  const requests: Array<{ url: string; init: RequestInit & { unix?: string } }> = [];
+  const client = newLastDbPublisherClient({
+    socketPath,
+    nodeUrl: "http://127.0.0.1:9001",
+    fetchImpl: async (input, init = {}) => {
+      requests.push({ url: String(input), init });
+      const body = String(input).endsWith("/api/system/auto-identity") ? { user_hash: "user-1" } : { data: [] };
+      return Response.json(body);
+    },
+  });
+
+  await client.autoIdentity();
+  await client.queryByKey({ schemaHash: "schema-1", keyHash: "row-1", fields: ["slug"] });
+
+  expect(requests).toHaveLength(2);
+  expect(requests.every((request) => request.init.unix === socketPath)).toBe(true);
+  expect(requests.map((request) => request.url)).toEqual([
+    "http://localhost/api/system/auto-identity",
+    "http://localhost/api/query",
+  ]);
+  expect(new Headers(requests[0]!.init.headers).get("X-LastDB-Client")).toBe("routines");
+  const queryHeaders = new Headers(requests[1]!.init.headers);
+  expect(queryHeaders.get("X-LastDB-Client")).toBe("routines");
+  expect(queryHeaders.get("X-User-Hash")).toBe("user-1");
+  expect(queryHeaders.get("Content-Type")).toBe("application/json");
+});
+
+test("LastDB delivery identifies explicit loopback requests", async () => {
+  const requests: Array<{ url: string; init: RequestInit & { unix?: string } }> = [];
+  const client = newLastDbDeliveryClient({
+    socketPath: join(home, "missing-lastdb.sock"),
+    nodeUrl: "http://127.0.0.1:19001",
+    fetchImpl: async (input, init = {}) => {
+      requests.push({ url: String(input), init });
+      return Response.json({
+        data: {
+          delivery: {
+            delivery_id: "delivery-1",
+            preview: { record_count: 1, fields: ["slug"] },
+          },
+          note: "staged",
+        },
+      });
+    },
+  });
+
+  await client.stageDelivery({
+    recipient_pubkey: "recipient-ed25519",
+    messaging_public_key: "messaging-x25519",
+    messaging_pseudonym: "00000000-0000-0000-0000-000000000001",
+    mode: "snapshot",
+    max_records: 1,
+    legs: [{ schema_name: "schema-1", fields: ["slug"], hash_keys: ["fleet-latest"] }],
+  });
+
+  expect(requests).toHaveLength(1);
+  expect(requests[0]!.url).toBe("http://127.0.0.1:19001/api/sharing/deliver");
+  expect(requests[0]!.init.unix).toBeUndefined();
+  const headers = new Headers(requests[0]!.init.headers);
+  expect(headers.get("X-LastDB-Client")).toBe("routines");
+  expect(headers.get("Content-Type")).toBe("application/json");
 });
 
 class FakeClient implements LastDbPublisherClient {

@@ -415,8 +415,14 @@ export class LastDbPublishError extends Error {
 }
 
 type FetchInit = RequestInit & { unix?: string };
+type LastDbFetch = (input: Parameters<typeof globalThis.fetch>[0], init?: FetchInit) => Promise<Response>;
+type LastDbClientOptions = {
+  socketPath?: string;
+  nodeUrl?: string;
+  fetchImpl?: LastDbFetch;
+};
 
-export function newLastDbPublisherClient(opts: { socketPath?: string; nodeUrl?: string } = {}): LastDbPublisherClient {
+export function newLastDbPublisherClient(opts: LastDbClientOptions = {}): LastDbPublisherClient {
   const callJson = newLastDbJsonCaller(opts);
   let userHash = "";
 
@@ -460,7 +466,7 @@ export function newLastDbPublisherClient(opts: { socketPath?: string; nodeUrl?: 
   };
 }
 
-export function newLastDbDeliveryClient(opts: { socketPath?: string; nodeUrl?: string } = {}): LastDbDeliveryClient {
+export function newLastDbDeliveryClient(opts: LastDbClientOptions = {}): LastDbDeliveryClient {
   const callJson = newLastDbJsonCaller(opts);
   return {
     async stageDelivery(request) {
@@ -491,11 +497,12 @@ export function newLastDbDeliveryClient(opts: { socketPath?: string; nodeUrl?: s
   };
 }
 
-function newLastDbJsonCaller(opts: { socketPath?: string; nodeUrl?: string } = {}) {
+function newLastDbJsonCaller(opts: LastDbClientOptions = {}) {
   const socketPath = resolveSocketPath(opts.socketPath);
   const nodeUrl = (opts.nodeUrl ?? process.env.ROUTINES_LASTDB_NODE_URL ?? "http://localhost:9001").replace(/\/+$/, "");
+  const fetchImpl: LastDbFetch = opts.fetchImpl ?? ((input, init) => globalThis.fetch(input, init));
   return async function callJson(method: "GET" | "POST", path: string, body?: unknown, userHash = ""): Promise<unknown> {
-    const headers: Record<string, string> = {};
+    const headers: Record<string, string> = { "X-LastDB-Client": ROUTINES_APP_ID };
     if (userHash) headers["X-User-Hash"] = userHash;
     let requestBody: string | undefined;
     if (body !== undefined) {
@@ -508,7 +515,7 @@ function newLastDbJsonCaller(opts: { socketPath?: string; nodeUrl?: string } = {
     const url = useSocket ? `http://localhost${path}` : `${nodeUrl}${path}`;
     let res: Response;
     try {
-      res = await fetch(url, init);
+      res = await fetchImpl(url, init);
     } catch (err) {
       throw new LastDbPublishError(
         "lastdb_unreachable",
