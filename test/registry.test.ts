@@ -41,7 +41,7 @@ describe("parseEntry", () => {
   });
 
   test("rejects bad harness", () => {
-    const bad = base.replace('harness = "claude"', 'harness = "gemini"');
+    const bad = base.replace('harness = "claude"', 'harness = "bard"');
     expect(() => parseEntry(bad, "/x/r.toml")).toThrow(/harness/);
   });
 
@@ -55,6 +55,53 @@ describe("parseEntry", () => {
     const e = parseEntry(text, "/x/g.toml");
     expect(e.harness).toBe("grok");
     expect(e.model).toBe("grok-4.5");
+  });
+
+  test("parses gemini harness", () => {
+    const e = parseEntry(
+      [
+        'harness = "gemini"',
+        'model = "gemini-3.7-flash"',
+        'rrule = "FREQ=DAILY"',
+        'prompt = "hi"',
+      ].join("\n"),
+      "/x/gemini.toml",
+    );
+    expect(e.harness).toBe("gemini");
+    expect(e.model).toBe("gemini-3.7-flash");
+  });
+
+  test("accepts a four-provider matrix including gemini", () => {
+    const dir = mkdtempSync(join(tmpdir(), "routines-matrix-4-"));
+    const matrixPath = join(dir, "routing-matrix.json");
+    writeFileSync(matrixPath, JSON.stringify({
+      version: 1,
+      providerOrder: ["codex", "grok", "claude", "gemini"],
+      matrix: {
+        fast: {
+          codex: { model: "luna" }, grok: { model: "g45" }, claude: { model: "haiku" },
+          gemini: { model: "gemini-3.6-flash" },
+        },
+        normal: {
+          codex: { model: "terra" }, grok: { model: "g46" }, claude: { model: "sonnet" },
+          gemini: { model: "gemini-3.7-flash" },
+        },
+        hard: {
+          codex: { model: "sol" }, grok: { model: "g46" }, claude: { model: "opus" },
+          gemini: { model: "gemini-3.1-pro" },
+        },
+      },
+    }));
+    const old = process.env.ROUTINES_ROUTING_MATRIX_PATH;
+    process.env.ROUTINES_ROUTING_MATRIX_PATH = matrixPath;
+    try {
+      const e = parseEntry('difficulty = "hard"\nrrule = "FREQ=DAILY"\nprompt = "hi"', "/x/g4.toml");
+      expect(e.harness).toBe("codex");
+      expect(e.model).toBe("sol");
+    } finally {
+      if (old === undefined) delete process.env.ROUTINES_ROUTING_MATRIX_PATH;
+      else process.env.ROUTINES_ROUTING_MATRIX_PATH = old;
+    }
   });
 
   test("resolves a difficulty-only entry from the versioned global matrix", () => {
@@ -113,7 +160,7 @@ describe("parseEntry", () => {
     try {
       expect(() =>
         parseEntry('difficulty = "fast"\nrrule = "FREQ=DAILY"\nprompt = "hi"', "/x/bad-matrix.toml"),
-      ).toThrow(/fast\.claude\.model/);
+      ).toThrow(/fast\.\w+\.model/);
     } finally {
       if (old === undefined) delete process.env.ROUTINES_ROUTING_MATRIX_PATH;
       else process.env.ROUTINES_ROUTING_MATRIX_PATH = old;

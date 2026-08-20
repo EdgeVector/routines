@@ -51,7 +51,7 @@ import { deliverFleetStatus, publishFleetStatus, type DeliveryRecipient } from "
 import { initRoutinesSentry } from "./observability.ts";
 import { runCapacityControllerTick } from "./capacity-runtime.ts";
 
-const HELP = `routines ${pkg.version} — one scheduler for agent routines (claude|codex)
+const HELP = `routines ${pkg.version} — one scheduler for agent routines (claude|codex|grok|gemini)
 
 Usage:
   routines <command> [options]
@@ -91,6 +91,7 @@ Environment:
   ROUTINES_CLAUDE_BIN         claude binary override when explicitly allowed
   ROUTINES_CODEX_BIN          codex binary override when explicitly allowed
   ROUTINES_GROK_BIN           grok binary override when explicitly allowed
+  ROUTINES_GEMINI_BIN         agy binary override when explicitly allowed
   ROUTINES_FSITUATIONS_BIN    fsituations binary (default: fsituations)
   ROUTINES_FBRAIN_BIN         fbrain binary for heartbeats (default: fbrain)
 
@@ -311,7 +312,7 @@ function cmdRoute(rest: string[]): number {
   });
   const id = positionals[0];
   if (!id || (!values.harness && !values.model)) {
-    console.error("usage: routines route <id> [--harness claude|codex|grok] [--model <model>]");
+    console.error("usage: routines route <id> [--harness claude|codex|grok|gemini] [--model <model>]");
     return 2;
   }
   const entry = loadEntry(id);

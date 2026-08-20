@@ -96,6 +96,8 @@ const USAGE_LIMIT_PATTERNS: RegExp[] = [
   // exhausted` classified as an ordinary error — no fence, no page, no fallback.
   /usage balance exhausted/i,
   /status 402 payment required/i,
+  /ineligibletiererror/i,
+  /you are not logged into antigravity/i,
 ];
 
 const CAPACITY_PATTERNS: RegExp[] = [

@@ -20,7 +20,7 @@ import {
   type MatrixResolution,
 } from "./difficulty-matrix.ts";
 
-export const HARNESSES = ["claude", "codex", "grok"] as const;
+export const HARNESSES = ["claude", "codex", "grok", "gemini"] as const;
 export type Harness = (typeof HARNESSES)[number];
 export type Status = "active" | "paused";
 export const ROUTINE_TIERS = ["spine", "worker", "opportunistic"] as const;

@@ -16,6 +16,7 @@ afterEach(() => {
   delete process.env.ROUTINES_ALLOW_HARNESS_BIN_OVERRIDES;
   delete process.env.ROUTINES_CLAUDE_BIN;
   delete process.env.ROUTINES_CODEX_BIN;
+  delete process.env.ROUTINES_GEMINI_BIN;
 });
 
 describe("buildInvocation", () => {
@@ -107,6 +108,32 @@ describe("buildInvocation", () => {
       "hello\n## Setup",
     ]);
     expect(inv.args[inv.args.length - 2]).toBe("-p");
+  });
+
+  test("gemini adapter binds agy with model, effort, and unattended flags", () => {
+    const gem = parseEntry(
+      'harness = "gemini"\nmodel = "gemini-3.7-flash"\nrrule = "FREQ=DAILY"\nprompt = "hello"',
+      "/x/g.toml",
+    );
+    const inv = buildInvocation(gem, "hello");
+    expect(inv.bin).toBe("agy");
+    expect(inv.args).toContain("--model");
+    expect(inv.args).toContain("gemini-3.7-flash");
+    expect(inv.args).toContain("--effort");
+    expect(inv.args).toContain("low");
+    expect(inv.args).toContain("--dangerously-skip-permissions");
+    expect(inv.args[inv.args.length - 2]).toBe("-p");
+    expect(inv.args[inv.args.length - 1]).toBe("hello");
+  });
+
+  test("gemini 3.1 pro defaults effort high", () => {
+    const gem = parseEntry(
+      'harness = "gemini"\nmodel = "gemini-3.1-pro"\nrrule = "FREQ=DAILY"\nprompt = "hello"',
+      "/x/g.toml",
+    );
+    const inv = buildInvocation(gem, "hello");
+    const effortIdx = inv.args.indexOf("--effort");
+    expect(inv.args[effortIdx + 1]).toBe("high");
   });
 
   test("binary override via env", () => {

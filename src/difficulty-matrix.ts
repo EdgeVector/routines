@@ -6,7 +6,7 @@ import type { Harness } from "./registry.ts";
 
 export const DIFFICULTIES = ["fast", "normal", "hard"] as const;
 export type Difficulty = (typeof DIFFICULTIES)[number];
-const PROVIDERS = ["claude", "codex", "grok"] as const satisfies readonly Harness[];
+const PROVIDERS = ["claude", "codex", "grok", "gemini"] as const satisfies readonly Harness[];
 
 export interface MatrixCell {
   model: string;
@@ -45,16 +45,19 @@ export const DEFAULT_DIFFICULTY_MATRIX: DifficultyMatrix = {
       grok: { model: "grok-4.5" },
       codex: { model: "gpt-5.6-luna" },
       claude: { model: "haiku" },
+      gemini: { model: "gemini-3.6-flash" },
     },
     normal: {
       grok: { model: "grok-4.5" },
       codex: { model: "gpt-5.6-terra" },
       claude: { model: "sonnet" },
+      gemini: { model: "gemini-3.7-flash" },
     },
     hard: {
       grok: { model: "grok-4.5" },
       codex: { model: "gpt-5.6-sol" },
       claude: { model: "opus" },
+      gemini: { model: "gemini-3.1-pro" },
     },
   },
 };
@@ -100,8 +103,10 @@ export function validateDifficultyMatrix(value: unknown, source = "routing matri
     throw new DifficultyMatrixError(`${source}: version must be a positive integer`);
   }
   const providerOrder = value.providerOrder;
-  if (!Array.isArray(providerOrder) || providerOrder.length !== PROVIDERS.length) {
-    throw new DifficultyMatrixError(`${source}: providerOrder must contain exactly claude, codex, and grok`);
+  if (!Array.isArray(providerOrder) || providerOrder.length < 1) {
+    throw new DifficultyMatrixError(
+      `${source}: providerOrder must list one or more of ${PROVIDERS.join(", ")}`,
+    );
   }
   const providers = providerOrder.map((item) => {
     if (typeof item !== "string" || !(PROVIDERS as readonly string[]).includes(item)) {
@@ -109,7 +114,7 @@ export function validateDifficultyMatrix(value: unknown, source = "routing matri
     }
     return item as Harness;
   });
-  if (new Set(providers).size !== PROVIDERS.length) {
+  if (new Set(providers).size !== providers.length) {
     throw new DifficultyMatrixError(`${source}: providerOrder must not contain duplicates`);
   }
   if (!isRecord(value.matrix)) throw new DifficultyMatrixError(`${source}: matrix must be an object`);
@@ -119,7 +124,7 @@ export function validateDifficultyMatrix(value: unknown, source = "routing matri
     const row = value.matrix[difficulty];
     if (!isRecord(row)) throw new DifficultyMatrixError(`${source}: missing ${difficulty} row`);
     const nextRow = {} as Record<Harness, MatrixCell>;
-    for (const harness of PROVIDERS) {
+    for (const harness of providers) {
       const cell = row[harness];
       if (!isRecord(cell) || typeof cell.model !== "string" || !cell.model.trim()) {
         throw new DifficultyMatrixError(`${source}: ${difficulty}.${harness}.model must be a non-empty string`);

@@ -23,6 +23,7 @@ export const DEFAULT_HARNESS_MODELS: Record<Harness, string> = {
   claude: "sonnet",
   codex: "gpt-5.5",
   grok: "grok-4.5",
+  gemini: "gemini-3.7-flash",
 };
 
 /** Fleet default tail after the routine's primary (order fixed by product). */
