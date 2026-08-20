@@ -91,6 +91,14 @@ The gate only exits 10 (LLM fix lane) on hard signals (auth/quota, staging
 ≥50%, `last_success=never`). Probe timeouts flush
 `outcome=timeout_partial` and exit 0.
 
+For `lastdb-local-smoke-test`, set
+`gate_command = "routines-lastdb-local-smoke-gate"`. The gate resolves only a
+prebuilt `lastdbd`, mirrors the live LaunchAgent's non-home `LASTDB_*` settings,
+and runs the existing real-data CoW smoke under a hard timeout. It never invokes
+Cargo; `lastdb-canary-build-main` owns cold builds. A missing staged candidate is
+a classified noop, GREEN is `ok`, and RED/timeout is `error`, each with an
+authoritative `outcome.txt` verdict.
+
 `tier` is the shared capacity-control priority. `spine` is the essential
 shipping loop, `worker` is normal product work, and `opportunistic` is the
 first class a capacity controller may skip. Omitting it preserves legacy
