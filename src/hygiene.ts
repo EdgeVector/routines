@@ -319,6 +319,12 @@ export interface ArtifactDaemonRefreshOptions {
   reinstall: () => void;
 }
 
+/** True when `executable` is the immutable host-track routines artifact. */
+export function isHostTrackRoutinesArtifact(executable: string): boolean {
+  const normalized = executable.replace(/\\/g, "/");
+  return /\/\.host-track\/apps\/routines\/versions\/[0-9a-f]{64}\//.test(normalized);
+}
+
 /** Refresh a daemon whose launchd arguments still name a previous artifact. */
 export function refreshArtifactDaemonIfStale(
   opts: ArtifactDaemonRefreshOptions,
@@ -383,14 +389,10 @@ function tryArtifactDaemonRefresh(
   } catch {
     return null;
   }
-  let runningExecutable: string;
-  try {
-    runningExecutable = realpathSync(process.execPath);
-  } catch {
-    runningExecutable = process.execPath;
-  }
-  // Never repoint RUN state at an ad-hoc compiled DEV binary.
-  if (runningExecutable !== currentExecutable) return null;
+  // Reload onto host-track current even when this process is still the previous
+  // digest (stale LaunchAgent after `host-track refresh --activate`). Never
+  // install a DEV binary: current must resolve under versions/<64-hex>/.
+  if (!isHostTrackRoutinesArtifact(currentExecutable)) return null;
 
   const uid = process.getuid?.() ?? 0;
   let launchctlPrint: string;

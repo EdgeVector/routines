@@ -5,6 +5,7 @@ import { join } from "node:path";
 
 import {
   hygieneLauncherPath,
+  isHostTrackRoutinesArtifact,
   refreshArtifactDaemonIfStale,
   renderHygieneLauncher,
   renderHygienePlist,
@@ -239,6 +240,19 @@ describe("artifact daemon refresh", () => {
     expect(result.attempted).toBe(false);
     expect(result.restarted).toBe(false);
     expect(reinstalls).toBe(0);
+  });
+
+  test("accepts a host-track versions digest and rejects a DEV path", () => {
+    expect(
+      isHostTrackRoutinesArtifact(
+        "/Users/x/.host-track/apps/routines/versions/2eb07e371d8924078a602dcfabce78d55fc689a6586da54d48e8b819d79f7010/dist/routines",
+      ),
+    ).toBe(true);
+    expect(
+      isHostTrackRoutinesArtifact(
+        "/Users/x/.fkanban/worktrees/routines-dev/src/cli.ts",
+      ),
+    ).toBe(false);
   });
 
   test("performs one supervised reinstall when launchd names an old artifact", () => {
