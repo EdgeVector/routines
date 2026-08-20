@@ -285,6 +285,7 @@ function runOnce(
   const startedAt = new Date();
   const runDir = join(runsDir(), entry.id, runStamp(startedAt));
   mkdirSync(runDir, { recursive: true });
+  mkdirSync(join(runDir, "scratch"), { recursive: true });
   // Prompt after runDir so the envelope can name Run directory / Run-Id trailers.
   const prompt = resolveDispatchPrompt(entry, { runDir });
   const invocation = buildInvocation(entry, prompt);

@@ -202,6 +202,9 @@ describe("routine attribution env + trailers", () => {
     expect(env.LASTGIT_ACTOR).toBe("routine:last-stack-fkanban-pickup");
     expect(env.ROUTINES_RUN_DIR).toContain("last-stack-fkanban-pickup");
     expect(env.ROUTINES_RUN_ID).toBe("2026-07-16T12-00-00-000Z");
+    expect(env.TMPDIR).toBe(`${env.ROUTINES_RUN_DIR}/scratch`);
+    expect(env.TMP).toBe(env.TMPDIR);
+    expect(env.TEMP).toBe(env.TMPDIR);
   });
 
   test("formatAttributionTrailers is stable machine text", () => {
