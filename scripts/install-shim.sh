@@ -60,6 +60,15 @@ if [ -f "$cshf_gate" ]; then
   ln -sf "$cshf_gate" "$install_bin/routines-cloud-sync-health-fix-gate"
 fi
 
+# Zero-LLM LastDB real-data smoke gate. The scheduled canary must never spend
+# its harness wall clock compiling Fold; a separate 180-minute builder stages
+# candidate binaries for this bounded probe.
+lastdb_smoke_gate="$repo_root/scripts/lastdb-local-smoke-gate.sh"
+if [ -f "$lastdb_smoke_gate" ]; then
+  chmod +x "$lastdb_smoke_gate" 2>/dev/null || true
+  ln -sf "$lastdb_smoke_gate" "$install_bin/routines-lastdb-local-smoke-gate"
+fi
+
 # Keep launchd run-daemon on the same checkout as the PATH shim. Operators used
 # to pin ROUTINES_CLI at a disposable worktree while ~/.local/bin/routines still
 # pointed at a stale/broken tree — status then failed on import while the daemon
