@@ -35,6 +35,8 @@ export function harnessBinary(harness: Harness): string {
       return harnessOverride("ROUTINES_CODEX_BIN") ?? "codex";
     case "grok":
       return harnessOverride("ROUTINES_GROK_BIN") ?? "grok";
+    case "gemini":
+      return harnessOverride("ROUTINES_GEMINI_BIN") ?? "agy";
     default: {
       const never: never = harness;
       throw new Error(`unknown harness: ${String(never)}`);
@@ -124,6 +126,29 @@ export function buildInvocation(entry: RoutineEntry, prompt: string): HarnessInv
       // -p takes the prompt as its value; keep it last so multi-line bodies are one arg.
       args.push("-p", prompt);
       break;
+    case "gemini": {
+      // Antigravity CLI (agy). Homebrew `gemini` is ineligible on this host
+      // (IneligibleTierError UNSUPPORTED_CLIENT). Flash models require
+      // --effort; Pro High takes --effort high.
+      args = [
+        "--model",
+        entry.model,
+        "--effort",
+        geminiEffort(entry),
+        "--dangerously-skip-permissions",
+        "--output-format",
+        "text",
+      ];
+      const timeoutMin = Number.isFinite(entry.timeoutMin) && entry.timeoutMin > 0
+        ? Math.ceil(entry.timeoutMin)
+        : 30;
+      args.push("--print-timeout", `${timeoutMin}m`);
+      for (const dir of geminiWritableDirs()) {
+        args.push("--add-dir", dir);
+      }
+      args.push("-p", prompt);
+      break;
+    }
     default: {
       const never: never = entry.harness;
       throw new Error(`unknown harness: ${String(never)}`);
@@ -145,6 +170,17 @@ export function buildInvocation(entry: RoutineEntry, prompt: string): HarnessInv
  * Do not add host-track `current` as a write target; agents must not develop
  * there (RUN bucket). DEV is worktrees only.
  */
+function geminiEffort(entry: RoutineEntry): string {
+  if (entry.effort && entry.effort.trim()) return entry.effort.trim();
+  if (/gemini-3\.1-pro/i.test(entry.model)) return "high";
+  return "low";
+}
+
+/** Extra dirs agy may need outside the routine cwd (same set as Codex). */
+export function geminiWritableDirs(): string[] {
+  return codexWritableDirs();
+}
+
 export function codexWritableDirs(): string[] {
   const home = process.env.HOME && process.env.HOME.length > 0 ? process.env.HOME : homedir();
   const dirs = [

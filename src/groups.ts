@@ -134,6 +134,7 @@ const EXACT: Record<string, string> = {
   "smoke-claude": "smoke",
   "smoke-codex": "smoke",
   "smoke-grok": "smoke",
+  "smoke-gemini": "smoke",
 };
 
 /** Pattern rules applied when no exact match (order matters — first win). */
