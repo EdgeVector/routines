@@ -41,6 +41,7 @@ import { patchState, readState } from "./state.ts";
 import { envFromProjectConfig, loadProjectConfig, resolveRoutineCwd } from "./project-config.ts";
 import { discoveredRoutineSocketEnv } from "./socket-env.ts";
 import { escalateRoutineError, shouldAutoEscalateScheduledRun, shouldEscalate } from "./error-escalate.ts";
+import { enrichWorktreeCleanupLivenessEnv } from "./worktree-liveness.ts";
 
 export interface RunResult {
   id: string;
@@ -283,12 +284,15 @@ function runOnce(
   const project = loadProjectConfig();
   const cwd = resolveRoutineCwd(entry.cwd, project);
   const configuredEnv = { ...process.env, ...envFromProjectConfig(project) };
-  const childEnv = stripUnresolvedSentryLocators(
-    enrichGateEnv(entry, {
-      ...configuredEnv,
-      ...discoveredRoutineSocketEnv(configuredEnv),
-      ...buildRoutineAttributionEnv(entry.id, runDir),
-    }),
+  const childEnv = enrichWorktreeCleanupLivenessEnv(
+    entry.id,
+    stripUnresolvedSentryLocators(
+      enrichGateEnv(entry, {
+        ...configuredEnv,
+        ...discoveredRoutineSocketEnv(configuredEnv),
+        ...buildRoutineAttributionEnv(entry.id, runDir),
+      }),
+    ),
   );
 
   // Optional zero-LLM gate: skip expensive harness when the gate says so.
