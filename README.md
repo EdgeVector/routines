@@ -81,6 +81,14 @@ so the dashboard regenerates without an LLM (avoids false
 runner also injects `LAST_STACK_NORTH_STAR_DASHBOARD_CMD_TIMEOUT=120` for that
 routine id when unset (dashboard default is 30s per subprocess).
 
+`last-stack-worktree-cleanup` also receives a narrow host-level liveness
+snapshot before the harness sandbox starts. Routinesd enumerates cwd and
+command paths with both `lsof` and `ps`, filters them to managed worktree roots,
+and passes only those paths through the reclaim helper's existing fixture
+variables. Both probes must succeed; otherwise routinesd injects nothing and
+the helper retains its conservative soft-degrade behavior. The LLM harness is
+never switched to unrestricted sandbox mode.
+
 For `cloud-sync-health-fix`, set
 `gate_command = "routines-cloud-sync-health-fix-gate"` (see
 `examples/cloud-sync-health-fix.toml`) so the default path is a **bounded
