@@ -6,6 +6,9 @@ import { join } from "node:path";
 
 import {
   escalateRoutineError,
+  escalateStatePath,
+  isClassifiedErrorOutcome,
+  retractEscalateStateIfRecovered,
   shouldAutoEscalateScheduledRun,
   shouldEscalate,
 } from "../src/error-escalate.ts";
@@ -73,6 +76,84 @@ afterEach(() => {
   if (prevEsc === undefined) delete process.env.ROUTINES_ERROR_ESCALATE;
   else process.env.ROUTINES_ERROR_ESCALATE = prevEsc;
   rmSync(home, { recursive: true, force: true });
+});
+
+describe("isClassifiedErrorOutcome", () => {
+  test("only classified error is an error row, not leftover lastExit", () => {
+    expect(isClassifiedErrorOutcome("error")).toBe(true);
+    expect(isClassifiedErrorOutcome("ok")).toBe(false);
+    expect(isClassifiedErrorOutcome("noop")).toBe(false);
+    expect(isClassifiedErrorOutcome("unknown")).toBe(false);
+    expect(isClassifiedErrorOutcome(null)).toBe(false);
+  });
+});
+
+describe("retractEscalateStateIfRecovered", () => {
+  test("ok run unlinks a prior failure stamp", () => {
+    process.env.ROUTINES_ERROR_ESCALATE = "1";
+    const stubDir = join(home, "bin");
+    mkdirSync(stubDir, { recursive: true });
+    const brainStub = join(stubDir, "brain-stub");
+    const kanbanStub = join(stubDir, "kanban-stub");
+    writeFileSync(
+      brainStub,
+      `#!/usr/bin/env bash
+set -euo pipefail
+echo appended
+`,
+    );
+    writeFileSync(
+      kanbanStub,
+      `#!/usr/bin/env bash
+set -euo pipefail
+exit 1
+`,
+    );
+    spawnSyncchmod(brainStub);
+    spawnSyncchmod(kanbanStub);
+
+    const failed = result({ exitCode: 1 });
+    escalateRoutineError(entry("last-stack-disk-reclaim", "P3"), failed, {
+      kanbanBin: kanbanStub,
+      brainBin: brainStub,
+      dispatchAgent: false,
+      quiet: true,
+    });
+    const stamp = escalateStatePath("last-stack-disk-reclaim");
+    expect(existsSync(stamp)).toBe(true);
+
+    const recovered = result({
+      exitCode: 0,
+      timedOut: false,
+      outcome: { kind: "ok", detail: "worked", source: "sink" },
+    });
+    expect(retractEscalateStateIfRecovered(recovered, { quiet: true })).toBe(true);
+    expect(existsSync(stamp)).toBe(false);
+  });
+
+  test("error run does not retract", () => {
+    const stamp = escalateStatePath("last-stack-disk-reclaim");
+    mkdirSync(join(home, "error-escalate"), { recursive: true });
+    writeFileSync(stamp, JSON.stringify({ lastOutcome: "error" }) + "\n");
+    const stillBad = result({
+      exitCode: 1,
+      outcome: { kind: "error", detail: "still-broken", source: "exit" },
+    });
+    expect(retractEscalateStateIfRecovered(stillBad, { quiet: true })).toBe(false);
+    expect(existsSync(stamp)).toBe(true);
+  });
+
+  test("noop is a recovery", () => {
+    const stamp = escalateStatePath("last-stack-disk-reclaim");
+    mkdirSync(join(home, "error-escalate"), { recursive: true });
+    writeFileSync(stamp, JSON.stringify({ lastOutcome: "error" }) + "\n");
+    const noop = result({
+      exitCode: 0,
+      outcome: { kind: "noop", detail: "nothing-to-do", source: "sink" },
+    });
+    expect(retractEscalateStateIfRecovered(noop, { quiet: true })).toBe(true);
+    expect(existsSync(stamp)).toBe(false);
+  });
 });
 
 describe("shouldEscalate", () => {

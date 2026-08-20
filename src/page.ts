@@ -322,9 +322,9 @@ function cleanDetail(s) {
   return t;
 }
 function isErrorRow(r) {
-  if (r.lastOutcome === "error") return true;
-  if (r.lastExit != null && r.lastExit !== 0) return true;
-  return false;
+  // Classified lastOutcome is the only error-row fact. A leftover non-zero
+  // lastExit after ok/noop (completed timeout) is not an error.
+  return r.lastOutcome === "error";
 }
 function rowMatches(r) {
   if (searchQ) {
