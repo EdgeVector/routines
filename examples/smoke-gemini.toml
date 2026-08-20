@@ -4,11 +4,7 @@ harness = "gemini"
 model = "gemini-3.7-flash"
 effort = "low"
 rrule = "FREQ=YEARLY"
-prompt = """You are a smoke test. Reply with exactly this one line and stop:
-SMOKE_OK harness=gemini
-
-Do not use tools. Do not edit files. Exit immediately after that line.
-"""
+prompt = "You are a smoke test. Reply with exactly this one line and stop: SMOKE_OK harness=gemini"
 status = "paused"
 timeout_min = 5
 pin = true
