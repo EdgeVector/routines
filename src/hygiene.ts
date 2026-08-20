@@ -30,7 +30,7 @@ export interface HygieneOptions {
   keepDays?: number;
   /** Truncate each memory.md to this many trailing lines (default 100). */
   memoryMaxLines?: number;
-  /** Drop error-escalate state files older than this many days (default 14). */
+  /** Age backstop for error-escalate stamps still pointing at a live error (default 14). Recovered ok/noop stamps are dropped regardless of age. */
   escalateMaxAgeDays?: number;
   /** When true, only report what would change. */
   dryRun?: boolean;
@@ -91,6 +91,19 @@ const DEFAULT_ESCALATE_DAYS = 14;
 
 function errorEscalateDir(home: string): string {
   return join(home, "error-escalate");
+}
+
+/** True when state/<id>.json lastOutcome is classified recovered (ok/noop). */
+function isRecoveredEscalateStamp(home: string, escalateFileName: string): boolean {
+  const id = escalateFileName.replace(/\.json$/i, "");
+  const statePath = join(home, "state", `${id}.json`);
+  if (!existsSync(statePath)) return false;
+  try {
+    const parsed = JSON.parse(readFileSync(statePath, "utf8")) as { lastOutcome?: unknown };
+    return parsed.lastOutcome === "ok" || parsed.lastOutcome === "noop";
+  } catch {
+    return false;
+  }
 }
 
 function dirSizeBytes(path: string): number {
@@ -608,6 +621,9 @@ export function runHygiene(opts: HygieneOptions = {}): HygieneResult {
   }
 
   // --- error-escalate state ---
+  // Age is a backstop. Recovered stamps (current lastOutcome ok/noop) must
+  // drop immediately so hygiene cannot keep presenting a healed routine as
+  // still-escalated for 14 days.
   const escBase = errorEscalateDir(home);
   const escCutoff = nowMs - escalateMaxAgeDays * 86_400_000;
   if (existsSync(escBase)) {
@@ -620,12 +636,16 @@ export function runHygiene(opts: HygieneOptions = {}): HygieneResult {
       } catch {
         continue;
       }
-      if (mtime >= escCutoff) continue;
+      const recovered = isRecoveredEscalateStamp(home, name);
+      const staleByAge = mtime < escCutoff;
+      if (!recovered && !staleByAge) continue;
       const sz = dirSizeBytes(p);
       items.push({
         kind: "escalate",
         path: p,
-        detail: `delete escalate state older than ${escalateMaxAgeDays}d`,
+        detail: recovered
+          ? "delete escalate state after classified ok/noop recovery"
+          : `delete escalate state older than ${escalateMaxAgeDays}d`,
       });
       bytesFreedEstimate += sz;
       prunedEscalate++;

@@ -9,6 +9,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { PAGE } from "../src/page.ts";
 import { startServer, type ServerHandle } from "../src/server.ts";
 
 let home: string;
@@ -170,6 +171,11 @@ test("run-now fires a routine and the run shows up in run detail (both harnesses
     expect(detail.stdoutTail).toContain("STUB ran");
     expect(existsSync(join(home, "runs", id))).toBe(true);
   }
+});
+
+test("dashboard error rows follow classified lastOutcome, not leftover lastExit", () => {
+  expect(PAGE).toContain("return r.lastOutcome === \"error\"");
+  expect(PAGE).not.toContain("r.lastExit != null && r.lastExit !== 0");
 });
 
 test("run-now while already running is refused with 409", async () => {

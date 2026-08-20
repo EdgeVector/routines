@@ -14,6 +14,10 @@
 //   - Rate-limit agent dispatch per routine id (default 30m)
 //   - Disable entirely with ROUTINES_ERROR_ESCALATE=0
 //   - Never throw out of escalate paths (scheduler must not die)
+//
+// Recovery: a later classified ok/noop run unlinks the per-id stamp so
+// recovered routines cannot keep presenting as errored. Hygiene also drops
+// recovered stamps instead of waiting 14 days.
 
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -22,6 +26,7 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
@@ -176,6 +181,56 @@ function readState(routineId: string): EscalateState | null {
 function writeState(routineId: string, st: EscalateState): void {
   mkdirSync(stateDir(), { recursive: true });
   writeFileSync(statePath(routineId), JSON.stringify(st, null, 2) + "\n");
+}
+
+/**
+ * Path of the per-id escalate stamp. Exported for tests.
+ * Failure stamps live until a later classified ok/noop retracts them.
+ */
+export function escalateStatePath(routineId: string): string {
+  return statePath(routineId);
+}
+
+/** True when lastOutcome is a classified recovery (not error/unknown). */
+export function isRecoveredOutcome(kind: string | null | undefined): boolean {
+  return kind === "ok" || kind === "noop";
+}
+
+/**
+ * Classified lastOutcome is the only error-row fact. A leftover non-zero
+ * lastExit after ok/noop (completed timeout) is not an error.
+ */
+export function isClassifiedErrorOutcome(lastOutcome: string | null | undefined): boolean {
+  return lastOutcome === "error";
+}
+
+/** Unlink the per-id escalate stamp. Never throws. */
+export function clearEscalateState(routineId: string): boolean {
+  const p = statePath(routineId);
+  if (!existsSync(p)) return false;
+  try {
+    unlinkSync(p);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Retract a prior failure stamp when this run classified as recovered.
+ * Call on the non-escalate finalize path so recovered routines cannot keep
+ * presenting as errored.
+ */
+export function retractEscalateStateIfRecovered(
+  result: Pick<RunResult, "id" | "outcome">,
+  opts: { quiet?: boolean } = {},
+): boolean {
+  if (!isRecoveredOutcome(result.outcome.kind)) return false;
+  const cleared = clearEscalateState(result.id);
+  if (cleared) {
+    logLine(opts.quiet, `retracted ${result.id} after ${result.outcome.kind}`);
+  }
+  return cleared;
 }
 
 function logLine(quiet: boolean | undefined, msg: string): void {

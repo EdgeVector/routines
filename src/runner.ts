@@ -40,7 +40,12 @@ import { readOutcomeSink } from "./runs.ts";
 import { patchState, readState } from "./state.ts";
 import { envFromProjectConfig, loadProjectConfig, resolveRoutineCwd } from "./project-config.ts";
 import { discoveredRoutineSocketEnv } from "./socket-env.ts";
-import { escalateRoutineError, shouldAutoEscalateScheduledRun, shouldEscalate } from "./error-escalate.ts";
+import {
+  escalateRoutineError,
+  retractEscalateStateIfRecovered,
+  shouldAutoEscalateScheduledRun,
+  shouldEscalate,
+} from "./error-escalate.ts";
 import { enrichWorktreeCleanupLivenessEnv } from "./worktree-liveness.ts";
 
 export interface RunResult {
@@ -238,7 +243,14 @@ export async function runRoutine(entry: RoutineEntry, opts: RunOptions = {}): Pr
     }
 
     if (!shouldEscalate(last)) {
-      // True success (or non-escalating non-outage outcome).
+      // True success (or non-escalating non-outage outcome). Retract any
+      // prior failure stamp so recovered routines cannot keep presenting
+      // as errored.
+      try {
+        retractEscalateStateIfRecovered(last, { quiet: opts.quiet });
+      } catch {
+        /* never break caller */
+      }
       return last;
     }
 

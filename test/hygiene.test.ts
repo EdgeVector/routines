@@ -147,6 +147,39 @@ describe("runHygiene", () => {
     expect(result.dryRun).toBe(true);
     expect(existsSync(d)).toBe(true);
   });
+
+  test("drops recovered escalate stamps regardless of age", () => {
+    const home = mkdtempSync(join(tmpdir(), "routines-hygiene-esc-"));
+    const esc = join(home, "error-escalate");
+    const st = join(home, "state");
+    mkdirSync(esc, { recursive: true });
+    mkdirSync(st, { recursive: true });
+    const recovered = join(esc, "repark-shared-checkouts.json");
+    const stillRed = join(esc, "last-stack-card-reaper.json");
+    writeFileSync(recovered, JSON.stringify({ lastOutcome: "error" }) + "\n");
+    writeFileSync(stillRed, JSON.stringify({ lastOutcome: "error" }) + "\n");
+    writeFileSync(
+      join(st, "repark-shared-checkouts.json"),
+      JSON.stringify({ id: "repark-shared-checkouts", lastOutcome: "ok" }) + "\n",
+    );
+    writeFileSync(
+      join(st, "last-stack-card-reaper.json"),
+      JSON.stringify({ id: "last-stack-card-reaper", lastOutcome: "error" }) + "\n",
+    );
+
+    const result = runHygiene({
+      home,
+      nowMs: Date.now(),
+      escalateMaxAgeDays: 14,
+      dryRun: false,
+      publishStatus: false,
+      ffInstall: false,
+    });
+    expect(result.prunedEscalate).toBe(1);
+    expect(existsSync(recovered)).toBe(false);
+    expect(existsSync(stillRed)).toBe(true);
+    expect(result.items.some((i) => i.detail.includes("ok/noop recovery"))).toBe(true);
+  });
 });
 
 describe("renderHygienePlist", () => {
