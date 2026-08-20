@@ -525,6 +525,50 @@ describe("runRoutine gate_command", () => {
     expect(result.harnessPid).toBeTruthy();
     const meta = JSON.parse(readFileSync(join(result.runDir, "meta.json"), "utf8"));
     expect(meta.gateSkippedHarness).not.toBe(true);
+    expect(meta.gateProceeded).toBe(true);
+    expect(meta.gateCommand).toBe(gate);
+  });
+
+  test("hung gate skips harness with noop gate-timeout", async () => {
+    process.env.ROUTINES_GATE_TIMEOUT_MS = "400";
+    const harnessLog = join(home, "hung-gate-harness.log");
+    process.env.ROUTINES_CLAUDE_BIN = stub(
+      join(home, "hung-must-not-run"),
+      [
+        "#!/bin/sh",
+        `printf 'ran\\n' >> ${JSON.stringify(harnessLog)}`,
+        "exit 0",
+        "",
+      ].join("\n"),
+    );
+    const gate = stub(
+      join(home, "hung-gate"),
+      ["#!/bin/sh", "sleep 5", "exit 10", ""].join("\n"),
+    );
+    writeFileSync(
+      join(home, "registry", "gate-hung.toml"),
+      [
+        'harness = "claude"',
+        'model = "test-model"',
+        'rrule = "FREQ=SECONDLY"',
+        'prompt = "should not matter"',
+        'heartbeat_slug = "routine-heartbeats"',
+        "timeout_min = 1",
+        `gate_command = ${JSON.stringify(gate)}`,
+      ].join("\n") + "\n",
+    );
+
+    const result = await runRoutine(loadEntry("gate-hung"), { quiet: true, noFallback: true });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.outcome.kind).toBe("noop");
+    expect(result.outcome.detail).toBe("gate-timeout");
+    expect(result.harnessPid).toBeNull();
+    expect(existsSync(harnessLog)).toBe(false);
+    const meta = JSON.parse(readFileSync(join(result.runDir, "meta.json"), "utf8"));
+    expect(meta.gateSkippedHarness).toBe(true);
+    expect(meta.gateProceeded).not.toBe(true);
+    expect(meta.command).toContain("gate_command");
   });
 
   test("exit 0 with ROUTINE_RESULT ok preserves outcome=ok (real work gate)", async () => {
