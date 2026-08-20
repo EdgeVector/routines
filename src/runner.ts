@@ -124,6 +124,9 @@ export function writeEarlyMeta(args: {
   resolvedBy?: "matrix" | "pin";
   difficulty?: string;
   matrixResolution?: RoutineEntry["matrixResolution"];
+  gateCommand?: string | null;
+  gateProceeded?: boolean;
+  gateSkippedHarness?: boolean;
 }): void {
   writeRunFile(
     join(args.runDir, "meta.json"),
@@ -145,6 +148,13 @@ export function writeEarlyMeta(args: {
         matrixResolution: args.matrixResolution ?? null,
         exitCode: null,
         finishedAt: null,
+        ...(args.gateCommand
+          ? {
+              gateCommand: args.gateCommand,
+              gateProceeded: args.gateProceeded === true,
+              gateSkippedHarness: args.gateSkippedHarness === true,
+            }
+          : {}),
       },
       null,
       2,
@@ -326,6 +336,8 @@ function runOnce(
   //   exit 10 → proceed to harness
   //   exit 0  → skip harness; honor ROUTINE_RESULT outcome=ok|noop (else noop)
   //   other   → fail the run (config / unexpected error)
+  let gateProceeded = false;
+  const gateCommandUsed = entry.gateCommand ?? null;
   if (entry.gateCommand) {
     const gated = runPreDispatchGate(entry, {
       cwd,
@@ -336,6 +348,7 @@ function runOnce(
       routeMeta,
     });
     if (gated) return Promise.resolve(gated);
+    gateProceeded = true;
   }
 
   const maxLogBytes = runLogMaxBytes();
@@ -372,6 +385,9 @@ function runOnce(
       resolvedBy: entry.resolvedBy,
       difficulty: entry.difficulty,
       matrixResolution: entry.matrixResolution,
+      gateCommand: gateCommandUsed,
+      gateProceeded,
+      gateSkippedHarness: false,
     });
 
     let timedOut = false;
@@ -463,6 +479,9 @@ function runOnce(
         resolvedBy: entry.resolvedBy,
         difficulty: entry.difficulty,
         matrixResolution: entry.matrixResolution,
+        gateCommand: gateCommandUsed,
+        gateProceeded,
+        gateSkippedHarness: false,
       });
       finalize(null, null);
     });
@@ -529,6 +548,13 @@ function runOnce(
             effort: entry.effort ?? null,
             cwd: entry.cwd,
             command: result.invocation.display,
+            ...(gateCommandUsed
+              ? {
+                  gateCommand: gateCommandUsed,
+                  gateProceeded,
+                  gateSkippedHarness: false,
+                }
+              : {}),
             exitCode: result.exitCode,
             signal: result.signal,
             timedOut: result.timedOut,
@@ -636,6 +662,15 @@ export const GATE_PROCEED_EXIT = 10;
  */
 export const GATE_TIMEOUT_CAP_MS = 15 * 60_000;
 
+/** Gate wall clock. ROUTINES_GATE_TIMEOUT_MS is a test override (milliseconds). */
+export function gateTimeoutMs(entry: RoutineEntry): number {
+  const raw = process.env.ROUTINES_GATE_TIMEOUT_MS;
+  if (raw && /^\d+$/.test(raw)) {
+    return Math.max(1, Number(raw));
+  }
+  return Math.min(Math.max(1, entry.timeoutMin) * 60_000, GATE_TIMEOUT_CAP_MS);
+}
+
 /**
  * Env enrichment for zero-LLM gates / dashboard-adjacent routines.
  * North-star rollup's dashboard binary defaults to 30s per subprocess; under
@@ -677,10 +712,7 @@ export function runPreDispatchGate(
 
   // Honor timeout_min fully (capped). The old 120s hard cap aborted real work
   // gates such as north-star dashboard rebuild (~3 min under load).
-  const timeoutMs = Math.min(
-    Math.max(1, entry.timeoutMin) * 60_000,
-    GATE_TIMEOUT_CAP_MS,
-  );
+  const timeoutMs = gateTimeoutMs(entry);
   const result = spawnSync(cmd, {
     cwd: args.cwd,
     env: args.env,
@@ -696,9 +728,10 @@ export function runPreDispatchGate(
   writeRunFile(join(args.runDir, "stderr.log"), stderr);
   writeRunFile(join(args.runDir, "prompt.txt"), `(gate_command skipped prompt load)\ngate_command=${cmd}\n`);
 
+  const timedOut = Boolean(result.error && (result.error as NodeJS.ErrnoException).code === "ETIMEDOUT");
   const status = result.status;
   // Proceed
-  if (status === GATE_PROCEED_EXIT) {
+  if (!timedOut && status === GATE_PROCEED_EXIT) {
     // Leave logs as gate evidence; harness will overwrite on spawn path... actually
     // harness appends. Clear for clean harness capture.
     writeRunFile(join(args.runDir, "stdout.log"), "");
@@ -707,11 +740,16 @@ export function runPreDispatchGate(
   }
 
   const finishedAt = new Date();
-  const timedOut = Boolean(result.error && (result.error as NodeJS.ErrnoException).code === "ETIMEDOUT");
   const rawExit = timedOut ? 124 : status;
   const combined = `${stdout}\n${stderr}`;
   let outcome: RunOutcome;
-  if (status === 0) {
+  if (timedOut) {
+    outcome = {
+      kind: "noop",
+      detail: "gate-timeout",
+      source: "safe_skip",
+    };
+  } else if (status === 0) {
     outcome = parseOutcome(entry.id, combined, {
       exitCode: 0,
       timedOut: false,
@@ -752,7 +790,7 @@ export function runPreDispatchGate(
     }
   }
 
-  const exitCode = status === 0 ? 0 : completedExitCode(rawExit, timedOut, outcome);
+  const exitCode = timedOut || status === 0 ? 0 : completedExitCode(rawExit, timedOut, outcome);
   const invocation: HarnessInvocation = {
     bin: cmd,
     args: [],
@@ -786,7 +824,8 @@ export function runPreDispatchGate(
         cwd: entry.cwd,
         command: invocation.display,
         gateCommand: cmd,
-        gateSkippedHarness: status === 0,
+        gateSkippedHarness: timedOut || status === 0,
+        gateProceeded: false,
         exitCode: runResult.exitCode,
         signal: runResult.signal,
         timedOut: runResult.timedOut,
