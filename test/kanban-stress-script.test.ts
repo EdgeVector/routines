@@ -1,4 +1,9 @@
 import { describe, expect, test } from "bun:test";
+import { chmodSync, mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { resolveProbePath } from "../src/probes.ts";
 
 const scriptPath = new URL("../scripts/kanban-stress.sh", import.meta.url);
 
@@ -27,6 +32,8 @@ describe("kanban stress harness", () => {
     expect(script).toContain("cleanup_created");
     expect(script).toContain("partial=$partial");
     expect(script).toContain("harness interrupted before completion");
+    expect(script).toContain("trap finalize_on_exit EXIT");
+    expect(script).toContain("harness exited before its terminal summary");
   });
 
   test("forces scratch todo creates through the milestone gate", async () => {
@@ -37,5 +44,27 @@ describe("kanban stress harness", () => {
     for (const add of todoAdds) {
       expect(add[0]).toContain("--force");
     }
+  });
+
+  test("resolves the harness from a compiled artifact without a source checkout", () => {
+    const root = mkdtempSync(join(tmpdir(), "routines-probe-artifact-"));
+    try {
+      const executable = join(root, "dist", "routines");
+      const probe = join(root, "dist", "probes", "kanban-stress.sh");
+      mkdirSync(join(root, "dist", "probes"), { recursive: true });
+      writeFileSync(executable, "stub\n");
+      writeFileSync(probe, "#!/bin/sh\n", { mode: 0o755 });
+      chmodSync(probe, 0o755);
+
+      expect(resolveProbePath("dogfood-kanban", { executable, sourceDir: join(root, "missing") })).toBe(
+        realpathSync(probe),
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("rejects unknown probe names", () => {
+    expect(() => resolveProbePath("unknown-probe")).toThrow("unknown probe: unknown-probe");
   });
 });

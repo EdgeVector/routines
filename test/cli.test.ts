@@ -69,6 +69,22 @@ test("status --json keeps rows and entries for stale jq consumers", async () => 
   expect(parsed.rows[0].timeoutMin).toBe(5);
 });
 
+test("probe-path prints the versioned dogfood harness", async () => {
+  const logs: string[] = [];
+  const originalLog = console.log;
+  console.log = (value?: unknown, ...rest: unknown[]) => {
+    logs.push([value, ...rest].map(String).join(" "));
+  };
+  try {
+    expect(await main(["probe-path", "dogfood-kanban"])).toBe(0);
+  } finally {
+    console.log = originalLog;
+  }
+
+  expect(logs).toHaveLength(1);
+  expect(logs[0]).toEndWith("/scripts/kanban-stress.sh");
+});
+
 test("import writes fresh entries paused and force re-import keeps them paused", async () => {
   const codexDir = join(home, "legacy-codex");
   const automationDir = join(codexDir, "imported-routine");
