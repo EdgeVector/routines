@@ -41,6 +41,7 @@ errors=()
 created=()
 partial=0
 cleaned=0
+summary_emitted=0
 
 finding() { findings+=("$1 | $2"); printf 'FINDING: %s | %s\n' "$1" "$2"; }
 errlog()  { errors+=("$1");        printf 'ERROR: %s\n' "$1"; }
@@ -58,7 +59,20 @@ cleanup_created() {
 }
 
 summary() {
+  summary_emitted=1
   echo "SUMMARY: findings=${#findings[@]} errors=${#errors[@]} partial=$partial board=$BOARD run=$RUN"
+}
+
+finalize_on_exit() {
+  rc=$?
+  if [ "$summary_emitted" != 1 ]; then
+    partiallog "harness exited before its terminal summary; cleanup attempted"
+    errlog "harness exited before completion rc=$rc"
+    cleanup_created
+    summary
+    trap - EXIT
+    exit 0
+  fi
 }
 
 interrupted() {
@@ -70,16 +84,17 @@ interrupted() {
 }
 
 trap interrupted INT TERM HUP
+trap finalize_on_exit EXIT
 
 # ── Preflight ──────────────────────────────────────────────────────────────
 if ! command -v jq >/dev/null 2>&1; then
-  echo "ERROR: jq not found — cannot assert JSON read-backs"
-  echo "SUMMARY: findings=0 errors=1 partial=0 board=$BOARD run=$RUN"
+  errlog "jq not found — cannot assert JSON read-backs"
+  summary
   exit 0
 fi
 if ! "$FK" board list --json >/dev/null 2>&1; then
-  echo "ERROR: node/board unreachable — skipping stress run (retries next schedule)"
-  echo "SUMMARY: findings=0 errors=1 partial=0 board=$BOARD run=$RUN"
+  errlog "node/board unreachable — skipping stress run (retries next schedule)"
+  summary
   exit 0
 fi
 # Ensure the isolated scratch board exists (no-op if already there).

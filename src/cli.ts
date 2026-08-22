@@ -50,6 +50,7 @@ import { loadProjectConfig } from "./project-config.ts";
 import { deliverFleetStatus, publishFleetStatus, type DeliveryRecipient } from "./publish-status.ts";
 import { initRoutinesSentry } from "./observability.ts";
 import { runCapacityControllerTick } from "./capacity-runtime.ts";
+import { resolveProbePath } from "./probes.ts";
 
 const HELP = `routines ${pkg.version} — one scheduler for agent routines (claude|codex|grok|gemini)
 
@@ -64,6 +65,7 @@ Commands:
   resume <id>                 set status = active
   route <id> --harness X --model Y   change a routine's harness and/or model
   logs <id>                   show recent runs for a routine (--json, --path, --tail)
+  probe-path <id>              print the installed path for a versioned probe harness
   publish-status              write slim fleet status records to LastDB (--json)
   deliver-status              publish + stage a fleet-status delivery; --approve sends it
   hygiene                     mechanical cleanup (prune runs/memory, daemon check,
@@ -146,6 +148,8 @@ async function main(argv: string[]): Promise<number> {
       return cmdMigrateKanbanIds(rest);
     case "logs":
       return cmdLogs(rest);
+    case "probe-path":
+      return cmdProbePath(rest);
     case "publish-status":
       return await cmdPublishStatus(rest);
     case "deliver-status":
@@ -174,6 +178,20 @@ async function main(argv: string[]): Promise<number> {
       console.error(`unknown command: ${command}\n`);
       console.error(HELP);
       return 2;
+  }
+}
+
+function cmdProbePath(rest: string[]): number {
+  if (rest.length !== 1) {
+    console.error("usage: routines probe-path <id>");
+    return 2;
+  }
+  try {
+    console.log(resolveProbePath(rest[0]!));
+    return 0;
+  } catch (err) {
+    console.error(err instanceof Error ? err.message : String(err));
+    return 1;
   }
 }
 

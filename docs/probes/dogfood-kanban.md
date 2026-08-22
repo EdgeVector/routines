@@ -17,7 +17,14 @@ the routine verdict, not as a consistency failure or a fleet error.
 Run it manually with:
 
 ```sh
-FKANBAN=fkanban bash scripts/kanban-stress.sh
+probe="$(routines probe-path dogfood-kanban)"
+FKANBAN=fkanban bash "$probe"
 ```
 
+`routines probe-path` resolves the harness from the immutable host-track
+artifact. It does not require a source checkout. The EdgeVector repository
+paths are portals and do not contain `scripts/kanban-stress.sh`.
+
 The expected healthy summary is `SUMMARY: findings=0 errors=0 partial=0 ...`.
+The harness also emits a partial summary when the shell exits before the normal
+summary path.
