@@ -12,7 +12,7 @@
 //   stdout.log / stderr.log — captured streams (appended as data arrives)
 // This is the durable evidence the card's VERIFY asks for.
 
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import {
   appendFileSync,
   mkdirSync,
@@ -299,7 +299,7 @@ interface RunOnceMeta {
 }
 
 /** Single harness spawn (no fallback). */
-function runOnce(
+async function runOnce(
   entry: RoutineEntry,
   opts: RunOptions,
   routeMeta?: RunOnceMeta,
@@ -339,7 +339,7 @@ function runOnce(
   let gateProceeded = false;
   const gateCommandUsed = entry.gateCommand ?? null;
   if (entry.gateCommand) {
-    const gated = runPreDispatchGate(entry, {
+    const gated = await runPreDispatchGate(entry, {
       cwd,
       env: childEnv,
       runDir,
@@ -696,7 +696,7 @@ export function enrichGateEnv(
  * Run entry.gateCommand before spawning the LLM harness.
  * Returns a finished RunResult when the gate skips the harness; null to proceed.
  */
-export function runPreDispatchGate(
+export async function runPreDispatchGate(
   entry: RoutineEntry,
   args: {
     cwd: string;
@@ -706,29 +706,73 @@ export function runPreDispatchGate(
     startedAt: Date;
     routeMeta?: RunOnceMeta;
   },
-): RunResult | null {
+): Promise<RunResult | null> {
   const cmd = entry.gateCommand;
   if (!cmd) return null;
 
   // Honor timeout_min fully (capped). The old 120s hard cap aborted real work
   // gates such as north-star dashboard rebuild (~3 min under load).
   const timeoutMs = gateTimeoutMs(entry);
-  const result = spawnSync(cmd, {
-    cwd: args.cwd,
-    env: args.env,
-    encoding: "utf8",
-    shell: true,
-    timeout: timeoutMs,
-    maxBuffer: 2_000_000,
+  // A gate can run for minutes. Keep it off the daemon event loop so its wait
+  // cannot delay timeout timers for harness children that already run.
+  const result = await new Promise<{
+    status: number | null;
+    signal: NodeJS.Signals | null;
+    timedOut: boolean;
+    stdout: string;
+    stderr: string;
+  }>((resolve) => {
+    const stdoutCapture = new BoundedLogCapture(2_000_000);
+    const stderrCapture = new BoundedLogCapture(2_000_000);
+    const child = spawn(cmd, {
+      cwd: args.cwd,
+      env: args.env,
+      shell: true,
+      detached: true,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let settled = false;
+    let timedOut = false;
+    let killTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      killChildGroup(child, "SIGTERM");
+      killTimer = setTimeout(() => killChildGroup(child, "SIGKILL"), sigkillGraceMs());
+      killTimer.unref();
+    }, timeoutMs);
+
+    child.stdout?.on("data", (data: Buffer) => stdoutCapture.push(data.toString()));
+    child.stderr?.on("data", (data: Buffer) => stderrCapture.push(data.toString()));
+
+    const finish = (status: number | null, signal: NodeJS.Signals | null): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (killTimer) clearTimeout(killTimer);
+      resolve({
+        status,
+        signal,
+        timedOut,
+        stdout: stdoutCapture.text(),
+        stderr: stderrCapture.text(),
+      });
+    };
+
+    child.once("error", (err) => {
+      stderrCapture.push(`spawn error: ${err.message}\n`);
+      finish(null, null);
+    });
+    child.once("close", (status, signal) => finish(status, signal));
   });
 
-  const stdout = result.stdout ?? "";
-  const stderr = result.stderr ?? "";
+  const stdout = result.stdout;
+  const stderr = result.stderr;
   writeRunFile(join(args.runDir, "stdout.log"), stdout);
   writeRunFile(join(args.runDir, "stderr.log"), stderr);
   writeRunFile(join(args.runDir, "prompt.txt"), `(gate_command skipped prompt load)\ngate_command=${cmd}\n`);
 
-  const timedOut = Boolean(result.error && (result.error as NodeJS.ErrnoException).code === "ETIMEDOUT");
+  const timedOut = result.timedOut;
   const status = result.status;
   // Proceed
   if (!timedOut && status === GATE_PROCEED_EXIT) {
