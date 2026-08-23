@@ -184,6 +184,42 @@ describe("daemon evaluateOnce", () => {
     expect(hb.every((l) => l.includes("ok") && l.includes("harness="))).toBe(true);
   });
 
+  test("a slow pre-dispatch gate does not delay another routine timeout", async () => {
+    process.env.ROUTINES_SIGKILL_GRACE_MS = "50";
+    process.env.ROUTINES_CLAUDE_BIN = stub(
+      join(home, "hung-harness"),
+      "#!/bin/sh\nsleep 5\n",
+    );
+    const slowGate = stub(
+      join(home, "slow-gate"),
+      [
+        "#!/bin/sh",
+        "sleep 2",
+        "printf '%s\\n' 'ROUTINE_RESULT outcome=noop detail=gate-finished'",
+        "exit 0",
+        "",
+      ].join("\n"),
+    );
+
+    writeRoutine("a-timeout", "claude", ["timeout_min = 0.002"]);
+    writeRoutine("b-slow-gate", "claude", [
+      "timeout_min = 1",
+      `gate_command = ${JSON.stringify(slowGate)}`,
+    ]);
+
+    const results = await evaluateOnce({
+      once: true,
+      catchupMs: 60_000,
+      log: () => {},
+    });
+    const timed = results.find((result) => result.id === "a-timeout");
+    const gated = results.find((result) => result.id === "b-slow-gate");
+
+    expect(timed?.timedOut).toBe(true);
+    expect(timed?.durationMs).toBeLessThan(1_000);
+    expect(gated?.outcome.kind).toBe("noop");
+  });
+
   test("manual run-now failure does not overwrite scheduled status or escalate", async () => {
     const failingHarness = stub(
       join(home, "failing-harness"),
