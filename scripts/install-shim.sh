@@ -46,28 +46,32 @@ fi
 mkdir -p "$install_bin"
 ln -sf "$shim_target" "$install_bin/routines"
 
-# Zero-LLM north-star-rollup gate (optional registry gate_command target).
-ns_gate="$repo_root/scripts/north-star-rollup-gate.sh"
-if [ -f "$ns_gate" ]; then
-  chmod +x "$ns_gate" 2>/dev/null || true
-  ln -sf "$ns_gate" "$install_bin/routines-north-star-rollup-gate"
-fi
+# Zero-LLM gate entry points (optional registry gate_command targets).
+# A host-track artifact ships only bin/ and dist/ (.lastgit/artifacts.json), so
+# scripts/ does not exist there. scripts/build-artifact.sh copies the same files
+# into dist/probes/. Resolve both locations, otherwise a compiled install leaves
+# a stale ~/.local/bin symlink pointing into a scripts/ dir that is not present
+# and every gate_command using it exits 127.
+link_gate() {
+  gate_file=$1
+  gate_name=$2
+  for gate_src in "$repo_root/scripts/$gate_file" "$repo_root/dist/probes/$gate_file"; do
+    if [ -f "$gate_src" ]; then
+      chmod +x "$gate_src" 2>/dev/null || true
+      ln -sf "$gate_src" "$install_bin/$gate_name"
+      return 0
+    fi
+  done
+  return 0
+}
 
-# Zero-LLM cloud-sync-health-fix observe gate (avoids 45m exit-124 with no metrics).
-cshf_gate="$repo_root/scripts/cloud-sync-health-fix-gate.sh"
-if [ -f "$cshf_gate" ]; then
-  chmod +x "$cshf_gate" 2>/dev/null || true
-  ln -sf "$cshf_gate" "$install_bin/routines-cloud-sync-health-fix-gate"
-fi
-
-# Zero-LLM LastDB real-data smoke gate. The scheduled canary must never spend
-# its harness wall clock compiling Fold; a separate 180-minute builder stages
-# candidate binaries for this bounded probe.
-lastdb_smoke_gate="$repo_root/scripts/lastdb-local-smoke-gate.sh"
-if [ -f "$lastdb_smoke_gate" ]; then
-  chmod +x "$lastdb_smoke_gate" 2>/dev/null || true
-  ln -sf "$lastdb_smoke_gate" "$install_bin/routines-lastdb-local-smoke-gate"
-fi
+# north-star-rollup: plain registry gate_command target.
+link_gate north-star-rollup-gate.sh routines-north-star-rollup-gate
+# cloud-sync-health-fix: observe gate; avoids a 45m exit-124 with no metrics.
+link_gate cloud-sync-health-fix-gate.sh routines-cloud-sync-health-fix-gate
+# lastdb-local-smoke: the scheduled canary must never spend its harness wall
+# clock compiling Fold; a separate 180-minute builder stages the binaries.
+link_gate lastdb-local-smoke-gate.sh routines-lastdb-local-smoke-gate
 
 # Keep launchd run-daemon on the same checkout as the PATH shim. Operators used
 # to pin ROUTINES_CLI at a disposable worktree while ~/.local/bin/routines still
