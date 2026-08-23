@@ -16,7 +16,8 @@ export interface DifficultyMatrix {
   version: number;
   /** Preference order. The availability resolver may skip unavailable providers. */
   providerOrder: Harness[];
-  matrix: Record<Difficulty, Record<Harness, MatrixCell>>;
+  /** Cells exist only for providers listed in providerOrder. */
+  matrix: Record<Difficulty, Partial<Record<Harness, MatrixCell>>>;
 }
 
 export interface MatrixResolution {
@@ -45,19 +46,16 @@ export const DEFAULT_DIFFICULTY_MATRIX: DifficultyMatrix = {
       grok: { model: "grok-4.5" },
       codex: { model: "gpt-5.6-luna" },
       claude: { model: "haiku" },
-      gemini: { model: "gemini-3.6-flash" },
     },
     normal: {
       grok: { model: "grok-4.5" },
       codex: { model: "gpt-5.6-terra" },
       claude: { model: "sonnet" },
-      gemini: { model: "gemini-3.7-flash" },
     },
     hard: {
       grok: { model: "grok-4.5" },
       codex: { model: "gpt-5.6-sol" },
       claude: { model: "opus" },
-      gemini: { model: "gemini-3.1-pro" },
     },
   },
 };
@@ -93,6 +91,9 @@ export function resolveDifficulty(
   const harness = config.providerOrder.find((provider) => !excluded.has(provider))
     ?? config.providerOrder[0]!;
   const cell = config.matrix[difficulty][harness];
+  if (!cell) {
+    throw new DifficultyMatrixError(`no ${difficulty} cell for provider ${harness}`);
+  }
   return { version: config.version, difficulty, harness, model: cell.model };
 }
 
