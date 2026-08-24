@@ -723,14 +723,34 @@ async function cmdDaemon(rest: string[]): Promise<number> {
 
   const tickMs = values["tick-ms"] ? Number(values["tick-ms"]) : 15_000;
   const handle = startDaemon({ tickMs, concurrency, catchupMs });
-  const stop = () => handle.stop();
-  process.on("SIGTERM", stop);
-  process.on("SIGINT", stop);
+  process.on("SIGTERM", () => handle.stop("signal:SIGTERM"));
+  process.on("SIGINT", () => handle.stop("signal:SIGINT"));
+  // A tick gap with no logged reason costs hours of ps/pmset/crash-report
+  // archaeology. Record the exits the tick loop itself cannot observe.
+  process.on("uncaughtException", (err) => {
+    logDaemonExit(`uncaughtException: ${err?.message ?? String(err)}`);
+    throw err;
+  });
+  process.on("unhandledRejection", (reason) => {
+    logDaemonExit(`unhandledRejection: ${String(reason)}`);
+  });
+  process.on("exit", (code) => logDaemonExit(`process exit code=${code}`));
   console.error(
-    `routinesd started (tick=${tickMs}ms concurrency=${capLabel} free-slot-pool=on home=${routinesHome()})`,
+    `routinesd started (tick=${tickMs}ms concurrency=${capLabel} free-slot-pool=on home=${routinesHome()} pid=${process.pid})`,
   );
   await handle.done;
   return 0;
+}
+
+/** One structured line per process-level exit path, matching DaemonEvent shape. */
+function logDaemonExit(detail: string): void {
+  try {
+    process.stderr.write(
+      JSON.stringify({ ts: new Date().toISOString(), kind: "stop", detail }) + "\n",
+    );
+  } catch {
+    /* nothing useful to do while dying */
+  }
 }
 
 function cmdCapacityController(rest: string[]): number {
