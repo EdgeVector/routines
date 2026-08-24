@@ -22,6 +22,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
@@ -34,6 +35,8 @@ import { nextAfter } from "./rrule.ts";
 import { patchState, readState } from "./state.ts";
 import { isHarnessOutaged } from "./harness-outage.ts";
 import { routesForFire, runRoutine, type RunResult } from "./runner.ts";
+import { readOutcomeSink } from "./runs.ts";
+import { parseOutcomeSink, OUTCOME_SINK_FILENAME } from "./outcome.ts";
 import { loadProjectConfig } from "./project-config.ts";
 import { captureRoutineRunFailure, captureRoutinesException } from "./observability.ts";
 import { loadCapacityPolicy, planCapacity, type CapacityPolicy } from "./capacity.ts";
@@ -114,7 +117,8 @@ export interface DaemonEvent {
     | "registry-error"
     | "situations-degraded"
     | "reconcile-orphans"
-    | "coalesce-backlog";
+    | "coalesce-backlog"
+    | "stop";
   id?: string;
   detail?: string;
 }
@@ -269,6 +273,22 @@ export interface OrphanedRunInfo {
   runDir: string;
   harnessPid: number | null;
   clearedLock: boolean;
+  /** Outcome recovered from the run's own sink, else "unknown". */
+  outcome: string;
+  outcomeDetail: string | null;
+  /** "sink" when outcome.txt supplied the verdict, else "orphan". */
+  outcomeSource: string;
+  /** True when this run became the routine's visible last run in status. */
+  statePatched: boolean;
+}
+
+/** Completion time of an orphan: the sink's mtime is the real finish instant. */
+function sinkFinishedAt(runDir: string): string | null {
+  try {
+    return statSync(join(runDir, OUTCOME_SINK_FILENAME)).mtime.toISOString();
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -278,6 +298,17 @@ export interface OrphanedRunInfo {
  * that writes a terminal meta.json). Rewrite those to `status:"orphaned"` and
  * clear any matching dead single-flight lock so they stop looking
  * forever-running to status reads and fleet-health passes.
+ *
+ * Two things beyond the meta rewrite make an orphan *visible*:
+ *
+ *  1. The run's own `outcome.txt` sink is authoritative. A detached agent
+ *     frequently outlives the daemon that dispatched it and finishes its work;
+ *     when it wrote a verdict, that verdict is the run's outcome, not a blank
+ *     orphan.
+ *  2. Per-routine state is patched, so `routines status --json` reports the
+ *     orphaned dispatch instead of silently keeping the previous run's
+ *     `lastRun`. State is only moved forward — a newer completed run always
+ *     wins over a late-reconciled older orphan.
  */
 export function reconcileOrphanedRuns(now: Date = new Date()): OrphanedRunInfo[] {
   const base = runsDir();
@@ -297,39 +328,109 @@ export function reconcileOrphanedRuns(now: Date = new Date()): OrphanedRunInfo[]
     } catch {
       continue;
     }
-    const stamp = stamps.sort().at(-1);
-    if (!stamp) continue;
-    const runDir = join(idDir, stamp);
-    const metaPath = join(runDir, "meta.json");
-    if (!existsSync(metaPath)) continue;
-    let meta: Record<string, unknown>;
-    try {
-      meta = JSON.parse(readFileSync(metaPath, "utf8")) as Record<string, unknown>;
-    } catch {
-      continue;
-    }
-    if (meta.status !== "running") continue;
-    const harnessPid = typeof meta.harnessPid === "number" ? meta.harnessPid : null;
-    if (harnessPid != null && pidAlive(harnessPid)) continue; // legitimately still running
-    meta.status = "orphaned";
-    if (typeof meta.finishedAt !== "string") meta.finishedAt = now.toISOString();
-    let clearedLock = false;
-    if (!lockInfoHasLiveOwner(readLockInfo(id))) {
+    // Newest stamp only: an older unfinished dir behind a completed one is
+    // superseded history, not a live orphan (see status.test.ts).
+    const newest = stamps.sort().at(-1);
+    for (const stamp of newest ? [newest] : []) {
+      const runDir = join(idDir, stamp);
+      const metaPath = join(runDir, "meta.json");
+      if (!existsSync(metaPath)) continue;
+      let meta: Record<string, unknown>;
       try {
-        rmSync(lockPath(id), { force: true });
-        clearedLock = true;
+        meta = JSON.parse(readFileSync(metaPath, "utf8")) as Record<string, unknown>;
       } catch {
-        /* best effort */
+        continue;
       }
-    }
-    try {
-      writeFileSync(metaPath, JSON.stringify(meta, null, 2) + "\n");
-      orphaned.push({ id, stamp, runDir, harnessPid, clearedLock });
-    } catch {
-      /* best effort */
+      if (meta.status !== "running") continue;
+      const harnessPid = typeof meta.harnessPid === "number" ? meta.harnessPid : null;
+      if (harnessPid != null && pidAlive(harnessPid)) continue; // legitimately still running
+
+      const sink = parseOutcomeSink(readOutcomeSink(runDir));
+      const finishedAt =
+        typeof meta.finishedAt === "string"
+          ? meta.finishedAt
+          : (sink ? sinkFinishedAt(runDir) : null) ?? now.toISOString();
+      const outcome = sink?.kind ?? "unknown";
+      const outcomeDetail =
+        sink?.detail ??
+        `orphaned: routinesd restarted mid-run (harness pid ${harnessPid ?? "unknown"} gone, no outcome sink)`;
+      const outcomeSource = sink ? "sink" : "orphan";
+
+      meta.status = "orphaned";
+      meta.finishedAt = finishedAt;
+      meta.outcome = outcome;
+      meta.outcomeDetail = outcomeDetail;
+      meta.outcomeSource = outcomeSource;
+      meta.reconciledAt = now.toISOString();
+
+      let clearedLock = false;
+      if (!lockInfoHasLiveOwner(readLockInfo(id))) {
+        try {
+          rmSync(lockPath(id), { force: true });
+          clearedLock = true;
+        } catch {
+          /* best effort */
+        }
+      }
+      try {
+        writeFileSync(metaPath, JSON.stringify(meta, null, 2) + "\n");
+      } catch {
+        continue; // could not finalize — do not claim it in status either
+      }
+
+      const statePatched = adoptOrphanIntoState(id, {
+        runDir,
+        finishedAt,
+        startedAt: typeof meta.startedAt === "string" ? meta.startedAt : null,
+        outcome,
+        outcomeDetail,
+      });
+
+      orphaned.push({
+        id,
+        stamp,
+        runDir,
+        harnessPid,
+        clearedLock,
+        outcome,
+        outcomeDetail,
+        outcomeSource,
+        statePatched,
+      });
     }
   }
   return orphaned;
+}
+
+/**
+ * Make an orphaned dispatch the routine's visible last run — unless a newer run
+ * already reported. Without this, `routines status` keeps the pre-restart
+ * `lastRun` and the dispatch vanishes from every status read and fleet-health
+ * pass, which is the failure this reconciliation exists to prevent.
+ */
+function adoptOrphanIntoState(
+  id: string,
+  run: {
+    runDir: string;
+    finishedAt: string;
+    startedAt: string | null;
+    outcome: string;
+    outcomeDetail: string | null;
+  },
+): boolean {
+  const st = readState(id);
+  if (st.lastRunDir === run.runDir) return false; // already adopted
+  // A run that finished after this one started is strictly newer; leave it.
+  const boundary = run.startedAt ?? run.finishedAt;
+  if (st.lastRun && st.lastRun > boundary) return false;
+  patchState(id, {
+    lastRun: run.finishedAt,
+    lastRunDir: run.runDir,
+    lastExit: null,
+    lastOutcome: run.outcome,
+    lastOutcomeDetail: run.outcomeDetail ?? undefined,
+  });
+  return true;
 }
 
 /** Decide whether a routine is due at `now`, and (as a side effect) write a
@@ -622,7 +723,8 @@ export async function evaluateOnce(opts: DaemonOptions = {}): Promise<RunResult[
 }
 
 export interface DaemonHandle {
-  stop: () => void;
+  /** `reason` is logged on the terminal `kind:"stop"` line (default "stop()"). */
+  stop: (reason?: string) => void;
   done: Promise<void>;
 }
 
@@ -652,6 +754,7 @@ export function startDaemon(opts: DaemonOptions = {}): DaemonHandle {
   }
 
   let stopped = false;
+  let stopReason = "unknown";
   let resolveDone!: () => void;
   const done = new Promise<void>((r) => (resolveDone = r));
 
@@ -715,15 +818,30 @@ export function startDaemon(opts: DaemonOptions = {}): DaemonHandle {
       if (stopped) break;
       await sleep(tickMs);
     }
+    // The tick loop is the daemon's whole reason to exist. A gap in dispatches
+    // is only diagnosable after the fact when its end is on the record, so
+    // every exit path from here logs why.
+    log({
+      ts: new Date().toISOString(),
+      kind: "stop",
+      detail: `tick loop ended reason=${stopReason} in_flight=${inFlight.size}`,
+    });
     resolveDone();
   };
   // Start the loop without blocking the caller.
   loop().catch((err) => {
     captureRoutinesException(err, { tags: { service: "routinesd", phase: "loop" } });
+    log({
+      ts: new Date().toISOString(),
+      kind: "stop",
+      detail: `tick loop threw reason=${(err as Error).message}`,
+    });
+    resolveDone();
   });
 
   return {
-    stop: () => {
+    stop: (reason = "stop()") => {
+      if (!stopped) stopReason = reason;
       stopped = true;
     },
     done,
