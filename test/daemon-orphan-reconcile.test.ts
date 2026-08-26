@@ -375,6 +375,26 @@ describe("daemon boot start/stop identity", () => {
       ),
     ).toBe("host-track-activate");
   });
+
+  test("classifyAbruptStop treats a realpath-equal executable as unknown", () => {
+    const current = join(home, "ht-same");
+    writeFileSync(current, "x\n");
+    const old = new Date("2026-08-01T00:00:00.000Z");
+    utimesSync(current, old, old);
+    const now = new Date("2026-08-26T22:00:00.000Z");
+    expect(
+      classifyAbruptStop(
+        {
+          pid: 1,
+          startedAt: "2026-08-26T19:00:00.000Z",
+          executable: current,
+          stopReason: null,
+          stoppedAt: null,
+        },
+        { now, hostTrackCurrentPath: current },
+      ),
+    ).toBe("unknown");
+  });
 });
 
 describe("reconcile scans every unfinished run dir", () => {

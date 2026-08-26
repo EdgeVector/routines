@@ -265,7 +265,13 @@ export function classifyAbruptStop(
   if (prev.executable) {
     try {
       const live = realpathSync(currentPath);
-      if (live !== prev.executable) return "host-track-activate";
+      let prevExec = prev.executable;
+      try {
+        prevExec = realpathSync(prev.executable);
+      } catch {
+        /* keep the recorded path when it is gone */
+      }
+      if (live !== prevExec) return "host-track-activate";
     } catch {
       /* ignore */
     }
