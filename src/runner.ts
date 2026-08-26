@@ -32,8 +32,13 @@ import {
   entryForRoute,
   fallbackEnabled,
   formatRoute,
+  timeoutMinForRoute,
   type RouteStep,
 } from "./fallback.ts";
+import {
+  releaseFallbackSlot,
+  waitForFallbackSlot,
+} from "./fallback-slots.ts";
 import {
   classifyHarnessOutage,
   handleHarnessOutage,
@@ -205,6 +210,22 @@ export function routesForFire(entry: RoutineEntry, nowMs: number = Date.now()): 
 }
 
 /**
+ * Next index in `routes` that is still live. A fenced middle hop is skipped,
+ * not treated as "chain exhausted" — Codex already outaged must not stop a
+ * grok-primary fire from reaching Claude.
+ */
+export function nextLiveRouteIndex(
+  routes: RouteStep[],
+  fromIndex: number,
+  nowMs: number = Date.now(),
+): number {
+  for (let j = fromIndex; j < routes.length; j++) {
+    if (!isHarnessOutaged(routes[j]!.harness, nowMs)) return j;
+  }
+  return -1;
+}
+
+/**
  * Run a routine, walking the fallback chain on harness-outage failures only.
  * Registry TOML is never rewritten — route changes are ephemeral per fire.
  */
@@ -217,13 +238,53 @@ export async function runRoutine(entry: RoutineEntry, opts: RunOptions = {}): Pr
 
   for (let i = 0; i < routes.length; i++) {
     const step = routes[i]!;
+    // An already-fenced hop is skipped, not a reason to stop the fire.
+    // Codex-fenced + grok-primary must still reach Claude.
+    if (isHarnessOutaged(step.harness)) continue;
+
     const runEntry = entryForRoute(entry, step);
-    last = await runOnce(runEntry, opts, {
-      primaryHarness: entry.harness,
-      primaryModel: entry.model,
-      routeIndex: i,
-      routeCount: routes.length,
-    });
+    const isFallbackLeg = step.harness !== entry.harness;
+    let slotToken: string | null = null;
+    if (isFallbackLeg) {
+      const wait = await waitForFallbackSlot(
+        step.harness,
+        { pid: process.pid, id: entry.id },
+        { deadlineMs: Math.max(1, timeoutMinForRoute(entry, step) * 60_000) },
+      );
+      if ("overloaded" in wait) {
+        last = await recordOverloadedFallback(runEntry, opts, {
+          primaryHarness: entry.harness,
+          primaryModel: entry.model,
+          routeIndex: attempts.length,
+          routeCount: routes.length,
+        });
+        attempts.push({
+          harness: step.harness,
+          model: step.model,
+          runDir: last.runDir,
+          exitCode: last.exitCode,
+          outcome: last.outcome.kind,
+          outage: false,
+          timeoutMin: runEntry.timeoutMin,
+        });
+        annotateFallbackMeta(last, entry, attempts, step);
+        const next = nextLiveRouteIndex(routes, i + 1);
+        if (next < 0) return last;
+        continue;
+      }
+      slotToken = wait.token;
+    }
+
+    try {
+      last = await runOnce(runEntry, opts, {
+        primaryHarness: entry.harness,
+        primaryModel: entry.model,
+        routeIndex: attempts.length,
+        routeCount: routes.length,
+      });
+    } finally {
+      releaseFallbackSlot(slotToken);
+    }
 
     // Classify outage when the harness itself died — including capacity /
     // usage-limit remapped to clean noop/safe_skip. Do NOT classify pure `ok`
@@ -244,7 +305,8 @@ export async function runRoutine(entry: RoutineEntry, opts: RunOptions = {}): Pr
     annotateFallbackMeta(last, entry, attempts, step);
 
     if (outage) {
-      const hasMore = i < routes.length - 1;
+      const next = nextLiveRouteIndex(routes, i + 1);
+      const hasMore = next >= 0;
       try {
         handleHarnessOutage(runEntry, last, outage, {
           quiet: opts.quiet,
@@ -263,7 +325,7 @@ export async function runRoutine(entry: RoutineEntry, opts: RunOptions = {}): Pr
       if (!opts.quiet) {
         try {
           process.stderr.write(
-            `[routines fallback] ${entry.id}: ${formatRoute(step)} outage → trying ${formatRoute(routes[i + 1]!)}\n`,
+            `[routines fallback] ${entry.id}: ${formatRoute(step)} outage → trying ${formatRoute(routes[next]!)}\n`,
           );
         } catch {
           /* ignore */
@@ -303,6 +365,93 @@ interface RunOnceMeta {
   primaryModel: string;
   routeIndex: number;
   routeCount: number;
+}
+
+/**
+ * Fallback hop that could not take a fleet slot before its budget elapsed.
+ * Exit 124 + timedOut so classifyHarnessOutage stays null (retry-later).
+ */
+async function recordOverloadedFallback(
+  entry: RoutineEntry,
+  opts: RunOptions,
+  routeMeta: RunOnceMeta,
+): Promise<RunResult> {
+  const trigger = opts.trigger ?? "scheduled";
+  const startedAt = new Date();
+  const runDir = join(runsDir(), entry.id, runStamp(startedAt));
+  mkdirSync(runDir, { recursive: true });
+  mkdirSync(join(runDir, "scratch"), { recursive: true });
+  writeRunFile(join(runDir, "stdout.log"), "");
+  writeRunFile(join(runDir, "stderr.log"), "fallback-overloaded retry-later\n");
+  writeRunFile(
+    join(runDir, "prompt.txt"),
+    "(fallback slot overloaded; harness not spawned)\n",
+  );
+  const finishedAt = new Date();
+  const outcome = {
+    kind: "noop" as const,
+    detail: "fallback-overloaded retry-later",
+    source: "safe_skip" as const,
+  };
+  const invocation: HarnessInvocation = {
+    bin: "fallback-slot",
+    args: [],
+    display: "fallback-slot: overloaded",
+  };
+  const result: RunResult = {
+    id: entry.id,
+    runDir,
+    invocation,
+    exitCode: 124,
+    signal: null,
+    timedOut: true,
+    startedAt: startedAt.toISOString(),
+    finishedAt: finishedAt.toISOString(),
+    durationMs: finishedAt.getTime() - startedAt.getTime(),
+    heartbeat: { attempted: false, ok: true },
+    outcome,
+    harnessPid: null,
+  };
+  result.heartbeat = writeHeartbeat(entry, result);
+  writeRunFile(
+    join(runDir, "meta.json"),
+    JSON.stringify(
+      {
+        id: entry.id,
+        trigger,
+        harness: entry.harness,
+        model: entry.model,
+        effort: entry.effort ?? null,
+        cwd: entry.cwd,
+        command: invocation.display,
+        exitCode: result.exitCode,
+        signal: result.signal,
+        timedOut: result.timedOut,
+        startedAt: result.startedAt,
+        finishedAt: result.finishedAt,
+        durationMs: result.durationMs,
+        harnessPid: null,
+        daemonPid: process.pid,
+        status: "finished",
+        outcome: result.outcome.kind,
+        outcomeDetail: result.outcome.detail,
+        outcomeSource: result.outcome.source,
+        stdoutTail: "",
+        stderrTail: "fallback-overloaded retry-later",
+        heartbeat: result.heartbeat,
+        primaryHarness: routeMeta.primaryHarness,
+        primaryModel: routeMeta.primaryModel,
+        routeIndex: routeMeta.routeIndex,
+        routeCount: routeMeta.routeCount,
+        resolvedBy: entry.resolvedBy,
+        difficulty: entry.difficulty ?? null,
+        matrixResolution: entry.matrixResolution ?? null,
+      },
+      null,
+      2,
+    ) + "\n",
+  );
+  return result;
 }
 
 /** Single harness spawn (no fallback). */

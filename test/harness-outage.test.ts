@@ -196,6 +196,19 @@ describe("classifyHarnessOutage", () => {
     expect(classifyHarnessOutage(result(""))).toBeNull();
   });
 
+  test("exit 124 / timedOut is retry-later, even when logs quote a usage-limit", () => {
+    const timed = result(CODEX_LIMIT_LINE);
+    timed.timedOut = true;
+    timed.exitCode = 124;
+    timed.outcome = { kind: "error", detail: "timed out", source: "exit" };
+    expect(classifyHarnessOutage(timed)).toBeNull();
+
+    const exitOnly = result(GROK_BALANCE_STDERR);
+    exitOnly.timedOut = false;
+    exitOnly.exitCode = 124;
+    expect(classifyHarnessOutage(exitOnly)).toBeNull();
+  });
+
   test("ignores capacity text inside Situation JSON quotes (false-positive loop)", () => {
     // Agents dump `situations list` into logs; that embeds the capacity phrase
     // without being a real harness failure.

@@ -208,6 +208,12 @@ export function classifyHarnessOutage(
   result: RunResult,
   opts: HarnessOutageOptions = {},
 ): HarnessOutage | null {
+  // Exit 124 / runner timeout is overload or a too-short budget — retry-later,
+  // never a harness-outage fence. After the 2026-08-25 grok-402 herd, jetsam
+  // made several Claude legs exit 124; their logs still quoted Situation
+  // "usage limit" text and re-fenced the live harness.
+  if (result.timedOut || result.exitCode === 124) return null;
+
   const nowMs = opts.nowMs ?? Date.now();
   const corpus = [
     readTail(join(result.runDir, "stderr.log")),
