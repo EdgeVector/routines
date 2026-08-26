@@ -103,6 +103,12 @@ interface FallbackAttempt {
   exitCode: number | null;
   outcome: string;
   outage: boolean;
+  /**
+   * Wall-clock budget this leg ran under, in minutes — scaled for a
+   * non-primary harness. Recorded so an exit 124 can be read against the
+   * budget that actually applied, without going back to the registry row.
+   */
+  timeoutMin: number;
 }
 
 const DEFAULT_RUN_LOG_MAX_BYTES = 2_000_000;
@@ -233,6 +239,7 @@ export async function runRoutine(entry: RoutineEntry, opts: RunOptions = {}): Pr
       exitCode: last.exitCode,
       outcome: last.outcome.kind,
       outage: Boolean(outage),
+      timeoutMin: runEntry.timeoutMin,
     });
     annotateFallbackMeta(last, entry, attempts, step);
 
@@ -668,7 +675,10 @@ export function gateTimeoutMs(entry: RoutineEntry): number {
   if (raw && /^\d+$/.test(raw)) {
     return Math.max(1, Number(raw));
   }
-  return Math.min(Math.max(1, entry.timeoutMin) * 60_000, GATE_TIMEOUT_CAP_MS);
+  // A fallback leg scales `timeoutMin` for a slower harness; the gate is
+  // zero-LLM and harness-independent, so it stays on the primary budget.
+  const budgetMin = entry.primaryTimeoutMin ?? entry.timeoutMin;
+  return Math.min(Math.max(1, budgetMin) * 60_000, GATE_TIMEOUT_CAP_MS);
 }
 
 /**
