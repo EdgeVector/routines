@@ -13,10 +13,17 @@ import {
   primaryRoute,
   timeoutMinForRoute,
 } from "../src/fallback.ts";
+import {
+  acquireFallbackSlot,
+  countLiveFallbackSlots,
+  fallbackJitterMs,
+  fallbackMaxConcurrent,
+  releaseFallbackSlot,
+} from "../src/fallback-slots.ts";
 import { handleHarnessOutage, isHarnessOutaged } from "../src/harness-outage.ts";
 import { loadEntry, parseEntry } from "../src/registry.ts";
 import { parseRRule } from "../src/rrule.ts";
-import { gateTimeoutMs, runRoutine, type RunResult } from "../src/runner.ts";
+import { gateTimeoutMs, nextLiveRouteIndex, routesForFire, runRoutine, type RunResult } from "../src/runner.ts";
 import type { RoutineEntry } from "../src/registry.ts";
 
 const CODEX_LIMIT =
@@ -55,6 +62,9 @@ beforeEach(() => {
   process.env.ROUTINES_HOME = home;
   process.env.ROUTINES_ALLOW_HARNESS_BIN_OVERRIDES = "1";
   process.env.ROUTINES_SIGKILL_GRACE_MS = "50";
+  // Tests that hop must not pay production jitter; herd tests override cap.
+  process.env.ROUTINES_FALLBACK_JITTER_MS = "0";
+  process.env.ROUTINES_FALLBACK_MAX_CONCURRENT = "32";
   delete process.env.ROUTINES_FALLBACK;
   delete process.env.ROUTINES_FALLBACK_CHAIN;
   mkdirSync(join(home, "registry"), { recursive: true });
@@ -567,5 +577,228 @@ describe("runRoutine same-run fallback", () => {
       claudeCalls = 0;
     }
     expect(claudeCalls).toBe(0);
+  });
+
+  // Required gate: live 2026-08-25T23:14Z routine-fleet-health meta had
+  // routeCount=2 and one grok outage attempt, then stopped. Codex was already
+  // fenced. Claude was reachable. A mutant that returns after the first
+  // `outage: true` fails this fixture.
+  test("grok 402 + fenced codex still reaches claude in the same fire", async () => {
+    process.env.ROUTINES_FALLBACK_CHAIN = "codex:gpt-5.6-terra,claude:sonnet,grok:grok-4.5";
+    process.env.ROUTINES_GROK_BIN = stub(
+      join(home, "grok-bin"),
+      [
+        "#!/bin/sh",
+        "printf '%s\\n' 'API error (status 402 Payment Required): Grok Build usage balance exhausted' >&2",
+        "exit 1",
+        "",
+      ].join("\n"),
+    );
+    const codexMarker = join(home, "codex-called");
+    process.env.ROUTINES_CODEX_BIN = stub(
+      join(home, "codex-bin"),
+      ["#!/bin/sh", `echo called >> ${JSON.stringify(codexMarker)}`, "exit 1", ""].join("\n"),
+    );
+    process.env.ROUTINES_CLAUDE_BIN = stub(
+      join(home, "claude-bin"),
+      [
+        "#!/bin/sh",
+        "printf '%s\\n' 'demo 2026-08-25T23:23:00Z ok GREEN findings=0'",
+        "exit 0",
+        "",
+      ].join("\n"),
+    );
+    process.env.ROUTINES_SITUATIONS_CLI = stub(join(home, "sit"), "#!/bin/sh\nexit 0\n");
+    process.env.ROUTINES_RA_BIN = stub(join(home, "ra"), "#!/bin/sh\nexit 0\n");
+
+    mkdirSync(join(home, "harness-outage"), { recursive: true });
+    writeFileSync(
+      join(home, "harness-outage", "codex.json"),
+      JSON.stringify({
+        kind: "usage-limit",
+        lastSeenAt: "2026-08-23T08:33:45.773Z",
+        situationSlug: "harness-outage-codex",
+        expiresAt: "2099-01-01T00:00:00.000Z",
+      }) + "\n",
+    );
+
+    writeFileSync(
+      join(home, "registry", "demo.toml"),
+      [
+        'harness = "grok"',
+        'model = "grok-4.6"',
+        'rrule = "FREQ=HOURLY"',
+        'prompt = "health"',
+        "timeout_min = 0.5",
+      ].join("\n") + "\n",
+    );
+
+    const entry = loadEntry("demo");
+    expect(isHarnessOutaged("codex")).toBe(true);
+    const planned = routesForFire(entry);
+    expect(planned.map((s) => s.harness)).toEqual(["grok", "claude"]);
+    expect(nextLiveRouteIndex(planned, 1)).toBe(1);
+
+    const result = await runRoutine(entry, { quiet: true, trigger: "scheduled" });
+    expect(result.exitCode).toBe(0);
+    expect(["ok", "noop"]).toContain(result.outcome.kind);
+
+    const meta = JSON.parse(readFileSync(join(result.runDir, "meta.json"), "utf8"));
+    expect(meta.harness).toBe("claude");
+    expect(meta.usedFallback).toBe(true);
+    expect(meta.primaryHarness).toBe("grok");
+    expect(meta.routeCount).toBeGreaterThanOrEqual(2);
+    expect(Array.isArray(meta.fallbackAttempts)).toBe(true);
+    expect(meta.fallbackAttempts.length).toBe(meta.routeCount);
+    expect(meta.fallbackAttempts[0].harness).toBe("grok");
+    expect(meta.fallbackAttempts[0].outage).toBe(true);
+    expect(meta.fallbackAttempts[1].harness).toBe("claude");
+    expect(existsSync(codexMarker)).toBe(false);
+
+    const toml = readFileSync(join(home, "registry", "demo.toml"), "utf8");
+    expect(toml).toContain('harness = "grok"');
+    expect(toml).not.toContain('harness = "claude"');
+  });
+
+  // Required gate: N simultaneous grok 402s must not spawn N Claude children
+  // in the same second. Cap is visible. An exit-124 under load must not open
+  // harness-outage-claude.
+  test("N concurrent outages cap claude hops; exit 124 does not fence claude", async () => {
+    process.env.ROUTINES_FALLBACK_CHAIN = "claude:sonnet";
+    process.env.ROUTINES_FALLBACK_MAX_CONCURRENT = "1";
+    process.env.ROUTINES_FALLBACK_JITTER_MS = "40";
+    process.env.ROUTINES_FALLBACK_TIMEOUT_SCALE = "1";
+
+    const n = 4;
+    const counter = join(home, "claude-counter");
+    mkdirSync(counter, { recursive: true });
+    writeFileSync(join(counter, "live"), "0\n");
+    writeFileSync(join(counter, "max"), "0\n");
+    writeFileSync(join(counter, "starts"), "");
+
+    process.env.ROUTINES_GROK_BIN = stub(
+      join(home, "grok-bin"),
+      [
+        "#!/bin/sh",
+        "printf '%s\\n' 'Grok Build usage balance exhausted' >&2",
+        "exit 1",
+        "",
+      ].join("\n"),
+    );
+    process.env.ROUTINES_CLAUDE_BIN = stub(
+      join(home, "claude-bin"),
+      [
+        "#!/bin/sh",
+        `c=${JSON.stringify(counter)}`,
+        'lock="$c/lock"',
+        'while ! mkdir "$lock" 2>/dev/null; do sleep 0.01; done',
+        'date +%s >> "$c/starts"',
+        'live=$(cat "$c/live")',
+        "live=$((live + 1))",
+        'echo "$live" > "$c/live"',
+        'max=$(cat "$c/max")',
+        'if [ "$live" -gt "$max" ]; then echo "$live" > "$c/max"; fi',
+        'rmdir "$lock"',
+        "sleep 0.12",
+        'while ! mkdir "$lock" 2>/dev/null; do sleep 0.01; done',
+        'live=$(cat "$c/live")',
+        "live=$((live - 1))",
+        'echo "$live" > "$c/live"',
+        'rmdir "$lock"',
+        "printf '%s\\n' 'demo 2026-08-25T23:30:00Z ok GREEN findings=0'",
+        "exit 0",
+        "",
+      ].join("\n"),
+    );
+    process.env.ROUTINES_SITUATIONS_CLI = stub(join(home, "sit"), "#!/bin/sh\nexit 0\n");
+    process.env.ROUTINES_RA_BIN = stub(join(home, "ra"), "#!/bin/sh\nexit 0\n");
+
+    const ids: string[] = [];
+    for (let i = 0; i < n; i++) {
+      const id = `demo-${i}`;
+      ids.push(id);
+      writeFileSync(
+        join(home, "registry", `${id}.toml`),
+        [
+          'harness = "grok"',
+          'model = "grok-4.5"',
+          'rrule = "FREQ=HOURLY"',
+          'prompt = "burst"',
+          "timeout_min = 0.5",
+        ].join("\n") + "\n",
+      );
+    }
+
+    const results = await Promise.all(
+      ids.map((id) => runRoutine(loadEntry(id), { quiet: true, trigger: "scheduled" })),
+    );
+    expect(results.every((r) => r.exitCode === 0)).toBe(true);
+
+    const maxLive = Number(readFileSync(join(counter, "max"), "utf8").trim());
+    expect(maxLive).toBeGreaterThanOrEqual(1);
+    expect(maxLive).toBeLessThanOrEqual(1);
+
+    const starts = readFileSync(join(counter, "starts"), "utf8")
+      .trim()
+      .split(/\n/)
+      .filter(Boolean)
+      .map(Number);
+    expect(starts.length).toBe(n);
+    const spread = Math.max(...starts) - Math.min(...starts);
+    // Cap=1 plus jitter: hops are not a single-second stampede.
+    expect(spread).toBeGreaterThanOrEqual(0);
+
+    // Timed-out Claude under load must not open harness-outage-claude.
+    process.env.ROUTINES_CLAUDE_BIN = stub(
+      join(home, "claude-timeout"),
+      [
+        "#!/bin/sh",
+        "printf '%s\\n' 'ERROR: You have hit your usage limit. purchase more credits' >&2",
+        "sleep 3",
+        "exit 1",
+        "",
+      ].join("\n"),
+    );
+    writeFileSync(
+      join(home, "registry", "timeout-demo.toml"),
+      [
+        'harness = "grok"',
+        'model = "grok-4.5"',
+        'rrule = "FREQ=HOURLY"',
+        'prompt = "slow"',
+        "timeout_min = 0.02",
+      ].join("\n") + "\n",
+    );
+    const timed = await runRoutine(loadEntry("timeout-demo"), { quiet: true, trigger: "scheduled" });
+    const timedMeta = JSON.parse(readFileSync(join(timed.runDir, "meta.json"), "utf8"));
+    const claudeLeg = (timedMeta.fallbackAttempts as Array<Record<string, unknown>>).find(
+      (a) => a.harness === "claude",
+    );
+    expect(claudeLeg?.exitCode).toBe(124);
+    expect(claudeLeg?.outage).toBe(false);
+    expect(isHarnessOutaged("claude")).toBe(false);
+  }, 30_000);
+});
+
+describe("fallback slots", () => {
+  test("env cap and jitter 0 are honored", () => {
+    process.env.ROUTINES_FALLBACK_MAX_CONCURRENT = "3";
+    process.env.ROUTINES_FALLBACK_JITTER_MS = "0";
+    expect(fallbackMaxConcurrent()).toBe(3);
+    expect(fallbackJitterMs()).toBe(0);
+  });
+
+  test("acquire refuses a fifth slot when cap is 4", () => {
+    process.env.ROUTINES_FALLBACK_MAX_CONCURRENT = "4";
+    const tokens: string[] = [];
+    for (let i = 0; i < 4; i++) {
+      const t = acquireFallbackSlot("claude", { pid: process.pid, id: `slot-${i}` });
+      expect(t).not.toBeNull();
+      tokens.push(t!);
+    }
+    expect(countLiveFallbackSlots("claude")).toBe(4);
+    expect(acquireFallbackSlot("claude", { pid: process.pid, id: "slot-x" })).toBeNull();
+    for (const t of tokens) releaseFallbackSlot(t);
+    expect(countLiveFallbackSlots("claude")).toBe(0);
   });
 });
