@@ -18,19 +18,22 @@
 
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 
 import { fenceFor, loadActiveSituations, type ActiveSituation } from "./situations.ts";
 import { isHarness, loadAll, type Harness, type RoutineEntry } from "./registry.ts";
 import { resolveDifficulty } from "./difficulty-matrix.ts";
-import { locksDir, runsDir } from "./paths.ts";
+import { daemonIdentityPath, daemonLogDir, locksDir, runsDir } from "./paths.ts";
 import { nextAfter } from "./rrule.ts";
 import { patchState, readState } from "./state.ts";
 import { isHarnessOutaged } from "./harness-outage.ts";
@@ -118,6 +121,7 @@ export interface DaemonEvent {
     | "situations-degraded"
     | "reconcile-orphans"
     | "coalesce-backlog"
+    | "start"
     | "stop";
   id?: string;
   detail?: string;
@@ -168,6 +172,151 @@ export function pidAlive(pid: number): boolean {
   } catch (err) {
     return (err as NodeJS.ErrnoException).code === "EPERM";
   }
+}
+
+/** How long after host-track `current` flips we still name the stop as activate. */
+export const HOST_TRACK_ACTIVATE_WINDOW_MS = 10 * 60 * 1000;
+
+export interface DaemonIdentity {
+  pid: number;
+  startedAt: string;
+  executable: string | null;
+  stopReason: string | null;
+  stoppedAt: string | null;
+}
+
+export interface ClassifyAbruptStopOptions {
+  now?: Date;
+  hostTrackCurrentPath?: string;
+  windowMs?: number;
+}
+
+function currentExecutable(): string | null {
+  const argv1 = process.argv[1];
+  if (!argv1) return null;
+  try {
+    return realpathSync(argv1);
+  } catch {
+    return argv1;
+  }
+}
+
+function defaultHostTrackCurrentPath(): string {
+  return (
+    process.env.ROUTINES_HOST_TRACK_CURRENT ||
+    join(homedir(), ".host-track", "apps", "routines", "current")
+  );
+}
+
+export function readDaemonIdentity(): DaemonIdentity | null {
+  const p = daemonIdentityPath();
+  if (!existsSync(p)) return null;
+  try {
+    const raw = JSON.parse(readFileSync(p, "utf8")) as Partial<DaemonIdentity>;
+    if (typeof raw.pid !== "number" || !Number.isFinite(raw.pid)) return null;
+    return {
+      pid: raw.pid,
+      startedAt: typeof raw.startedAt === "string" ? raw.startedAt : "",
+      executable: typeof raw.executable === "string" ? raw.executable : null,
+      stopReason: typeof raw.stopReason === "string" ? raw.stopReason : null,
+      stoppedAt: typeof raw.stoppedAt === "string" ? raw.stoppedAt : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function writeDaemonIdentity(identity: DaemonIdentity): void {
+  mkdirSync(daemonLogDir(), { recursive: true });
+  writeFileSync(daemonIdentityPath(), JSON.stringify(identity, null, 2) + "\n");
+}
+
+/** Stamp a graceful stop on this process's identity. No-op if already recorded. */
+export function recordDaemonStop(reason: string): void {
+  const prev = readDaemonIdentity();
+  if (!prev) return;
+  if (prev.pid !== process.pid) return;
+  if (prev.stopReason) return;
+  writeDaemonIdentity({
+    ...prev,
+    stopReason: reason,
+    stoppedAt: new Date().toISOString(),
+  });
+}
+
+/**
+ * Name why the previous routinesd died without a graceful stop line.
+ * host-track activate is the measured 2026-08-26 cause (symlink mtime
+ * at the restart instant, launchd program path under versions/<digest>/).
+ */
+export function classifyAbruptStop(
+  prev: DaemonIdentity,
+  opts: ClassifyAbruptStopOptions = {},
+): "host-track-activate" | "unknown" {
+  const now = opts.now ?? new Date();
+  const windowMs = opts.windowMs ?? HOST_TRACK_ACTIVATE_WINDOW_MS;
+  const currentPath = opts.hostTrackCurrentPath ?? defaultHostTrackCurrentPath();
+  try {
+    const st = lstatSync(currentPath);
+    if (now.getTime() - st.mtimeMs <= windowMs) return "host-track-activate";
+  } catch {
+    /* current link missing — fall through */
+  }
+  if (prev.executable) {
+    try {
+      const live = realpathSync(currentPath);
+      if (live !== prev.executable) return "host-track-activate";
+    } catch {
+      /* ignore */
+    }
+  }
+  return "unknown";
+}
+
+function announceDaemonBoot(
+  log: (event: DaemonEvent) => void,
+  tickMs: number,
+  concurrency: number,
+): void {
+  const now = new Date();
+  const prev = readDaemonIdentity();
+  if (
+    prev &&
+    prev.pid !== process.pid &&
+    !pidAlive(prev.pid) &&
+    !prev.stopReason
+  ) {
+    const reason = classifyAbruptStop(prev, { now });
+    log({
+      ts: now.toISOString(),
+      kind: "stop",
+      detail: `tick loop ended reason=${reason} prior_pid=${prev.pid} reconstructed=true`,
+    });
+  }
+  writeDaemonIdentity({
+    pid: process.pid,
+    startedAt: now.toISOString(),
+    executable: currentExecutable(),
+    stopReason: null,
+    stoppedAt: null,
+  });
+  log({
+    ts: now.toISOString(),
+    kind: "start",
+    detail: `pid=${process.pid} tick=${tickMs}ms concurrency=${formatConcurrency(concurrency)}`,
+  });
+}
+
+function emitReconcile(log: (event: DaemonEvent) => void): void {
+  const orphaned = reconcileOrphanedRuns();
+  if (orphaned.length === 0) return;
+  log({
+    ts: new Date().toISOString(),
+    kind: "reconcile-orphans",
+    detail: `finalized ${orphaned.length} orphaned run(s): ${orphaned
+      .map((o) => `${o.id}/${o.stamp}`)
+      .join(", ")}`,
+  });
 }
 
 // Acquire a per-routine single-flight lock. Returns false if a live run holds
@@ -292,12 +441,13 @@ function sinkFinishedAt(runDir: string): string | null {
 }
 
 /**
- * Scan runsDir for run dirs still marked `status:"running"` whose harness pid
- * is no longer alive — evidence of a prior routinesd process dying/restarting
- * mid-run without ever reaching the runner's finalize() (the only other place
- * that writes a terminal meta.json). Rewrite those to `status:"orphaned"` and
- * clear any matching dead single-flight lock so they stop looking
- * forever-running to status reads and fleet-health passes.
+ * Scan runsDir for every run dir still marked `status:"running"` (or with no
+ * finishedAt and no terminal status) whose harness pid is no longer alive —
+ * evidence of a prior routinesd process dying/restarting mid-run without ever
+ * reaching the runner's finalize() (the only other place that writes a
+ * terminal meta.json). Rewrite those to `status:"orphaned"` and clear any
+ * matching dead single-flight lock so they stop looking forever-running to
+ * status reads and fleet-health passes. Live harness pids are left alone.
  *
  * Two things beyond the meta rewrite make an orphan *visible*:
  *
@@ -328,10 +478,9 @@ export function reconcileOrphanedRuns(now: Date = new Date()): OrphanedRunInfo[]
     } catch {
       continue;
     }
-    // Newest stamp only: an older unfinished dir behind a completed one is
-    // superseded history, not a live orphan (see status.test.ts).
-    const newest = stamps.sort().at(-1);
-    for (const stamp of newest ? [newest] : []) {
+    stamps.sort();
+    const newest = stamps.at(-1);
+    for (const stamp of stamps) {
       const runDir = join(idDir, stamp);
       const metaPath = join(runDir, "meta.json");
       if (!existsSync(metaPath)) continue;
@@ -341,7 +490,7 @@ export function reconcileOrphanedRuns(now: Date = new Date()): OrphanedRunInfo[]
       } catch {
         continue;
       }
-      if (meta.status !== "running") continue;
+      if (!isOrphanCandidate(meta)) continue;
       const harnessPid = typeof meta.harnessPid === "number" ? meta.harnessPid : null;
       if (harnessPid != null && pidAlive(harnessPid)) continue; // legitimately still running
 
@@ -378,13 +527,17 @@ export function reconcileOrphanedRuns(now: Date = new Date()): OrphanedRunInfo[]
         continue; // could not finalize — do not claim it in status either
       }
 
-      const statePatched = adoptOrphanIntoState(id, {
-        runDir,
-        finishedAt,
-        startedAt: typeof meta.startedAt === "string" ? meta.startedAt : null,
-        outcome,
-        outcomeDetail,
-      });
+      // Older unfinished dirs behind a newer stamp stay off lastRun.
+      const statePatched =
+        stamp === newest
+          ? adoptOrphanIntoState(id, {
+              runDir,
+              finishedAt,
+              startedAt: typeof meta.startedAt === "string" ? meta.startedAt : null,
+              outcome,
+              outcomeDetail,
+            })
+          : false;
 
       orphaned.push({
         id,
@@ -400,6 +553,15 @@ export function reconcileOrphanedRuns(now: Date = new Date()): OrphanedRunInfo[]
     }
   }
   return orphaned;
+}
+
+/** Incomplete run: still running, or never wrote a terminal finishedAt. */
+function isOrphanCandidate(meta: Record<string, unknown>): boolean {
+  const status = typeof meta.status === "string" ? meta.status : null;
+  if (status === "orphaned" || status === "finished") return false;
+  if (status === "running") return true;
+  if (meta.finishedAt == null && meta.exitCode == null) return true;
+  return false;
 }
 
 /**
@@ -652,6 +814,7 @@ export function dispatchDue(opts: DispatchPassOptions = {}): Promise<RunResult>[
   };
 
   if (emitTick) {
+    emitReconcile(log);
     const cap = formatConcurrency(concurrency);
     log({
       ts: now.toISOString(),
@@ -742,16 +905,8 @@ export function startDaemon(opts: DaemonOptions = {}): DaemonHandle {
   const catchupMs = opts.catchupMs ?? 0;
   const log = opts.log ?? defaultLog;
 
-  const orphaned = reconcileOrphanedRuns();
-  if (orphaned.length > 0) {
-    log({
-      ts: new Date().toISOString(),
-      kind: "reconcile-orphans",
-      detail: `finalized ${orphaned.length} orphaned run(s): ${orphaned
-        .map((o) => `${o.id}/${o.stamp}`)
-        .join(", ")}`,
-    });
-  }
+  announceDaemonBoot(log, tickMs, concurrency);
+  emitReconcile(log);
 
   let stopped = false;
   let stopReason = "unknown";
@@ -841,7 +996,10 @@ export function startDaemon(opts: DaemonOptions = {}): DaemonHandle {
 
   return {
     stop: (reason = "stop()") => {
-      if (!stopped) stopReason = reason;
+      if (!stopped) {
+        stopReason = reason;
+        recordDaemonStop(reason);
+      }
       stopped = true;
     },
     done,

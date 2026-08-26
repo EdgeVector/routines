@@ -24,6 +24,7 @@ import {
   evaluateOnce,
   formatConcurrency,
   isLocked,
+  recordDaemonStop,
   releaseLock,
   startDaemon,
 } from "./daemon.ts";
@@ -745,6 +746,7 @@ async function cmdDaemon(rest: string[]): Promise<number> {
 /** One structured line per process-level exit path, matching DaemonEvent shape. */
 function logDaemonExit(detail: string): void {
   try {
+    recordDaemonStop(detail);
     process.stderr.write(
       JSON.stringify({ ts: new Date().toISOString(), kind: "stop", detail }) + "\n",
     );

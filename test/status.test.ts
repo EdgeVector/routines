@@ -523,7 +523,7 @@ test("dead lock is cleared even when an unfinished run dir is newer than the com
   expect(existsSync(lockPath)).toBe(false);
 });
 
-test("orphan reconciliation ignores older unfinished run dirs", () => {
+test("orphan reconciliation finalizes older unfinished run dirs without regressing lastRun", () => {
   writeRoutine("old-unfinished-history");
   const oldRun = join(home, "runs", "old-unfinished-history", "2026-07-16T14-00-00-000Z");
   mkdirSync(oldRun, { recursive: true });
@@ -547,6 +547,7 @@ test("orphan reconciliation ignores older unfinished run dirs", () => {
     join(completed, "meta.json"),
     JSON.stringify(
       {
+        status: "finished",
         finishedAt: "2026-07-16T15:05:00.000Z",
         exitCode: 0,
         timedOut: false,
@@ -564,7 +565,7 @@ test("orphan reconciliation ignores older unfinished run dirs", () => {
 
   expect(row?.running).toBe(false);
   expect(row?.lastOutcome).toBe("ok");
-  expect(oldMeta.status).toBe("running");
+  expect(oldMeta.status).toBe("orphaned");
 });
 
 test("status self-heals stale running meta whose harness pid is dead", () => {

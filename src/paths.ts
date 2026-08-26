@@ -36,6 +36,11 @@ export function daemonLogDir(): string {
   return join(routinesHome(), "daemon");
 }
 
+/** Last routinesd process identity (pid, exec, graceful-stop reason). */
+export function daemonIdentityPath(): string {
+  return join(daemonLogDir(), "routinesd.identity.json");
+}
+
 /**
  * Per-routine automation memory (durable cross-run notes). Lives under
  * ROUTINES_HOME so fleet harnesses can write without inventing short Codex
