@@ -6,13 +6,17 @@ import { join } from "node:path";
 import {
   buildRouteChain,
   DEFAULT_FALLBACK_TAIL,
+  DEFAULT_FALLBACK_TIMEOUT_SCALE,
+  entryForRoute,
+  fallbackTimeoutScale,
   parseFallbackChain,
   primaryRoute,
+  timeoutMinForRoute,
 } from "../src/fallback.ts";
 import { handleHarnessOutage, isHarnessOutaged } from "../src/harness-outage.ts";
 import { loadEntry, parseEntry } from "../src/registry.ts";
 import { parseRRule } from "../src/rrule.ts";
-import { runRoutine, type RunResult } from "../src/runner.ts";
+import { gateTimeoutMs, runRoutine, type RunResult } from "../src/runner.ts";
 import type { RoutineEntry } from "../src/registry.ts";
 
 const CODEX_LIMIT =
@@ -109,6 +113,70 @@ describe("parseFallbackChain / buildRouteChain", () => {
       "/x/demo.toml",
     );
     expect(e.fallback).toBe("claude:sonnet,grok:grok-4.5");
+  });
+});
+
+describe("fallback timeout scaling", () => {
+  test("primary leg keeps the registry timeout exactly", () => {
+    const entry = baseEntry({ timeoutMin: 20 });
+    const [primary] = buildRouteChain(entry);
+    expect(timeoutMinForRoute(entry, primary!)).toBe(20);
+    expect(entryForRoute(entry, primary!).timeoutMin).toBe(20);
+  });
+
+  test("a non-primary leg is scaled, and 20 becomes 30", () => {
+    // The measured case: grok primary at timeout_min = 20, claude leg ran
+    // 23m19s and was killed at 20. 1.5x clears it.
+    const entry = baseEntry({ harness: "grok", model: "grok-4.5", timeoutMin: 20 });
+    const claude = buildRouteChain(entry).find((s) => s.harness === "claude")!;
+    expect(timeoutMinForRoute(entry, claude)).toBe(30);
+    expect(entryForRoute(entry, claude).timeoutMin).toBe(30);
+    expect(DEFAULT_FALLBACK_TIMEOUT_SCALE).toBe(1.5);
+  });
+
+  test("scale 1 is an exact no-op, including a fractional budget", () => {
+    // Rounding here would make the disable path a behaviour change of its own.
+    process.env.ROUTINES_FALLBACK_TIMEOUT_SCALE = "1";
+    const entry = baseEntry({ harness: "grok", model: "grok-4.5", timeoutMin: 0.02 });
+    const claude = buildRouteChain(entry).find((s) => s.harness === "claude")!;
+    expect(timeoutMinForRoute(entry, claude)).toBe(0.02);
+  });
+
+  test("a fractional budget scales without rounding", () => {
+    const entry = baseEntry({ harness: "grok", model: "grok-4.5", timeoutMin: 25 });
+    const claude = buildRouteChain(entry).find((s) => s.harness === "claude")!;
+    expect(timeoutMinForRoute(entry, claude)).toBe(37.5);
+  });
+
+  test("ROUTINES_FALLBACK_TIMEOUT_SCALE overrides, clamped to [1, 4]", () => {
+    const entry = baseEntry({ harness: "grok", model: "grok-4.5", timeoutMin: 10 });
+    const claude = buildRouteChain(entry).find((s) => s.harness === "claude")!;
+
+    process.env.ROUTINES_FALLBACK_TIMEOUT_SCALE = "2";
+    expect(timeoutMinForRoute(entry, claude)).toBe(20);
+
+    // Below 1 would SHRINK a fallback budget — the bug, inverted.
+    process.env.ROUTINES_FALLBACK_TIMEOUT_SCALE = "0.5";
+    expect(fallbackTimeoutScale()).toBe(1);
+    expect(timeoutMinForRoute(entry, claude)).toBe(10);
+
+    process.env.ROUTINES_FALLBACK_TIMEOUT_SCALE = "99";
+    expect(fallbackTimeoutScale()).toBe(4);
+
+    // A typo must not kill the daemon; it falls back to the default.
+    process.env.ROUTINES_FALLBACK_TIMEOUT_SCALE = "banana";
+    expect(fallbackTimeoutScale()).toBe(DEFAULT_FALLBACK_TIMEOUT_SCALE);
+  });
+
+  test("the zero-LLM gate keeps the primary budget on a scaled leg", () => {
+    const entry = baseEntry({ harness: "grok", model: "grok-4.5", timeoutMin: 5 });
+    const claude = buildRouteChain(entry).find((s) => s.harness === "claude")!;
+    const legEntry = entryForRoute(entry, claude);
+
+    expect(legEntry.timeoutMin).toBe(7.5); // the harness leg
+    expect(legEntry.primaryTimeoutMin).toBe(5);
+    // The gate is harness-independent, so it must not inherit the scale.
+    expect(gateTimeoutMs(legEntry)).toBe(5 * 60_000);
   });
 });
 
@@ -366,6 +434,100 @@ describe("runRoutine same-run fallback", () => {
     const hb = readFileSync(process.env.ROUTINES_HEARTBEATS_FILE!, "utf8");
     expect(hb).toMatch(/reason=harness-auth-expired/);
   });
+
+  // Regression: last-stack-north-star-rollup, 2026-08-25 harness-outage-grok.
+  // The chain worked — grok 402 detected, claude dispatched — and the routine
+  // still failed, because the claude leg inherited grok's 20-minute budget and
+  // was killed at exit 124 after 23m19s.
+  //
+  // Scaled down to seconds: primary budget 1.2s, scale 4 ⇒ 4.8s on the leg,
+  // and a claude stub that needs ~2.5s. It fits the scaled budget and does not
+  // fit the primary one.
+  test("a slow fallback leg completes on its scaled budget, not the primary's", async () => {
+    process.env.ROUTINES_FALLBACK_TIMEOUT_SCALE = "4";
+    process.env.ROUTINES_GROK_BIN = stub(
+      join(home, "grok-bin"),
+      ["#!/bin/sh", "printf '%s\\n' 'Grok Build usage balance exhausted' >&2", "exit 1", ""].join("\n"),
+    );
+    process.env.ROUTINES_CLAUDE_BIN = stub(
+      join(home, "claude-bin"),
+      [
+        "#!/bin/sh",
+        "sleep 2.5",
+        "printf '%s\\n' 'demo 2026-08-25T23:45:00Z ok rollup complete'",
+        "exit 0",
+        "",
+      ].join("\n"),
+    );
+    process.env.ROUTINES_SITUATIONS_CLI = stub(join(home, "sit"), "#!/bin/sh\nexit 0\n");
+    process.env.ROUTINES_RA_BIN = stub(join(home, "ra"), "#!/bin/sh\nexit 0\n");
+
+    writeFileSync(
+      join(home, "registry", "demo.toml"),
+      [
+        'harness = "grok"',
+        'model = "grok-4.5"',
+        'rrule = "FREQ=HOURLY"',
+        'prompt = "rollup"',
+        'fallback = "claude:sonnet"',
+        "timeout_min = 0.02",
+      ].join("\n") + "\n",
+    );
+
+    const result = await runRoutine(loadEntry("demo"), { quiet: true, trigger: "scheduled" });
+
+    expect(result.exitCode).not.toBe(124);
+    expect(result.exitCode).toBe(0);
+
+    const meta = JSON.parse(readFileSync(join(result.runDir, "meta.json"), "utf8"));
+    expect(meta.harness).toBe("claude");
+    expect(meta.usedFallback).toBe(true);
+
+    const legs = meta.fallbackAttempts as Array<Record<string, unknown>>;
+    const grokLeg = legs.find((a) => a.harness === "grok")!;
+    const claudeLeg = legs.find((a) => a.harness === "claude")!;
+
+    // The primary keeps its own budget; only the fallback leg is scaled.
+    expect(grokLeg.timeoutMin).toBe(0.02);
+    expect(claudeLeg.timeoutMin).toBe(0.08);
+    expect(claudeLeg.exitCode).toBe(0);
+  }, 30_000);
+
+  // The mutant that proves the scale is load-bearing: same stubs, scale 1
+  // (the old behaviour), and the leg dies exactly the way the card reported.
+  test("without the scale, the same fallback leg dies at 124", async () => {
+    process.env.ROUTINES_FALLBACK_TIMEOUT_SCALE = "1";
+    process.env.ROUTINES_GROK_BIN = stub(
+      join(home, "grok-bin"),
+      ["#!/bin/sh", "printf '%s\\n' 'Grok Build usage balance exhausted' >&2", "exit 1", ""].join("\n"),
+    );
+    process.env.ROUTINES_CLAUDE_BIN = stub(
+      join(home, "claude-bin"),
+      ["#!/bin/sh", "sleep 2.5", "printf '%s\\n' 'demo ok'", "exit 0", ""].join("\n"),
+    );
+    process.env.ROUTINES_SITUATIONS_CLI = stub(join(home, "sit"), "#!/bin/sh\nexit 0\n");
+    process.env.ROUTINES_RA_BIN = stub(join(home, "ra"), "#!/bin/sh\nexit 0\n");
+
+    writeFileSync(
+      join(home, "registry", "demo.toml"),
+      [
+        'harness = "grok"',
+        'model = "grok-4.5"',
+        'rrule = "FREQ=HOURLY"',
+        'prompt = "rollup"',
+        'fallback = "claude:sonnet"',
+        "timeout_min = 0.02",
+      ].join("\n") + "\n",
+    );
+
+    const result = await runRoutine(loadEntry("demo"), { quiet: true, trigger: "scheduled" });
+
+    const meta = JSON.parse(readFileSync(join(result.runDir, "meta.json"), "utf8"));
+    const legs = meta.fallbackAttempts as Array<Record<string, unknown>>;
+    const claudeLeg = legs.find((a) => a.harness === "claude")!;
+    expect(claudeLeg.timeoutMin).toBe(0.02);
+    expect(claudeLeg.exitCode).toBe(124);
+  }, 30_000);
 
   test("non-outage failure does not walk the chain", async () => {
     process.env.ROUTINES_CODEX_BIN = stub(

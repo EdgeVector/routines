@@ -95,13 +95,70 @@ export function buildRouteChain(entry: RoutineEntry): RouteStep[] {
   return out;
 }
 
+/**
+ * How much longer a fallback leg may take than the primary it replaces.
+ *
+ * `timeout_min` in the registry is tuned against the routine's PRIMARY harness.
+ * A fallback leg runs a different agent at a different pace, so reusing that
+ * number verbatim can kill a fallback that the outage path just correctly
+ * dispatched — the chain works and the routine still fails.
+ *
+ * Measured 2026-08-25 during the `harness-outage-grok` burst:
+ * `last-stack-north-star-rollup` (grok primary, `timeout_min = 20`) detected
+ * the grok 402, fell back to Claude Sonnet, and that leg ran 23m19s before
+ * exiting 124. 1.5x turns that 20 into 30 and the leg finishes. Sibling
+ * routines survived the same burst only because their fallback happened to
+ * land inside the fixed budget — timeout-budget luck, not a property of the
+ * fallback path.
+ */
+export const DEFAULT_FALLBACK_TIMEOUT_SCALE = 1.5;
+
+/** Bounds for an operator-supplied scale. Below 1 would SHRINK the budget. */
+const MIN_FALLBACK_TIMEOUT_SCALE = 1;
+const MAX_FALLBACK_TIMEOUT_SCALE = 4;
+
+/**
+ * Scale applied to a non-primary leg. `ROUTINES_FALLBACK_TIMEOUT_SCALE`
+ * overrides the default, clamped to [1, 4].
+ *
+ * A junk value falls back to the default rather than throwing — same rule as
+ * `parseFallbackChain`: a registry/env typo must not kill the daemon.
+ */
+export function fallbackTimeoutScale(): number {
+  const raw = process.env.ROUTINES_FALLBACK_TIMEOUT_SCALE;
+  if (!raw || !raw.trim()) return DEFAULT_FALLBACK_TIMEOUT_SCALE;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return DEFAULT_FALLBACK_TIMEOUT_SCALE;
+  return Math.min(MAX_FALLBACK_TIMEOUT_SCALE, Math.max(MIN_FALLBACK_TIMEOUT_SCALE, n));
+}
+
+/**
+ * Wall-clock budget for one route step, in minutes.
+ *
+ * The primary keeps the registry value exactly. Only a different harness earns
+ * the scale, so a routine that never falls back behaves as it always did.
+ *
+ * The result is deliberately NOT rounded to whole minutes: `timeout_min` is
+ * already fractional-capable in the registry, and rounding up would make
+ * scale 1 a behaviour change instead of the no-op it must be.
+ */
+export function timeoutMinForRoute(entry: RoutineEntry, step: RouteStep): number {
+  if (step.harness === entry.harness) return entry.timeoutMin;
+  if (!Number.isFinite(entry.timeoutMin) || entry.timeoutMin <= 0) return entry.timeoutMin;
+  return entry.timeoutMin * fallbackTimeoutScale();
+}
+
 /** Apply a route step onto a clone of the registry entry (TOML untouched). */
 export function entryForRoute(entry: RoutineEntry, step: RouteStep): RoutineEntry {
   const next: RoutineEntry = {
     ...entry,
     harness: step.harness,
     model: step.model,
+    timeoutMin: timeoutMinForRoute(entry, step),
   };
+  // The pre-dispatch gate is zero-LLM and harness-independent, so it must keep
+  // the primary budget even when the harness leg gets a longer one.
+  next.primaryTimeoutMin = entry.timeoutMin;
   if (step.effort) next.effort = step.effort;
   else if (step.harness !== entry.harness) delete next.effort;
   return next;

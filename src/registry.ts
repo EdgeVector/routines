@@ -56,6 +56,13 @@ export interface RoutineEntry {
   cwd: string;
   status: Status;
   timeoutMin: number;
+  /**
+   * The PRIMARY harness's `timeout_min`, preserved when a fallback leg scales
+   * `timeoutMin` for a slower harness. Set only on the ephemeral per-route
+   * clone (see `entryForRoute`); never parsed from TOML. Readers that must not
+   * inherit the scaled budget — the zero-LLM gate — use this instead.
+   */
+  primaryTimeoutMin?: number;
   /** Priority for a newly filed routine-error card. Defaults to P3. */
   errorPriority?: ErrorPriority;
   heartbeatSlug?: string;
