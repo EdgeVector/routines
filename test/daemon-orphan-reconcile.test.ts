@@ -1,9 +1,17 @@
 import { beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { reconcileOrphanedRuns, startDaemon, type DaemonEvent } from "../src/daemon.ts";
+import {
+  classifyAbruptStop,
+  readDaemonIdentity,
+  reconcileOrphanedRuns,
+  startDaemon,
+  writeDaemonIdentity,
+  type DaemonEvent,
+} from "../src/daemon.ts";
 import { readState, writeState } from "../src/state.ts";
 
 const saved = { ...process.env };
@@ -262,5 +270,208 @@ describe("daemon tick-loop stop is on the record", () => {
     await handle.done;
 
     expect(events.find((e) => e.kind === "stop")?.detail).toContain("reason=stop()");
+  });
+});
+
+describe("daemon boot start/stop identity", () => {
+  test("logs kind=start with pid on boot and records identity", async () => {
+    const events: DaemonEvent[] = [];
+    const handle = startDaemon({ tickMs: 50, log: (e) => events.push(e) });
+    handle.stop("signal:SIGTERM");
+    await handle.done;
+
+    const start = events.find((e) => e.kind === "start");
+    expect(start).toBeDefined();
+    expect(start?.detail).toContain(`pid=${process.pid}`);
+    const identity = readDaemonIdentity();
+    expect(identity?.pid).toBe(process.pid);
+    expect(identity?.stopReason).toBe("signal:SIGTERM");
+  });
+
+  test("reconstructs host-track-activate stop when prior pid died with no reason", async () => {
+    const current = join(home, "host-track-current");
+    writeFileSync(current, "link\n");
+    const now = new Date();
+    utimesSync(current, now, now);
+    process.env.ROUTINES_HOST_TRACK_CURRENT = current;
+    writeDaemonIdentity({
+      pid: 999_999_999,
+      startedAt: "2026-08-26T20:00:00.000Z",
+      executable: "/old/digest/dist/routines",
+      stopReason: null,
+      stoppedAt: null,
+    });
+
+    const events: DaemonEvent[] = [];
+    const handle = startDaemon({ tickMs: 50, log: (e) => events.push(e) });
+    handle.stop("signal:SIGTERM");
+    await handle.done;
+
+    const reconstructed = events.find(
+      (e) => e.kind === "stop" && e.detail?.includes("reconstructed=true"),
+    );
+    expect(reconstructed?.detail).toContain("reason=host-track-activate");
+    expect(reconstructed?.detail).toContain("prior_pid=999999999");
+    expect(events.find((e) => e.kind === "start")?.detail).toContain(`pid=${process.pid}`);
+  });
+
+  test("reconstructs unknown stop when host-track current is stale", async () => {
+    const current = join(home, "host-track-stale");
+    writeFileSync(current, "link\n");
+    const old = new Date("2026-08-01T00:00:00.000Z");
+    utimesSync(current, old, old);
+    process.env.ROUTINES_HOST_TRACK_CURRENT = current;
+    writeDaemonIdentity({
+      pid: 888_888_888,
+      startedAt: "2026-08-26T19:00:00.000Z",
+      executable: current,
+      stopReason: null,
+      stoppedAt: null,
+    });
+
+    const events: DaemonEvent[] = [];
+    const handle = startDaemon({ tickMs: 50, log: (e) => events.push(e) });
+    handle.stop();
+    await handle.done;
+
+    const reconstructed = events.find(
+      (e) => e.kind === "stop" && e.detail?.includes("reconstructed=true"),
+    );
+    expect(reconstructed?.detail).toContain("reason=unknown");
+  });
+
+  test("does not reconstruct a stop the previous process already logged", async () => {
+    writeDaemonIdentity({
+      pid: 777_777_777,
+      startedAt: "2026-08-26T20:00:00.000Z",
+      executable: null,
+      stopReason: "signal:SIGTERM",
+      stoppedAt: "2026-08-26T20:28:47.000Z",
+    });
+
+    const events: DaemonEvent[] = [];
+    const handle = startDaemon({ tickMs: 50, log: (e) => events.push(e) });
+    handle.stop();
+    await handle.done;
+
+    expect(events.filter((e) => e.detail?.includes("reconstructed=true"))).toHaveLength(0);
+  });
+
+  test("classifyAbruptStop names host-track-activate from current mtime", () => {
+    const current = join(home, "ht-mtime");
+    writeFileSync(current, "x\n");
+    const now = new Date("2026-08-26T20:32:43.000Z");
+    utimesSync(current, now, now);
+    expect(
+      classifyAbruptStop(
+        {
+          pid: 1,
+          startedAt: "2026-08-26T20:00:00.000Z",
+          executable: "/old",
+          stopReason: null,
+          stoppedAt: null,
+        },
+        { now, hostTrackCurrentPath: current },
+      ),
+    ).toBe("host-track-activate");
+  });
+
+  test("classifyAbruptStop treats a realpath-equal executable as unknown", () => {
+    const current = join(home, "ht-same");
+    writeFileSync(current, "x\n");
+    const old = new Date("2026-08-01T00:00:00.000Z");
+    utimesSync(current, old, old);
+    const now = new Date("2026-08-26T22:00:00.000Z");
+    expect(
+      classifyAbruptStop(
+        {
+          pid: 1,
+          startedAt: "2026-08-26T19:00:00.000Z",
+          executable: current,
+          stopReason: null,
+          stoppedAt: null,
+        },
+        { now, hostTrackCurrentPath: current },
+      ),
+    ).toBe("unknown");
+  });
+});
+
+describe("reconcile scans every unfinished run dir", () => {
+  test("finalizes an older running dir behind a newer finished stamp", () => {
+    const oldDir = join(home, "runs", "hist", "2026-08-26T20-00-00-000Z");
+    const newDir = join(home, "runs", "hist", "2026-08-26T20-10-00-000Z");
+    writeMeta(oldDir, {
+      id: "hist",
+      status: "running",
+      harnessPid: 999_999_999,
+      startedAt: "2026-08-26T20:00:00.000Z",
+      exitCode: null,
+      finishedAt: null,
+    });
+    writeMeta(newDir, {
+      id: "hist",
+      status: "finished",
+      exitCode: 0,
+      finishedAt: "2026-08-26T20:12:00.000Z",
+    });
+    writeState({
+      id: "hist",
+      lastRun: "2026-08-26T20:12:00.000Z",
+      lastRunDir: newDir,
+      lastExit: 0,
+      lastOutcome: "ok",
+    });
+
+    const orphaned = reconcileOrphanedRuns(new Date("2026-08-26T20:32:00.000Z"));
+    expect(orphaned).toHaveLength(1);
+    expect(orphaned[0]?.statePatched).toBe(false);
+    expect(JSON.parse(readFileSync(join(oldDir, "meta.json"), "utf8")).status).toBe("orphaned");
+    expect(readState("hist").lastRunDir).toBe(newDir);
+  });
+
+  test("treats missing finishedAt with no terminal status as a candidate", () => {
+    const runDir = join(home, "runs", "partial", "2026-08-26T20-15-00-000Z");
+    writeMeta(runDir, {
+      id: "partial",
+      harnessPid: 999_999_999,
+      startedAt: "2026-08-26T20:15:00.000Z",
+    });
+
+    const orphaned = reconcileOrphanedRuns(new Date("2026-08-26T20:32:00.000Z"));
+    expect(orphaned).toHaveLength(1);
+    expect(JSON.parse(readFileSync(join(runDir, "meta.json"), "utf8")).status).toBe("orphaned");
+  });
+});
+
+describe("tick loop reconciles a harness that dies after boot", () => {
+  test("does not orphan a live harness, then orphans it once the pid is gone", async () => {
+    const child = spawn("sleep", ["30"], { stdio: "ignore" });
+    const childPid = child.pid;
+    expect(childPid).toBeGreaterThan(0);
+    const runDir = join(home, "runs", "later-dead", "2026-08-26T20-20-00-000Z");
+    writeMeta(runDir, {
+      id: "later-dead",
+      status: "running",
+      harnessPid: childPid,
+      startedAt: "2026-08-26T20:20:00.000Z",
+      exitCode: null,
+      finishedAt: null,
+    });
+
+    const events: DaemonEvent[] = [];
+    const handle = startDaemon({ tickMs: 40, log: (e) => events.push(e) });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(JSON.parse(readFileSync(join(runDir, "meta.json"), "utf8")).status).toBe("running");
+
+    child.kill("SIGKILL");
+    await new Promise((r) => setTimeout(r, 120));
+    handle.stop("signal:SIGTERM");
+    await handle.done;
+
+    expect(JSON.parse(readFileSync(join(runDir, "meta.json"), "utf8")).status).toBe("orphaned");
+    expect(events.some((e) => e.kind === "reconcile-orphans" && e.detail?.includes("later-dead"))).toBe(
+      true,
+    );
   });
 });
