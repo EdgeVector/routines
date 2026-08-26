@@ -259,7 +259,7 @@ export function planIdleLadder(
   return { action: "exhausted", nextState, reason: "all rungs cooling down" };
 }
 
-export function capacityPolicyPath(): string {
+function capacityPolicyPath(): string {
   return process.env.ROUTINES_CAPACITY_POLICY ?? join(routinesHome(), "capacity-controller.json");
 }
 
