@@ -499,6 +499,7 @@ async function cmdDeliverStatus(rest: string[]): Promise<number> {
       json: { type: "boolean" },
       "dry-run": { type: "boolean" },
       approve: { type: "boolean" },
+      "bounded-view": { type: "boolean" },
       runs: { type: "string" },
       "tail-bytes": { type: "string" },
       "max-records": { type: "string" },
@@ -541,6 +542,7 @@ async function cmdDeliverStatus(rest: string[]): Promise<number> {
     runLimit,
     logTailBytes,
     maxRecords,
+    boundedView: values["bounded-view"] === true,
   });
   if (values.json) {
     console.log(JSON.stringify(result, null, 2));
