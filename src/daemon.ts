@@ -178,7 +178,7 @@ export function pidAlive(pid: number): boolean {
 export const HOST_TRACK_ACTIVATE_WINDOW_MS = 10 * 60 * 1000;
 
 /** Who wrote `stopReason` onto this identity. */
-export type DaemonStopSource = "self" | "reconstructed";
+export type DaemonStopSource = "self" | "reconstructed" | "inherited";
 
 export interface DaemonIdentity {
   pid: number;
@@ -189,6 +189,7 @@ export interface DaemonIdentity {
   /**
    * `self` — this pid logged its own graceful stop.
    * `reconstructed` — the successor boot named a prior abrupt death.
+   * `inherited` — this pid preserved the prior graceful stop on boot.
    * Missing with a stopReason is a legacy self-stop (parent CR).
    */
   stopSource?: DaemonStopSource | null;
@@ -224,7 +225,9 @@ export function readDaemonIdentity(): DaemonIdentity | null {
     const raw = JSON.parse(readFileSync(p, "utf8")) as Partial<DaemonIdentity>;
     if (typeof raw.pid !== "number" || !Number.isFinite(raw.pid)) return null;
     const stopSource =
-      raw.stopSource === "self" || raw.stopSource === "reconstructed"
+      raw.stopSource === "self" ||
+      raw.stopSource === "reconstructed" ||
+      raw.stopSource === "inherited"
         ? raw.stopSource
         : null;
     return {
@@ -262,7 +265,7 @@ export function recordDaemonStop(reason: string): void {
 /** True when the successor boot must emit a reconstructed kind=stop. */
 export function priorStopNeedsReconstruct(prev: DaemonIdentity): boolean {
   if (prev.stopSource === "self") return false;
-  if (prev.stopSource === "reconstructed") return true;
+  if (prev.stopSource === "reconstructed" || prev.stopSource === "inherited") return true;
   return !prev.stopReason;
 }
 
@@ -312,6 +315,7 @@ function announceDaemonBoot(
   // alive. Do not wait for pid death — that skip is why live 23:33Z had
   // kind=start and stopReason=null. Do not kill the prior pid or its locks.
   let reconstructed: { reason: string; priorPid: number } | null = null;
+  let inherited: { reason: string; stoppedAt: string } | null = null;
   if (prev && prev.pid !== process.pid && priorStopNeedsReconstruct(prev)) {
     const reason = classifyAbruptStop(prev, { now });
     reconstructed = { reason, priorPid: prev.pid };
@@ -320,14 +324,19 @@ function announceDaemonBoot(
       kind: "stop",
       detail: `tick loop ended reason=${reason} prior_pid=${prev.pid} reconstructed=true`,
     });
+  } else if (prev && prev.pid !== process.pid && prev.stopReason) {
+    inherited = {
+      reason: prev.stopReason,
+      stoppedAt: prev.stoppedAt ?? now.toISOString(),
+    };
   }
   writeDaemonIdentity({
     pid: process.pid,
     startedAt: now.toISOString(),
     executable: currentExecutable(),
-    stopReason: reconstructed ? reconstructed.reason : null,
-    stoppedAt: reconstructed ? now.toISOString() : null,
-    stopSource: reconstructed ? "reconstructed" : null,
+    stopReason: reconstructed?.reason ?? inherited?.reason ?? null,
+    stoppedAt: reconstructed ? now.toISOString() : inherited?.stoppedAt ?? null,
+    stopSource: reconstructed ? "reconstructed" : inherited ? "inherited" : null,
   });
   log({
     ts: now.toISOString(),
@@ -939,6 +948,7 @@ export function startDaemon(opts: DaemonOptions = {}): DaemonHandle {
 
   let stopped = false;
   let stopReason = "unknown";
+  let wakeTick: (() => void) | null = null;
   let resolveDone!: () => void;
   const done = new Promise<void>((r) => (resolveDone = r));
 
@@ -1000,7 +1010,16 @@ export function startDaemon(opts: DaemonOptions = {}): DaemonHandle {
         });
       }
       if (stopped) break;
-      await sleep(tickMs);
+      await new Promise<void>((resolve) => {
+        let timer: ReturnType<typeof setTimeout>;
+        const wake = () => {
+          clearTimeout(timer);
+          if (wakeTick === wake) wakeTick = null;
+          resolve();
+        };
+        timer = setTimeout(wake, tickMs);
+        wakeTick = wake;
+      });
     }
     // The tick loop is the daemon's whole reason to exist. A gap in dispatches
     // is only diagnosable after the fact when its end is on the record, so
@@ -1030,18 +1049,10 @@ export function startDaemon(opts: DaemonOptions = {}): DaemonHandle {
         recordDaemonStop(reason);
       }
       stopped = true;
+      wakeTick?.();
     },
     done,
   };
-}
-
-function sleep(ms: number): Promise<void> {
-  // Keep the timer *ref'd* so the event loop stays alive between ticks.
-  // unref() made routinesd exit immediately after the first evaluateOnce
-  // (launchd KeepAlive then thrash-restarted it with exit 0).
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
 }
 
 /** Schedule fn on the next microtask without using the `void` operator (bun parse). */

@@ -264,6 +264,16 @@ describe("daemon tick-loop stop is on the record", () => {
     expect(stop?.detail).toContain("signal:SIGTERM");
   });
 
+  test("SIGTERM wakes a long tick wait immediately", async () => {
+    const handle = startDaemon({ tickMs: 60_000, log: () => {} });
+    handle.stop("signal:SIGTERM");
+    const result = await Promise.race([
+      handle.done.then(() => "stopped"),
+      new Promise<string>((resolve) => setTimeout(() => resolve("timed-out"), 250)),
+    ]);
+    expect(result).toBe("stopped");
+  });
+
   test("defaults the reason when stop() is called bare", async () => {
     const events: DaemonEvent[] = [];
     const handle = startDaemon({ tickMs: 50, log: (e) => events.push(e) });
@@ -358,10 +368,14 @@ describe("daemon boot start/stop identity", () => {
 
     const events: DaemonEvent[] = [];
     const handle = startDaemon({ tickMs: 50, log: (e) => events.push(e) });
+    const afterBoot = readDaemonIdentity();
     handle.stop();
     await handle.done;
 
     expect(events.filter((e) => e.detail?.includes("reconstructed=true"))).toHaveLength(0);
+    expect(afterBoot?.stopReason).toBe("signal:SIGTERM");
+    expect(afterBoot?.stoppedAt).toBe("2026-08-26T20:28:47.000Z");
+    expect(afterBoot?.stopSource).toBe("inherited");
   });
 
   test("reconstructs even when the prior pid is still alive (host-track overlap)", async () => {
@@ -454,6 +468,16 @@ describe("daemon boot start/stop identity", () => {
         stopReason: "host-track-activate",
         stoppedAt: "2026-08-26T23:33:15.917Z",
         stopSource: "reconstructed",
+      }),
+    ).toBe(true);
+    expect(
+      priorStopNeedsReconstruct({
+        pid: 1,
+        startedAt: "2026-08-26T20:00:00.000Z",
+        executable: null,
+        stopReason: "signal:SIGTERM",
+        stoppedAt: "2026-08-26T20:28:47.000Z",
+        stopSource: "inherited",
       }),
     ).toBe(true);
   });
@@ -566,7 +590,13 @@ describe("tick loop reconciles a harness that dies after boot", () => {
     expect(JSON.parse(readFileSync(join(runDir, "meta.json"), "utf8")).status).toBe("running");
 
     child.kill("SIGKILL");
-    await new Promise((r) => setTimeout(r, 120));
+    const deadline = Date.now() + 2_000;
+    while (
+      JSON.parse(readFileSync(join(runDir, "meta.json"), "utf8")).status === "running" &&
+      Date.now() < deadline
+    ) {
+      await new Promise((r) => setTimeout(r, 25));
+    }
     handle.stop("signal:SIGTERM");
     await handle.done;
 
