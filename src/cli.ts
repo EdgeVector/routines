@@ -22,8 +22,9 @@ import { migrateKanbanIds } from "./kanban-id-migration.ts";
 import {
   acquireLock,
   evaluateOnce,
-  formatConcurrency,
+  formatStagger,
   isLocked,
+  normalizeStaggerMs,
   recordDaemonStop,
   releaseLock,
   startDaemon,
@@ -78,7 +79,8 @@ Commands:
                               registry/state/memory migration (--write to apply)
   web                         serve the local dashboard (localhost); --port, --host
   doctor                      validate the registry + environment (+ configurations)
-  daemon                      run the scheduler loop (launchd entrypoint); --once, --catchup <s>
+  daemon                      run the scheduler loop (launchd entrypoint); --once, --catchup <s>,
+                              --stagger-ms <n> (min gap between kickoffs, default 60000)
   capacity-controller         run one quota + idle-ladder controller tick; --dry-run, --json
   install-daemon              install + load the launchd user agent
   uninstall-daemon            unload + remove the launchd user agent
@@ -741,25 +743,27 @@ async function cmdDaemon(rest: string[]): Promise<number> {
       once: { type: "boolean" },
       catchup: { type: "string" },
       "tick-ms": { type: "string" },
-      concurrency: { type: "string" },
+      "stagger-ms": { type: "string" },
     },
     allowPositionals: true,
   });
   const catchupMs = values.catchup ? Number(values.catchup) * 1000 : 0;
-  // Default 0 = unlimited free-slot pool. Positive N is an optional hard cap.
-  // Explicit --concurrency 0 also means unlimited (not "run nothing").
-  const concurrency = values.concurrency !== undefined ? Number(values.concurrency) : 0;
+  // Minimum gap between kickoffs. Unset → ROUTINES_STAGGER_MS → 60s.
+  // Explicit 0 disables it and lets every due routine start at once.
+  const staggerMs = normalizeStaggerMs(
+    values["stagger-ms"] !== undefined ? Number(values["stagger-ms"]) : undefined,
+  );
   await initRoutinesSentry({ service: "routinesd" });
-  const capLabel = formatConcurrency(concurrency);
+  const staggerLabel = formatStagger(staggerMs);
 
   if (values.once) {
-    const results = await evaluateOnce({ once: true, catchupMs, concurrency });
-    console.error(`daemon --once: dispatched ${results.length} run(s) concurrency=${capLabel}`);
+    const results = await evaluateOnce({ once: true, catchupMs, staggerMs });
+    console.error(`daemon --once: dispatched ${results.length} run(s) stagger=${staggerLabel}`);
     return 0;
   }
 
   const tickMs = values["tick-ms"] ? Number(values["tick-ms"]) : 15_000;
-  const handle = startDaemon({ tickMs, concurrency, catchupMs });
+  const handle = startDaemon({ tickMs, staggerMs, catchupMs });
   process.on("SIGTERM", () => handle.stop("signal:SIGTERM"));
   process.on("SIGINT", () => handle.stop("signal:SIGINT"));
   // A tick gap with no logged reason costs hours of ps/pmset/crash-report
@@ -773,7 +777,7 @@ async function cmdDaemon(rest: string[]): Promise<number> {
   });
   process.on("exit", (code) => logDaemonExit(`process exit code=${code}`));
   console.error(
-    `routinesd started (tick=${tickMs}ms concurrency=${capLabel} free-slot-pool=on home=${routinesHome()} pid=${process.pid})`,
+    `routinesd started (tick=${tickMs}ms stagger=${staggerLabel} free-slot-pool=on home=${routinesHome()} pid=${process.pid})`,
   );
   await handle.done;
   return 0;

@@ -2,14 +2,18 @@
 //
 // Free-slot pool (not batch-wait):
 //   Each tick (and every time a run completes) the daemon loads the registry,
-//   finds due routines, and starts as many as capacity allows. Completing a
-//   run frees its slot immediately and the next due routine is admitted —
-//   the scheduler never blocks on Promise.all of a whole batch.
+//   finds due routines, and starts them. Completing a run frees its slot
+//   immediately and the next due routine is admitted — the scheduler never
+//   blocks on Promise.all of a whole batch.
 //
 // Dispatch constraints:
 //   - per-routine single-flight (lock file; a routine never overlaps itself)
-//   - optional global concurrency (0 / unset = unlimited — registry schedules
-//     define what runs; no silent skip-cap starvation by default)
+//   - a global minimum GAP between kickoffs (default 60s). There is no
+//     concurrency cap: a cap SKIPS a due routine, and a skipped run is work
+//     that silently never happened. A stagger delays instead, so every due
+//     routine still runs — just not all in the same instant. This is what
+//     stops a post-outage recovery tick from starting dozens of agent
+//     harnesses at once.
 //   - per-run timeout_min (runner kills that process only)
 //   - dispatch-time Situation fence
 //
@@ -91,10 +95,11 @@ export interface DaemonOptions {
   /** ms between ticks in loop mode (default 15s). */
   tickMs?: number;
   /**
-   * Max concurrently-running routines.
-   * `0` or unset = unlimited (default). Positive N = hard cap (optional).
+   * Minimum ms between any two routine kickoffs (default 60s, or
+   * ROUTINES_STAGGER_MS). `0` disables staggering and lets every due routine
+   * start in the same instant — the pre-2026-08-27 stampede behaviour.
    */
-  concurrency?: number;
+  staggerMs?: number;
   /** Consider a never-fired routine due if it has an occurrence within this
    * window (ms) before now. 0 = cron semantics (warm up, no catch-up). The e2e
    * passes a positive value so a fresh routine fires in a single --once pass. */
@@ -113,7 +118,7 @@ export interface DaemonEvent {
     | "complete"
     | "skip-fence"
     | "skip-single-flight"
-    | "skip-cap"
+    | "defer-stagger"
     | "skip-capacity-policy"
     | "capacity"
     | "warmup"
@@ -131,19 +136,27 @@ function defaultLog(event: DaemonEvent): void {
   process.stderr.write(JSON.stringify(event) + "\n");
 }
 
+/** Default minimum gap between two routine kickoffs. */
+export const DEFAULT_STAGGER_MS = 60_000;
+
 /**
- * Normalize concurrency: `0` / negative / non-finite / undefined → unlimited (0).
- * Positive integers are a hard cap.
+ * Resolve the kickoff stagger: explicit option, else ROUTINES_STAGGER_MS, else
+ * DEFAULT_STAGGER_MS. Negative / non-finite → the default. An explicit `0`
+ * disables staggering (every due routine starts at once).
  */
-export function normalizeConcurrency(raw: number | undefined | null): number {
-  if (raw == null || !Number.isFinite(raw) || raw <= 0) return 0;
+export function normalizeStaggerMs(raw: number | undefined | null): number {
+  if (raw == null) {
+    const env = Number(process.env.ROUTINES_STAGGER_MS);
+    if (Number.isFinite(env) && env >= 0) return Math.floor(env);
+    return DEFAULT_STAGGER_MS;
+  }
+  if (!Number.isFinite(raw) || raw < 0) return DEFAULT_STAGGER_MS;
   return Math.floor(raw);
 }
 
-/** Human-readable concurrency for logs (`unlimited` or a number). */
-export function formatConcurrency(n: number): string {
-  const c = normalizeConcurrency(n);
-  return c <= 0 ? "unlimited" : String(c);
+/** Human-readable stagger for logs (`off` or `<n>ms`). */
+export function formatStagger(ms: number): string {
+  return ms <= 0 ? "off" : `${ms}ms`;
 }
 
 function lockPath(id: string): string {
@@ -307,7 +320,7 @@ export function classifyAbruptStop(
 function announceDaemonBoot(
   log: (event: DaemonEvent) => void,
   tickMs: number,
-  concurrency: number,
+  staggerMs: number,
 ): void {
   const now = new Date();
   const prev = readDaemonIdentity();
@@ -341,7 +354,7 @@ function announceDaemonBoot(
   log({
     ts: now.toISOString(),
     kind: "start",
-    detail: `pid=${process.pid} tick=${tickMs}ms concurrency=${formatConcurrency(concurrency)}`,
+    detail: `pid=${process.pid} tick=${tickMs}ms stagger=${formatStagger(staggerMs)}`,
   });
 }
 
@@ -702,16 +715,39 @@ interface DispatchDeps {
   now: Date;
   situations: ActiveSituation[];
   inFlight: Set<string>;
-  /** 0 = unlimited. */
-  concurrency: number;
+  /** Minimum ms between kickoffs; 0 = no stagger. */
+  staggerMs: number;
+  /** Mutable, shared across ticks: epoch ms of the most recent kickoff. */
+  lastDispatch: { at: number | null };
   log: (e: DaemonEvent) => void;
   running: Promise<RunResult>[];
   /** Free-slot pool: called after a run releases its slot. */
   onSlotFree?: () => void;
 }
 
+/**
+ * Is a kickoff allowed right now?
+ *
+ * Deliberately NOT a concurrency cap. A cap decides a due routine does not
+ * run, and that lost run leaves no trace afterwards. This decides only that it
+ * does not run *yet*: the caller leaves `lastFire` untouched, so the routine
+ * stays due and a later tick admits it. Because the admit list is sorted
+ * oldest-lastFire-first, the longest-waiting routine goes first, so a backlog
+ * drains in fair order rather than starving anyone.
+ */
+function staggerAllows(lastDispatch: { at: number | null }, staggerMs: number): boolean {
+  if (staggerMs <= 0 || lastDispatch.at === null) return true;
+  // Real time, NOT the pass's `now`. A pass stamps `now` before it loads the
+  // registry, situations and the capacity policy, so by the time a routine
+  // actually starts, `now` is already stale by however long that took. Gating
+  // on `now` leaks that drift into the gap: measured kickoff-to-kickoff, two
+  // routines could land ~40ms apart under a 100ms stagger. Comparing real
+  // instants is what makes the promised gap the OBSERVED gap.
+  return Date.now() - lastDispatch.at >= staggerMs;
+}
+
 function tryDispatch(entry: RoutineEntry, occ: Date, deps: DispatchDeps): void {
-  const { now, situations, inFlight, concurrency, log } = deps;
+  const { now, situations, inFlight, lastDispatch, log } = deps;
 
   // Already tracked as running in this daemon process.
   if (inFlight.has(entry.id)) {
@@ -747,17 +783,6 @@ function tryDispatch(entry: RoutineEntry, occ: Date, deps: DispatchDeps): void {
     });
   }
 
-  // Optional hard cap only when concurrency > 0. Unlimited (0) never skip-caps.
-  if (concurrency > 0 && inFlight.size >= concurrency) {
-    log({
-      ts: now.toISOString(),
-      kind: "skip-cap",
-      id: entry.id,
-      detail: `at cap ${concurrency}`,
-    });
-    return; // leave lastFire unchanged — free-slot pool retries when a slot frees
-  }
-
   if (isLocked(entry.id) || !acquireLock(entry.id)) {
     log({ ts: now.toISOString(), kind: "skip-single-flight", id: entry.id });
     return;
@@ -765,6 +790,7 @@ function tryDispatch(entry: RoutineEntry, occ: Date, deps: DispatchDeps): void {
 
   patchState(entry.id, { lastFire: occ.toISOString() });
   inFlight.add(entry.id);
+  lastDispatch.at = Date.now();
   log({
     ts: now.toISOString(),
     kind: "dispatch",
@@ -807,6 +833,11 @@ function tryDispatch(entry: RoutineEntry, occ: Date, deps: DispatchDeps): void {
 export interface DispatchPassOptions extends DaemonOptions {
   /** Shared in-flight set (daemon loop). Fresh set per call if omitted. */
   inFlight?: Set<string>;
+  /**
+   * Shared last-kickoff clock (daemon loop). Fresh holder per call if omitted,
+   * which means a standalone pass never defers its first dispatch.
+   */
+  lastDispatch?: { at: number | null };
   /** Free-slot pool callback when any started run completes. */
   onSlotFree?: () => void;
   /** When false, do not emit a tick log line (internal refills). Default true. */
@@ -814,16 +845,18 @@ export interface DispatchPassOptions extends DaemonOptions {
 }
 
 /**
- * Scan the registry and start every due routine that fits capacity.
+ * Scan the registry and start due routines, honouring the kickoff stagger.
  * Returns promises for runs *started this pass* (not all in-flight).
+ * Routines held back by the stagger keep their lastFire, so they stay due.
  * Does not await them — caller decides (evaluateOnce waits; startDaemon does not).
  */
 export function dispatchDue(opts: DispatchPassOptions = {}): Promise<RunResult>[] {
   const log = opts.log ?? defaultLog;
-  const concurrency = normalizeConcurrency(opts.concurrency);
+  const staggerMs = normalizeStaggerMs(opts.staggerMs);
   const catchupMs = opts.catchupMs ?? 0;
   const now = new Date();
   const inFlight = opts.inFlight ?? new Set<string>();
+  const lastDispatch = opts.lastDispatch ?? { at: null };
   const emitTick = opts.emitTick !== false;
 
   const { entries: registryEntries, errors } = loadAll();
@@ -845,7 +878,8 @@ export function dispatchDue(opts: DispatchPassOptions = {}): Promise<RunResult>[
     now,
     situations: check.situations,
     inFlight,
-    concurrency,
+    staggerMs,
+    lastDispatch,
     log,
     running,
     onSlotFree: opts.onSlotFree,
@@ -853,11 +887,10 @@ export function dispatchDue(opts: DispatchPassOptions = {}): Promise<RunResult>[
 
   if (emitTick) {
     emitReconcile(log);
-    const cap = formatConcurrency(concurrency);
     log({
       ts: now.toISOString(),
       kind: "tick",
-      detail: `${entries.length} routines in_flight=${inFlight.size} concurrency=${cap}`,
+      detail: `${entries.length} routines in_flight=${inFlight.size} stagger=${formatStagger(staggerMs)}`,
     });
   }
 
@@ -890,6 +923,7 @@ export function dispatchDue(opts: DispatchPassOptions = {}): Promise<RunResult>[
       detail: `invalid policy; spine-only fail-closed: ${(err as Error).message}`,
     });
   }
+  const deferredByStagger: string[] = [];
   const capacityPlan = planCapacity(due, policy, now);
   for (const allowance of capacityPlan.allowances) {
     log({
@@ -911,7 +945,26 @@ export function dispatchDue(opts: DispatchPassOptions = {}): Promise<RunResult>[
       });
       continue;
     }
+    if (!staggerAllows(lastDispatch, staggerMs)) {
+      // Everything still in this pass shares one `now`, so nothing else can
+      // clear the gate either. Count the rest and emit ONE line — a backlog
+      // drain would otherwise log a deferral per routine per tick.
+      deferredByStagger.push(entry.id);
+      continue;
+    }
     tryDispatch(entry, occ, deps);
+  }
+
+  if (deferredByStagger.length > 0) {
+    const sinceMs = lastDispatch.at === null ? 0 : Date.now() - lastDispatch.at;
+    log({
+      ts: now.toISOString(),
+      kind: "defer-stagger",
+      detail:
+        `${deferredByStagger.length} due, held ${sinceMs}ms into a ${staggerMs}ms gap: ` +
+        `${deferredByStagger.slice(0, 5).join(",")}` +
+        `${deferredByStagger.length > 5 ? ` +${deferredByStagger.length - 5} more` : ""}`,
+    });
   }
 
   return running;
@@ -935,15 +988,17 @@ export interface DaemonHandle {
  * - Periodic ticks re-scan due work.
  * - When any run completes, a refill pass admits the next due routine immediately
  *   (does not wait for the rest of an artificial "batch" to finish).
- * - Default concurrency is unlimited; optional positive cap still works.
+ * - There is no concurrency cap. Kickoffs are separated by at least
+ *   `staggerMs` (default 60s) so a recovery tick spreads its backlog over
+ *   time instead of starting every due routine at once.
  */
 export function startDaemon(opts: DaemonOptions = {}): DaemonHandle {
   const tickMs = opts.tickMs ?? 15_000;
-  const concurrency = normalizeConcurrency(opts.concurrency);
+  const staggerMs = normalizeStaggerMs(opts.staggerMs);
   const catchupMs = opts.catchupMs ?? 0;
   const log = opts.log ?? defaultLog;
 
-  announceDaemonBoot(log, tickMs, concurrency);
+  announceDaemonBoot(log, tickMs, staggerMs);
   emitReconcile(log);
 
   let stopped = false;
@@ -954,6 +1009,8 @@ export function startDaemon(opts: DaemonOptions = {}): DaemonHandle {
 
   /** Persistent across ticks — the free-slot pool membership. */
   const inFlight = new Set<string>();
+  /** Persistent across ticks — when the last kickoff happened. */
+  const lastDispatch: { at: number | null } = { at: null };
 
   // Serialize admit passes; queue another if a slot frees mid-scan.
   let admitting = false;
@@ -971,10 +1028,11 @@ export function startDaemon(opts: DaemonOptions = {}): DaemonHandle {
         admitAgain = false;
         // Fire-and-forget: do not await started runs (that was the batch freeze).
         dispatchDue({
-          concurrency,
+          staggerMs,
           catchupMs,
           log,
           inFlight,
+          lastDispatch,
           emitTick: true,
           onSlotFree: () => {
             if (!stopped) admitDue();
