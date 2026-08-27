@@ -194,6 +194,9 @@ export function codexWritableDirs(): string[] {
     join(home, ".last-stack"), // compat root (mostly symlinks into state/)
     // STATE realpath for entire managed last-stack layout (logs, proofs, …)
     join(home, ".local", "state", "last-stack"),
+    // State-machine executions keep durable step artifacts here. The LastDB
+    // canary writes its detached build pid, logs, and completion sentinel.
+    join(home, ".local", "state", "state-machine"),
     join(home, ".lastgit"),
     join(home, ".brain"),
     // Portal git cache (wt fetch); read/write during routine portal ops

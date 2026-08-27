@@ -82,12 +82,14 @@ describe("buildInvocation", () => {
     expect(inv.stdin).toBe("hi");
   });
 
-  test("codexWritableDirs includes last-stack state realpath and portal cache", () => {
+  test("codexWritableDirs includes runtime state realpaths and portal cache", () => {
     const home = process.env.HOME && process.env.HOME.length > 0 ? process.env.HOME : homedir();
     const dirs = codexWritableDirs();
     expect(dirs).toContain(`${home}/.last-stack`);
     // Entire managed layout (logs/proofs/dogfood) lives under state/
     expect(dirs).toContain(`${home}/.local/state/last-stack`);
+    // Durable state-machine steps, including the canary build, write here.
+    expect(dirs).toContain(`${home}/.local/state/state-machine`);
     expect(dirs).toContain(`${home}/.cache/edgevector-git`);
   });
 
