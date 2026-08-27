@@ -33,6 +33,7 @@ export interface PublishStatusResult extends FleetPublication {
   written: {
     snapshots: number;
     rows: number;
+    deletedStatusRows: number;
     runSummaries: number;
     fleetRows: number;
     runSummariesV2: number;
@@ -302,6 +303,7 @@ export async function publishFleetStatus(options: PublishStatusOptions = {}): Pr
   const written = {
     snapshots: 0,
     rows: 0,
+    deletedStatusRows: 0,
     runSummaries: 0,
     fleetRows: 0,
     runSummariesV2: 0,
@@ -310,6 +312,28 @@ export async function publishFleetStatus(options: PublishStatusOptions = {}): Pr
   };
 
   if (!options.dryRun) {
+    const currentIds = new Set(preparedRows.map((row) => requiredField(row, "id")));
+    const retiredIds = await findRetiredRoutineIds(client, schemaHashes.fleetStatus, currentIds);
+    for (const id of retiredIds) {
+      const existing = await client.queryByKey({
+        schemaHash: schemaHashes.status,
+        keyHash: id,
+        fields: ["id"],
+      });
+      if (!existing) {
+        throw new LastDbPublishError(
+          "retired_fleet_row_without_primary",
+          `FleetRoutineStatus contains retired routine ${id}, but RoutineStatus has no exact primary row.`,
+        );
+      }
+      await client.mutate({
+        schemaHash: schemaHashes.status,
+        keyHash: id,
+        fields: {},
+        mutationType: "delete",
+      });
+      written.deletedStatusRows += 1;
+    }
     for (const prepared of preparedRows) {
       const existing = await client.queryByKey({
         schemaHash: schemaHashes.status,
@@ -372,6 +396,27 @@ export async function publishFleetStatus(options: PublishStatusOptions = {}): Pr
     dryRun: options.dryRun === true,
     written,
   };
+}
+
+async function findRetiredRoutineIds(
+  client: LastDbPublisherClient,
+  fleetStatusSchemaHash: string,
+  currentIds: Set<string>,
+): Promise<string[]> {
+  const retired = new Set<string>();
+  for (let bucket = 0; bucket < FLEET_STATUS_BUCKET_COUNT; bucket += 1) {
+    const page = await client.queryByHash({
+      schemaHash: fleetStatusSchemaHash,
+      keyHash: fleetBucketKey(ROUTINES_FLEET_ID, bucket),
+      fields: ["id"],
+      maxRows: 100_000,
+    });
+    for (const item of page) {
+      const id = item.fields.id;
+      if (id && !currentIds.has(id)) retired.add(id);
+    }
+  }
+  return [...retired].sort();
 }
 
 export async function deliverFleetStatus(options: DeliverStatusOptions): Promise<DeliverStatusResult> {
