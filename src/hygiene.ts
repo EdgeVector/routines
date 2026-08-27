@@ -317,6 +317,30 @@ export interface ArtifactDaemonRefreshOptions {
   currentAliases?: string[];
   launchctlPrint: string;
   reinstall: () => void;
+  /**
+   * The launchd job is not loaded at all, so `launchctlPrint` is empty because
+   * there was nothing to print — not because the inspection failed. Only
+   * changes the wording of the result; the reinstall decision is the same one
+   * an empty print already produces.
+   */
+  daemonAbsent?: boolean;
+}
+
+/**
+ * True when `launchctl print` failed because the job is NOT LOADED, rather
+ * than because launchctl itself could not run.
+ *
+ * This distinction is the whole fix. An unloaded routinesd is precisely the
+ * state `install-daemon` exists to repair, and it was the state the heal bailed
+ * out of first: on 2026-08-27 the fleet lost 8 h 53 min and then a further
+ * 29 min while hygiene wrote `attempted: true, ok: false, restarted: false`
+ * every hour. launchd words it two ways depending on the subcommand, so match
+ * the stable part of both.
+ */
+export function isLaunchdServiceNotLoaded(message: string): boolean {
+  return /Could not find service|No such process|Could not find specified service/i.test(
+    message,
+  );
 }
 
 /** True when `executable` is the immutable host-track routines artifact. */
@@ -346,7 +370,9 @@ export function refreshArtifactDaemonIfStale(
     return {
       attempted: false,
       ok: true,
-      detail: `artifact daemon stale; reload skipped (--no-restart)`,
+      detail: opts.daemonAbsent
+        ? `routinesd is not loaded; reinstall skipped (--no-restart)`
+        : `artifact daemon stale; reload skipped (--no-restart)`,
       restarted: false,
     };
   }
@@ -354,7 +380,9 @@ export function refreshArtifactDaemonIfStale(
     return {
       attempted: true,
       ok: true,
-      detail: `would reinstall routinesd onto current artifact ${opts.currentExecutable}`,
+      detail: opts.daemonAbsent
+        ? `routinesd is not loaded; would reinstall onto current artifact ${opts.currentExecutable}`
+        : `would reinstall routinesd onto current artifact ${opts.currentExecutable}`,
       restarted: false,
     };
   }
@@ -363,7 +391,9 @@ export function refreshArtifactDaemonIfStale(
     return {
       attempted: true,
       ok: true,
-      detail: `routinesd reinstalled onto current artifact ${opts.currentExecutable}`,
+      detail: opts.daemonAbsent
+        ? `routinesd was not loaded; reinstalled onto current artifact ${opts.currentExecutable}`
+        : `routinesd reinstalled onto current artifact ${opts.currentExecutable}`,
       restarted: true,
     };
   } catch (err) {
@@ -376,16 +406,32 @@ export function refreshArtifactDaemonIfStale(
   }
 }
 
-function tryArtifactDaemonRefresh(
+/**
+ * Seams for the daemon-refresh heal. Injected only by the test suite: the
+ * WIRING between "launchctl print failed" and "reinstall" is where the
+ * 2026-08-27 outages lived, so it has to be reachable without a real
+ * LaunchAgent on the machine running the tests.
+ */
+export interface ArtifactDaemonRefreshSeams {
+  currentLink?: string;
+  resolveExecutable?: (link: string) => string;
+  readLaunchctlPrint?: (uid: number) => string;
+  reinstall?: (executable: string) => void;
+}
+
+export function tryArtifactDaemonRefresh(
   dryRun: boolean,
   restart: boolean,
+  seams: ArtifactDaemonRefreshSeams = {},
 ): HygieneResult["installFf"] | null {
-  const currentLink = join(homedir(), ".host-track", "apps", "routines", "current", "dist", "routines");
-  if (!existsSync(currentLink)) return null;
+  const currentLink =
+    seams.currentLink ??
+    join(homedir(), ".host-track", "apps", "routines", "current", "dist", "routines");
+  if (!seams.currentLink && !existsSync(currentLink)) return null;
 
   let currentExecutable: string;
   try {
-    currentExecutable = realpathSync(currentLink);
+    currentExecutable = (seams.resolveExecutable ?? realpathSync)(currentLink);
   } catch {
     return null;
   }
@@ -396,19 +442,34 @@ function tryArtifactDaemonRefresh(
 
   const uid = process.getuid?.() ?? 0;
   let launchctlPrint: string;
+  let daemonAbsent = false;
   try {
-    launchctlPrint = execFileSync(
-      "launchctl",
-      ["print", `gui/${uid}/com.edgevector.routinesd`],
-      { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
-    );
+    launchctlPrint = seams.readLaunchctlPrint
+      ? seams.readLaunchctlPrint(uid)
+      : execFileSync(
+          "launchctl",
+          ["print", `gui/${uid}/com.edgevector.routinesd`],
+          { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+        );
   } catch (err) {
-    return {
-      attempted: true,
-      ok: false,
-      detail: `cannot inspect routinesd launchd arguments: ${(err as Error).message}`,
-      restarted: false,
-    };
+    const message = (err as Error).message;
+    if (!isLaunchdServiceNotLoaded(message)) {
+      // launchctl itself could not answer. That is a genuine inspection
+      // failure and must not be treated as an absent daemon, because a
+      // reinstall here would be guessing.
+      return {
+        attempted: true,
+        ok: false,
+        detail: `cannot inspect routinesd launchd arguments: ${message}`,
+        restarted: false,
+      };
+    }
+    // The job is not loaded. Nothing printed because nothing is there — and
+    // that is the one state a reinstall repairs. An empty print names no
+    // loaded path, so the refresh below reaches its reinstall exactly as it
+    // does for a stale digest.
+    launchctlPrint = "";
+    daemonAbsent = true;
   }
 
   return refreshArtifactDaemonIfStale({
@@ -417,7 +478,12 @@ function tryArtifactDaemonRefresh(
     currentExecutable,
     currentAliases: [currentLink],
     launchctlPrint,
+    daemonAbsent,
     reinstall: () => {
+      if (seams.reinstall) {
+        seams.reinstall(currentExecutable);
+        return;
+      }
       execFileSync(currentExecutable, ["install-daemon"], {
         encoding: "utf8",
         stdio: ["ignore", "pipe", "pipe"],

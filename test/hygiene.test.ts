@@ -6,7 +6,9 @@ import { join } from "node:path";
 import {
   hygieneLauncherPath,
   isHostTrackRoutinesArtifact,
+  isLaunchdServiceNotLoaded,
   refreshArtifactDaemonIfStale,
+  tryArtifactDaemonRefresh,
   renderHygieneLauncher,
   renderHygienePlist,
   runHygiene,
@@ -269,6 +271,148 @@ describe("artifact daemon refresh", () => {
     expect(result.attempted).toBe(true);
     expect(result.restarted).toBe(true);
     expect(reinstalls).toBe(1);
+  });
+
+  // 2026-08-27: routinesd stopped twice (05:48Z and 21:04Z) with its launchd
+  // job left UNLOADED, costing 8h53m and then a further 29 min of a dead
+  // fleet. Hourly hygiene saw `loaded: false` every time and healed nothing:
+  // the heal ran `launchctl print` first, that call FAILS on an unloaded job,
+  // and the catch returned before reaching its own reinstall(). The one state
+  // that needs the heal was the one state that bailed out first.
+  test("an unloaded daemon reinstalls; it is the state install-daemon repairs", () => {
+    let reinstalls = 0;
+    const result = refreshArtifactDaemonIfStale({
+      dryRun: false,
+      restart: true,
+      currentExecutable: current,
+      launchctlPrint: "",
+      daemonAbsent: true,
+      reinstall: () => reinstalls++,
+    });
+    expect(reinstalls).toBe(1);
+    expect(result.restarted).toBe(true);
+    expect(result.ok).toBe(true);
+    // The wording has to say WHICH repair happened. "reinstalled onto current
+    // artifact" alone reads as a routine digest refresh.
+    expect(result.detail).toContain("not loaded");
+  });
+
+  test("an unloaded daemon under --no-restart says so and reinstalls nothing", () => {
+    let reinstalls = 0;
+    const result = refreshArtifactDaemonIfStale({
+      dryRun: false,
+      restart: false,
+      currentExecutable: current,
+      launchctlPrint: "",
+      daemonAbsent: true,
+      reinstall: () => reinstalls++,
+    });
+    expect(reinstalls).toBe(0);
+    expect(result.restarted).toBe(false);
+    expect(result.detail).toContain("not loaded");
+  });
+
+  test("an unloaded daemon under --dry-run reinstalls nothing", () => {
+    let reinstalls = 0;
+    const result = refreshArtifactDaemonIfStale({
+      dryRun: true,
+      restart: true,
+      currentExecutable: current,
+      launchctlPrint: "",
+      daemonAbsent: true,
+      reinstall: () => reinstalls++,
+    });
+    expect(reinstalls).toBe(0);
+    expect(result.restarted).toBe(false);
+    expect(result.detail).toContain("not loaded");
+  });
+});
+
+describe("tryArtifactDaemonRefresh wiring", () => {
+  const artifact =
+    "/Users/x/.host-track/apps/routines/versions/" +
+    "2eb07e371d8924078a602dcfabce78d55fc689a6586da54d48e8b819d79f7010" +
+    "/dist/routines";
+
+  // The bail. `launchctl print` fails on an UNLOADED job, and before this the
+  // catch returned `attempted: true, ok: false, restarted: false` without ever
+  // calling reinstall(). Hourly hygiene wrote that line for 8h53m on
+  // 2026-08-27 and again for 29 min the same evening while the fleet ran
+  // nothing. This is the regression that has to stay dead.
+  test("reinstalls when launchctl print reports the job is not loaded", () => {
+    const reinstalled: string[] = [];
+    const result = tryArtifactDaemonRefresh(false, true, {
+      currentLink: artifact,
+      resolveExecutable: () => artifact,
+      readLaunchctlPrint: () => {
+        throw new Error(
+          'Command failed: launchctl print gui/501/com.edgevector.routinesd\n' +
+            'Bad request.\nCould not find service "com.edgevector.routinesd" ' +
+            "in domain for user gui: 501\n",
+        );
+      },
+      reinstall: (exe) => reinstalled.push(exe),
+    });
+    expect(reinstalled).toEqual([artifact]);
+    expect(result?.restarted).toBe(true);
+    expect(result?.ok).toBe(true);
+    expect(result?.detail).toContain("not loaded");
+  });
+
+  // The other half of the same judgement: a launchctl that cannot run is NOT
+  // an absent job, and must not trigger a reinstall on unobserved state.
+  test("an inspection failure still reports and reinstalls nothing", () => {
+    const reinstalled: string[] = [];
+    const result = tryArtifactDaemonRefresh(false, true, {
+      currentLink: artifact,
+      resolveExecutable: () => artifact,
+      readLaunchctlPrint: () => {
+        throw new Error("spawnSync launchctl ENOENT");
+      },
+      reinstall: (exe) => reinstalled.push(exe),
+    });
+    expect(reinstalled).toEqual([]);
+    expect(result?.ok).toBe(false);
+    expect(result?.restarted).toBe(false);
+    expect(result?.detail).toContain("cannot inspect");
+  });
+
+  // A loaded job already on the current artifact is left alone.
+  test("a loaded current daemon is not touched", () => {
+    const reinstalled: string[] = [];
+    const result = tryArtifactDaemonRefresh(false, true, {
+      currentLink: artifact,
+      resolveExecutable: () => artifact,
+      readLaunchctlPrint: () => `arguments = {\n\t${artifact}\n\tdaemon\n}`,
+      reinstall: (exe) => reinstalled.push(exe),
+    });
+    expect(reinstalled).toEqual([]);
+    expect(result?.attempted).toBe(false);
+    expect(result?.restarted).toBe(false);
+  });
+});
+
+describe("isLaunchdServiceNotLoaded", () => {
+  // The exact strings this machine produced on 2026-08-27 at 21:20Z.
+  test("classifies both launchd wordings for an absent job", () => {
+    expect(
+      isLaunchdServiceNotLoaded(
+        'Command failed: launchctl print gui/501/com.edgevector.routinesd\nBad request.\nCould not find service "com.edgevector.routinesd" in domain for user gui: 501\n',
+      ),
+    ).toBe(true);
+    expect(
+      isLaunchdServiceNotLoaded(
+        'Command failed: launchctl list com.edgevector.routinesd\nCould not find service "com.edgevector.routinesd" in domain for port\n',
+      ),
+    ).toBe(true);
+  });
+
+  // A launchctl that cannot run at all must NOT be read as an absent job — a
+  // reinstall there would be guessing at state nobody observed.
+  test("does not classify an inspection failure as an absent job", () => {
+    expect(isLaunchdServiceNotLoaded("spawnSync launchctl ENOENT")).toBe(false);
+    expect(isLaunchdServiceNotLoaded("Command failed: launchctl print ... EPERM")).toBe(false);
+    expect(isLaunchdServiceNotLoaded("Operation not permitted")).toBe(false);
   });
 });
 
