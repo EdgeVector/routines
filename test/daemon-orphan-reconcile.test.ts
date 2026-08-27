@@ -6,6 +6,7 @@ import { join } from "node:path";
 
 import {
   classifyAbruptStop,
+  priorStopNeedsReconstruct,
   readDaemonIdentity,
   reconcileOrphanedRuns,
   startDaemon,
@@ -304,6 +305,7 @@ describe("daemon boot start/stop identity", () => {
 
     const events: DaemonEvent[] = [];
     const handle = startDaemon({ tickMs: 50, log: (e) => events.push(e) });
+    const afterBoot = readDaemonIdentity();
     handle.stop("signal:SIGTERM");
     await handle.done;
 
@@ -313,6 +315,11 @@ describe("daemon boot start/stop identity", () => {
     expect(reconstructed?.detail).toContain("reason=host-track-activate");
     expect(reconstructed?.detail).toContain("prior_pid=999999999");
     expect(events.find((e) => e.kind === "start")?.detail).toContain(`pid=${process.pid}`);
+    expect(afterBoot?.pid).toBe(process.pid);
+    expect(afterBoot?.stopReason).toBe("host-track-activate");
+    expect(afterBoot?.stoppedAt).toBeTruthy();
+    expect(afterBoot?.stopSource).toBe("reconstructed");
+    expect(readDaemonIdentity()?.stopSource).toBe("self");
   });
 
   test("reconstructs unknown stop when host-track current is stale", async () => {
@@ -355,6 +362,100 @@ describe("daemon boot start/stop identity", () => {
     await handle.done;
 
     expect(events.filter((e) => e.detail?.includes("reconstructed=true"))).toHaveLength(0);
+  });
+
+  test("reconstructs even when the prior pid is still alive (host-track overlap)", async () => {
+    const current = join(home, "host-track-overlap");
+    writeFileSync(current, "link\n");
+    const now = new Date();
+    utimesSync(current, now, now);
+    process.env.ROUTINES_HOST_TRACK_CURRENT = current;
+    const child = spawn("sleep", ["30"], { stdio: "ignore" });
+    const livePid = child.pid;
+    expect(livePid).toBeGreaterThan(0);
+    try {
+      writeDaemonIdentity({
+        pid: livePid!,
+        startedAt: "2026-08-26T23:00:00.000Z",
+        executable: "/old/digest/dist/routines",
+        stopReason: null,
+        stoppedAt: null,
+      });
+
+      const events: DaemonEvent[] = [];
+      const handle = startDaemon({ tickMs: 50, log: (e) => events.push(e) });
+      const reconstructed = events.find(
+        (e) => e.kind === "stop" && e.detail?.includes("reconstructed=true"),
+      );
+      expect(reconstructed?.detail).toContain("reason=host-track-activate");
+      expect(reconstructed?.detail).toContain(`prior_pid=${livePid}`);
+      const identity = readDaemonIdentity();
+      expect(identity?.stopReason).toBe("host-track-activate");
+      expect(identity?.stopSource).toBe("reconstructed");
+      handle.stop("signal:SIGTERM");
+      await handle.done;
+      expect(readDaemonIdentity()?.stopSource).toBe("self");
+      expect(readDaemonIdentity()?.stopReason).toBe("signal:SIGTERM");
+    } finally {
+      child.kill("SIGKILL");
+    }
+  });
+
+  test("a reconstructed identity still reconstructs the next abrupt successor boot", async () => {
+    const current = join(home, "host-track-chain");
+    writeFileSync(current, "link\n");
+    const now = new Date();
+    utimesSync(current, now, now);
+    process.env.ROUTINES_HOST_TRACK_CURRENT = current;
+    writeDaemonIdentity({
+      pid: 666_666_666,
+      startedAt: "2026-08-26T23:33:15.917Z",
+      executable: "/old/digest/dist/routines",
+      stopReason: "host-track-activate",
+      stoppedAt: "2026-08-26T23:33:15.917Z",
+      stopSource: "reconstructed",
+    });
+
+    const events: DaemonEvent[] = [];
+    const handle = startDaemon({ tickMs: 50, log: (e) => events.push(e) });
+    handle.stop();
+    await handle.done;
+
+    const reconstructed = events.find(
+      (e) => e.kind === "stop" && e.detail?.includes("reconstructed=true"),
+    );
+    expect(reconstructed?.detail).toContain("prior_pid=666666666");
+  });
+
+  test("priorStopNeedsReconstruct keeps a legacy self-stop from double-logging", () => {
+    expect(
+      priorStopNeedsReconstruct({
+        pid: 1,
+        startedAt: "2026-08-26T20:00:00.000Z",
+        executable: null,
+        stopReason: "signal:SIGTERM",
+        stoppedAt: "2026-08-26T20:28:47.000Z",
+      }),
+    ).toBe(false);
+    expect(
+      priorStopNeedsReconstruct({
+        pid: 1,
+        startedAt: "2026-08-26T20:00:00.000Z",
+        executable: null,
+        stopReason: null,
+        stoppedAt: null,
+      }),
+    ).toBe(true);
+    expect(
+      priorStopNeedsReconstruct({
+        pid: 1,
+        startedAt: "2026-08-26T20:00:00.000Z",
+        executable: null,
+        stopReason: "host-track-activate",
+        stoppedAt: "2026-08-26T23:33:15.917Z",
+        stopSource: "reconstructed",
+      }),
+    ).toBe(true);
   });
 
   test("classifyAbruptStop names host-track-activate from current mtime", () => {

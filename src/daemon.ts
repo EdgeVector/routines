@@ -177,12 +177,21 @@ export function pidAlive(pid: number): boolean {
 /** How long after host-track `current` flips we still name the stop as activate. */
 export const HOST_TRACK_ACTIVATE_WINDOW_MS = 10 * 60 * 1000;
 
+/** Who wrote `stopReason` onto this identity. */
+export type DaemonStopSource = "self" | "reconstructed";
+
 export interface DaemonIdentity {
   pid: number;
   startedAt: string;
   executable: string | null;
   stopReason: string | null;
   stoppedAt: string | null;
+  /**
+   * `self` — this pid logged its own graceful stop.
+   * `reconstructed` — the successor boot named a prior abrupt death.
+   * Missing with a stopReason is a legacy self-stop (parent CR).
+   */
+  stopSource?: DaemonStopSource | null;
 }
 
 export interface ClassifyAbruptStopOptions {
@@ -214,12 +223,17 @@ export function readDaemonIdentity(): DaemonIdentity | null {
   try {
     const raw = JSON.parse(readFileSync(p, "utf8")) as Partial<DaemonIdentity>;
     if (typeof raw.pid !== "number" || !Number.isFinite(raw.pid)) return null;
+    const stopSource =
+      raw.stopSource === "self" || raw.stopSource === "reconstructed"
+        ? raw.stopSource
+        : null;
     return {
       pid: raw.pid,
       startedAt: typeof raw.startedAt === "string" ? raw.startedAt : "",
       executable: typeof raw.executable === "string" ? raw.executable : null,
       stopReason: typeof raw.stopReason === "string" ? raw.stopReason : null,
       stoppedAt: typeof raw.stoppedAt === "string" ? raw.stoppedAt : null,
+      stopSource,
     };
   } catch {
     return null;
@@ -231,17 +245,25 @@ export function writeDaemonIdentity(identity: DaemonIdentity): void {
   writeFileSync(daemonIdentityPath(), JSON.stringify(identity, null, 2) + "\n");
 }
 
-/** Stamp a graceful stop on this process's identity. No-op if already recorded. */
+/** Stamp a graceful stop on this process's identity. Overwrites a reconstructed prior reason. */
 export function recordDaemonStop(reason: string): void {
   const prev = readDaemonIdentity();
   if (!prev) return;
   if (prev.pid !== process.pid) return;
-  if (prev.stopReason) return;
+  if (prev.stopSource === "self") return;
   writeDaemonIdentity({
     ...prev,
     stopReason: reason,
     stoppedAt: new Date().toISOString(),
+    stopSource: "self",
   });
+}
+
+/** True when the successor boot must emit a reconstructed kind=stop. */
+export function priorStopNeedsReconstruct(prev: DaemonIdentity): boolean {
+  if (prev.stopSource === "self") return false;
+  if (prev.stopSource === "reconstructed") return true;
+  return !prev.stopReason;
 }
 
 /**
@@ -286,13 +308,13 @@ function announceDaemonBoot(
 ): void {
   const now = new Date();
   const prev = readDaemonIdentity();
-  if (
-    prev &&
-    prev.pid !== process.pid &&
-    !pidAlive(prev.pid) &&
-    !prev.stopReason
-  ) {
+  // Host-track activate often starts the new pid while the old pid is still
+  // alive. Do not wait for pid death — that skip is why live 23:33Z had
+  // kind=start and stopReason=null. Do not kill the prior pid or its locks.
+  let reconstructed: { reason: string; priorPid: number } | null = null;
+  if (prev && prev.pid !== process.pid && priorStopNeedsReconstruct(prev)) {
     const reason = classifyAbruptStop(prev, { now });
+    reconstructed = { reason, priorPid: prev.pid };
     log({
       ts: now.toISOString(),
       kind: "stop",
@@ -303,8 +325,9 @@ function announceDaemonBoot(
     pid: process.pid,
     startedAt: now.toISOString(),
     executable: currentExecutable(),
-    stopReason: null,
-    stoppedAt: null,
+    stopReason: reconstructed ? reconstructed.reason : null,
+    stoppedAt: reconstructed ? now.toISOString() : null,
+    stopSource: reconstructed ? "reconstructed" : null,
   });
   log({
     ts: now.toISOString(),
