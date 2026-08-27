@@ -29,6 +29,7 @@ export interface FleetPublication {
 
 export interface PublishStatusResult extends FleetPublication {
   schemaHashes: Record<SchemaKey, string>;
+  fleetSummary: FieldMap;
   written: {
     snapshots: number;
     rows: number;
@@ -36,6 +37,7 @@ export interface PublishStatusResult extends FleetPublication {
     fleetRows: number;
     runSummariesV2: number;
     deletedRunSummariesV2: number;
+    fleetSummaries: number;
   };
   dryRun: boolean;
 }
@@ -64,6 +66,7 @@ export interface DeliverStatusOptions extends PublishStatusOptions {
   recipient: DeliveryRecipient;
   maxRecords?: number;
   approve?: boolean;
+  boundedView?: boolean;
   deliveryClient?: LastDbDeliveryClient;
 }
 
@@ -71,6 +74,19 @@ export interface DeliverStatusResult extends PublishStatusResult {
   deliveryRequest: DeliveryStageRequest;
   staged: DeliveryStageResult | null;
   approved: DeliveryApproveResult | null;
+  boundedView: FleetReadResult | null;
+}
+
+export interface FleetReadResult {
+  summary: FieldMap;
+  rows: FieldMap[];
+  attempts: number;
+}
+
+export interface ReadFleetStatusOptions {
+  client?: LastDbPublisherClient;
+  schemaHashes?: Record<SchemaKey, string>;
+  maxAttempts?: number;
 }
 
 export interface DeliveryStageRequest {
@@ -266,6 +282,8 @@ export function buildFleetPublication(options: PublishStatusOptions = {}): Fleet
 
 export async function publishFleetStatus(options: PublishStatusOptions = {}): Promise<PublishStatusResult> {
   const publication = buildFleetPublication(options);
+  const preparedRows = publication.rows.map(routineStatusFields);
+  const fleetSummary = buildFleetSummary(publication, preparedRows);
   const client = options.client ?? newLastDbPublisherClient();
   const schemaHashes = await declareSchemas(client);
   publication.snapshot.schema_hashes_json = JSON.stringify(schemaHashes);
@@ -277,13 +295,13 @@ export async function publishFleetStatus(options: PublishStatusOptions = {}): Pr
     fleetRows: 0,
     runSummariesV2: 0,
     deletedRunSummariesV2: 0,
+    fleetSummaries: 0,
   };
 
   if (!options.dryRun) {
     await upsert(client, schemaHashes.snapshot, requiredField(publication.snapshot, "slug"), publication.snapshot, [...SNAPSHOT_FIELDS]);
     written.snapshots = 1;
-    for (const row of publication.rows) {
-      const prepared = routineStatusFields(row);
+    for (const prepared of preparedRows) {
       const existing = await client.queryByKey({
         schemaHash: schemaHashes.status,
         keyHash: requiredField(prepared, "id"),
@@ -324,32 +342,118 @@ export async function publishFleetStatus(options: PublishStatusOptions = {}): Pr
         keepDays: positiveInt(options.runRetentionDays, 30),
       });
     }
+    await upsert(
+      client,
+      schemaHashes.fleetSummary,
+      requiredField(fleetSummary, "fleet_id"),
+      fleetSummary,
+      [...FLEET_SUMMARY_FIELDS],
+    );
+    written.fleetSummaries = 1;
   }
 
   return {
     ...publication,
     schemaHashes,
+    fleetSummary,
     dryRun: options.dryRun === true,
     written,
   };
 }
 
 export async function deliverFleetStatus(options: DeliverStatusOptions): Promise<DeliverStatusResult> {
-  const publication = await publishFleetStatus(options);
-  const deliveryRequest = buildDeliveryStageRequest({
-    schemaHashes: publication.schemaHashes,
-    recipient: options.recipient,
-    maxRecords: options.maxRecords,
-  });
+  const publisherClient = options.client ?? newLastDbPublisherClient();
+  const publication = await publishFleetStatus({ ...options, client: publisherClient });
+  const boundedView = options.boundedView && !options.dryRun
+    ? await readFleetStatus({ client: publisherClient, schemaHashes: publication.schemaHashes })
+    : null;
+  const deliveryRequest = options.boundedView
+    ? buildBoundedDeliveryStageRequest({
+        schemaHashes: publication.schemaHashes,
+        recipient: options.recipient,
+        maxRecords: options.maxRecords,
+      })
+    : buildDeliveryStageRequest({
+        schemaHashes: publication.schemaHashes,
+        recipient: options.recipient,
+        maxRecords: options.maxRecords,
+      });
 
   if (options.dryRun) {
-    return { ...publication, deliveryRequest, staged: null, approved: null };
+    return { ...publication, deliveryRequest, staged: null, approved: null, boundedView };
   }
 
   const client = options.deliveryClient ?? newLastDbDeliveryClient();
   const staged = await client.stageDelivery(deliveryRequest);
   const approved = options.approve ? await client.approveDelivery(staged.deliveryId) : null;
-  return { ...publication, deliveryRequest, staged, approved };
+  return { ...publication, deliveryRequest, staged, approved, boundedView };
+}
+
+export async function readFleetStatus(options: ReadFleetStatusOptions = {}): Promise<FleetReadResult> {
+  const client = options.client ?? newLastDbPublisherClient();
+  const schemaHashes = options.schemaHashes ?? await declareSchemas(client);
+  const maxAttempts = positiveInt(options.maxAttempts, 3);
+  let lastReason = "no attempt";
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const summary = await client.queryByKey({
+      schemaHash: schemaHashes.fleetSummary,
+      keyHash: ROUTINES_FLEET_ID,
+      fields: [...FLEET_SUMMARY_FIELDS],
+    });
+    if (!summary) {
+      lastReason = "FleetSummary is missing";
+      continue;
+    }
+    const bucketCount = boundedInt(summary.bucket_count, 1, 64);
+    const expectedRows = boundedInt(summary.row_count, 0, 100_000);
+    if (bucketCount === null || expectedRows === null) {
+      lastReason = "FleetSummary has invalid counts";
+      continue;
+    }
+    const rows: FieldMap[] = [];
+    for (let bucket = 0; bucket < bucketCount; bucket += 1) {
+      const page = await client.queryByHash({
+        schemaHash: schemaHashes.fleetStatus,
+        keyHash: fleetBucketKey(ROUTINES_FLEET_ID, bucket),
+        fields: [...FLEET_ROUTINE_STATUS_FIELDS],
+        maxRows: Math.max(expectedRows + bucketCount, 256),
+      });
+      rows.push(...page.map((item) => item.fields));
+    }
+    const stableSummary = await client.queryByKey({
+      schemaHash: schemaHashes.fleetSummary,
+      keyHash: ROUTINES_FLEET_ID,
+      fields: [...FLEET_SUMMARY_FIELDS],
+    });
+    if (
+      !stableSummary ||
+      stableSummary.captured_at !== summary.captured_at ||
+      stableSummary.content_digest !== summary.content_digest
+    ) {
+      lastReason = "FleetSummary changed during the bucket read";
+      continue;
+    }
+    if (rows.length !== expectedRows) {
+      lastReason = `row count mismatch: expected ${expectedRows}, read ${rows.length}`;
+      continue;
+    }
+    const digest = fleetContentDigest(rows);
+    if (digest !== summary.content_digest) {
+      lastReason = `content digest mismatch: expected ${summary.content_digest}, read ${digest}`;
+      continue;
+    }
+    const byId = new Map(rows.map((row) => [requiredField(row, "id"), row]));
+    if (byId.size !== rows.length) {
+      lastReason = "duplicate routine IDs exist across fleet buckets";
+      continue;
+    }
+    return {
+      summary,
+      rows: [...byId.values()].sort((a, b) => requiredField(a, "sk").localeCompare(requiredField(b, "sk"))),
+      attempts: attempt,
+    };
+  }
+  throw new LastDbPublishError("fleet_view_inconsistent", `Bounded fleet view did not converge: ${lastReason}.`);
 }
 
 /** Snapshot fields safe for the ~64KB sealed-message cap. Exclude rows_json —
@@ -359,6 +463,26 @@ const SNAPSHOT_DELIVER_FIELDS = SNAPSHOT_FIELDS.filter((f) => f !== "rows_json")
 
 /** Status fields for deliver — drop free-text detail that can dominate size. */
 const STATUS_DELIVER_FIELDS = STATUS_FIELDS.filter((f) => f !== "last_outcome_detail");
+
+const BOUNDED_STATUS_DELIVER_FIELDS = [
+  "fleet_bucket",
+  "sk",
+  "id",
+  "status",
+  "harness",
+  "model",
+  "group_id",
+  "group_label",
+  "next_fire",
+  "last_run",
+  "running",
+  "fenced",
+  "last_outcome",
+  "noop_rate",
+  "useful_rate",
+  "content_digest",
+  "updated_at",
+] as const;
 
 export function buildDeliveryStageRequest(opts: {
   schemaHashes: Record<SchemaKey, string>;
@@ -384,6 +508,35 @@ export function buildDeliveryStageRequest(opts: {
       {
         schema_name: opts.schemaHashes.status,
         fields: [...STATUS_DELIVER_FIELDS],
+      },
+    ],
+  };
+}
+
+export function buildBoundedDeliveryStageRequest(opts: {
+  schemaHashes: Record<SchemaKey, string>;
+  recipient: DeliveryRecipient;
+  maxRecords?: number;
+}): DeliveryStageRequest {
+  return {
+    recipient_pubkey: opts.recipient.recipientPubkey,
+    ...(opts.recipient.recipientDisplayName ? { recipient_display_name: opts.recipient.recipientDisplayName } : {}),
+    messaging_public_key: opts.recipient.messagingPublicKey,
+    messaging_pseudonym: opts.recipient.messagingPseudonym,
+    mode: "snapshot",
+    max_records: positiveInt(opts.maxRecords, 128),
+    legs: [
+      {
+        schema_name: opts.schemaHashes.fleetSummary,
+        fields: [...FLEET_SUMMARY_FIELDS],
+        hash_keys: [ROUTINES_FLEET_ID],
+      },
+      {
+        schema_name: opts.schemaHashes.fleetStatus,
+        fields: [...BOUNDED_STATUS_DELIVER_FIELDS],
+        hash_keys: Array.from({ length: FLEET_STATUS_BUCKET_COUNT }, (_, bucket) =>
+          fleetBucketKey(ROUTINES_FLEET_ID, bucket),
+        ),
       },
     ],
   };
@@ -474,6 +627,10 @@ function redactLogTail(input: string, maxBytes: number): string {
 
 export function fleetStatusBucket(id: string, fleetId = ROUTINES_FLEET_ID): string {
   const bucket = createHash("sha256").update(id).digest()[0]! % FLEET_STATUS_BUCKET_COUNT;
+  return fleetBucketKey(fleetId, bucket);
+}
+
+export function fleetBucketKey(fleetId: string, bucket: number): string {
   return `${fleetId}#${bucket.toString(16).padStart(2, "0")}`;
 }
 
@@ -490,6 +647,34 @@ function routineStatusFields(row: FieldMap): FieldMap {
   fields.content_digest = contentDigest(fields, new Set(["content_digest", "updated_at"]));
   assertSerializedSize(fields, ROUTINE_STATUS_MAX_BYTES, `RoutineStatus/${requiredField(row, "id")}`);
   return fields;
+}
+
+function buildFleetSummary(publication: FleetPublication, rows: FieldMap[]): FieldMap {
+  const summary: FieldMap = {
+    fleet_id: ROUTINES_FLEET_ID,
+    captured_at: publication.capturedAt,
+    layout_version: "1",
+    bucket_count: String(FLEET_STATUS_BUCKET_COUNT),
+    row_count: String(rows.length),
+    active_count: String(rows.filter((row) => row.status === "active").length),
+    paused_count: String(rows.filter((row) => row.status === "paused").length),
+    fenced_count: String(rows.filter((row) => row.fenced !== "" && row.fenced !== "false").length),
+    running_count: String(rows.filter((row) => row.running === "true").length),
+    error_count: String(rows.filter((row) => row.last_outcome === "error").length),
+    run_summary_count: String(publication.runSummaries.length),
+    situations_ok: publication.snapshot.situations_ok ?? "false",
+    situations_error: publication.snapshot.situations_error ?? "",
+    content_digest: fleetContentDigest(rows),
+  };
+  assertSerializedSize(summary, FLEET_SUMMARY_MAX_BYTES, `FleetSummary/${ROUTINES_FLEET_ID}`);
+  return summary;
+}
+
+function fleetContentDigest(rows: FieldMap[]): string {
+  const normalized: Array<[string, string]> = rows
+    .map((row): [string, string] => [requiredField(row, "id"), requiredField(row, "content_digest")])
+    .sort(([left], [right]) => left.localeCompare(right));
+  return createHash("sha256").update(JSON.stringify(normalized)).digest("hex");
 }
 
 async function enforceRunSummaryRetention(
@@ -584,6 +769,11 @@ function rateString(value: number | null): string {
 function positiveInt(value: number | undefined, fallback: number): number {
   if (value === undefined || !Number.isInteger(value) || value < 1) return fallback;
   return value;
+}
+
+function boundedInt(value: string | undefined, min: number, max: number): number | null {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed >= min && parsed <= max ? parsed : null;
 }
 
 function requiredField(fields: FieldMap, key: string): string {

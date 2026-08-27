@@ -5,12 +5,14 @@ import { join } from "node:path";
 
 import {
   buildDeliveryStageRequest,
+  buildBoundedDeliveryStageRequest,
   buildFleetPublication,
   deliverFleetStatus,
   fleetStatusBucket,
   newLastDbDeliveryClient,
   newLastDbPublisherClient,
   publishFleetStatus,
+  readFleetStatus,
   type SchemaDefinition,
   type LastDbDeliveryClient,
   type LastDbPublisherClient,
@@ -117,6 +119,7 @@ test("publishFleetStatus declares schemas and upserts snapshot, rows, and run su
     fleetRows: 1,
     runSummariesV2: 1,
     deletedRunSummariesV2: 0,
+    fleetSummaries: 1,
   });
   expect(client.declared.map((schema) => schema.name)).toEqual([
     "RoutineFleetSnapshot",
@@ -161,6 +164,7 @@ test("publishFleetStatus declares schemas and upserts snapshot, rows, and run su
     ["hash-RoutineFleetSnapshot", "fleet-latest", "create"],
     ["hash-RoutineStatus", "alpha", "create"],
     ["hash-RoutineRunSummary", "alpha/20260715T010203Z", "create"],
+    ["hash-FleetSummary", "routines", "create"],
   ]);
   const status = client.record("hash-RoutineStatus", "alpha");
   expect(status).toMatchObject({
@@ -169,6 +173,46 @@ test("publishFleetStatus declares schemas and upserts snapshot, rows, and run su
   });
   expect(status?.content_digest).toHaveLength(64);
   expect(client.record("hash-FleetRoutineStatus", status!.fleet_bucket!, status!.sk!)).toMatchObject({ id: "alpha" });
+});
+
+test("FleetSummary is the last write and a failed row pass does not advance it", async () => {
+  const client = new FakeClient();
+  client.failSchemaHash = "hash-RoutineRunSummary";
+
+  await expect(publishFleetStatus({
+    client,
+    now: new Date("2026-07-15T02:00:00.000Z"),
+    runLimit: 1,
+  })).rejects.toThrow("forced mutation failure");
+
+  expect(client.record("hash-FleetSummary", "routines")).toBeNull();
+  expect(client.writes.at(-1)?.schemaHash).toBe("hash-RoutineRunSummary");
+});
+
+test("bounded reader validates FleetSummary against all fixed bucket pages", async () => {
+  const client = new FakeClient();
+  await publishFleetStatus({ client, now: new Date("2026-07-15T02:00:00.000Z"), runLimit: 1 });
+
+  const result = await readFleetStatus({
+    client,
+    schemaHashes: schemaHashes(),
+  });
+
+  expect(result.attempts).toBe(1);
+  expect(result.rows.map((row) => row.id)).toEqual(["alpha"]);
+  expect(result.summary.row_count).toBe("1");
+  expect(client.hashQueries.filter((query) => query.schemaHash === "hash-FleetRoutineStatus")).toHaveLength(16);
+});
+
+test("bounded reader retries a partial bucket pass", async () => {
+  const client = new FakeClient();
+  await publishFleetStatus({ client, now: new Date("2026-07-15T02:00:00.000Z"), runLimit: 1 });
+  client.hideNextFleetRow = true;
+
+  const result = await readFleetStatus({ client, schemaHashes: schemaHashes(), maxAttempts: 2 });
+
+  expect(result.attempts).toBe(2);
+  expect(result.rows).toHaveLength(1);
 });
 
 test("unchanged publication skips primary status and V2 run writes", async () => {
@@ -282,6 +326,28 @@ test("buildDeliveryStageRequest targets snapshot plus capped routine status rows
   expect(req.legs[1]!.fields).toContain("last_outcome");
 });
 
+test("buildBoundedDeliveryStageRequest targets the manifest and 16 bucket partitions", () => {
+  const req = buildBoundedDeliveryStageRequest({
+    schemaHashes: schemaHashes(),
+    recipient: {
+      recipientPubkey: "recipient-ed25519",
+      messagingPublicKey: "messaging-x25519",
+      messagingPseudonym: "00000000-0000-0000-0000-000000000001",
+    },
+  });
+
+  expect(req.max_records).toBe(128);
+  expect(req.legs[0]).toMatchObject({
+    schema_name: "hash-FleetSummary",
+    hash_keys: ["routines"],
+  });
+  expect(req.legs[1]!.schema_name).toBe("hash-FleetRoutineStatus");
+  expect(req.legs[1]!.hash_keys).toHaveLength(16);
+  expect(req.legs[1]!.hash_keys).toContain("routines#00");
+  expect(req.legs[1]!.hash_keys).toContain("routines#0f");
+  expect(JSON.stringify(req).length).toBeLessThan(64 * 1024);
+});
+
 test("deliverFleetStatus publishes, stages, and optionally approves", async () => {
   const publisher = new FakeClient();
   const delivery = new FakeDeliveryClient();
@@ -305,6 +371,29 @@ test("deliverFleetStatus publishes, stages, and optionally approves", async () =
   expect(delivery.approvedIds).toEqual(["delivery-1"]);
   expect(result.staged?.deliveryId).toBe("delivery-1");
   expect(result.approved?.shared).toBe(2);
+});
+
+test("deliverFleetStatus can validate and stage the bounded view", async () => {
+  const publisher = new FakeClient();
+  const delivery = new FakeDeliveryClient();
+  const result = await deliverFleetStatus({
+    client: publisher,
+    deliveryClient: delivery,
+    boundedView: true,
+    now: new Date("2026-07-15T02:00:00.000Z"),
+    runLimit: 1,
+    recipient: {
+      recipientPubkey: "recipient-ed25519",
+      messagingPublicKey: "messaging-x25519",
+      messagingPseudonym: "00000000-0000-0000-0000-000000000001",
+    },
+  });
+
+  expect(result.boundedView?.rows).toHaveLength(1);
+  expect(delivery.stagedRequests[0]!.legs.map((leg) => leg.schema_name)).toEqual([
+    "hash-FleetSummary",
+    "hash-FleetRoutineStatus",
+  ]);
 });
 
 test("LastDB publisher identifies socket requests and preserves auth and JSON headers", async () => {
@@ -419,6 +508,9 @@ class FakeClient implements LastDbPublisherClient {
     mutationType: "create" | "update" | "delete";
   }> = [];
   private records = new Map<string, Record<string, string>>();
+  hashQueries: Array<{ schemaHash: string; keyHash: string }> = [];
+  hideNextFleetRow = false;
+  failSchemaHash = "";
 
   async autoIdentity(): Promise<{ userHash: string }> {
     return { userHash: "user" };
@@ -444,6 +536,7 @@ class FakeClient implements LastDbPublisherClient {
     mutationType: "create" | "update" | "delete";
   }): Promise<void> {
     this.writes.push(opts);
+    if (opts.schemaHash === this.failSchemaHash) throw new Error("forced mutation failure");
     const key = this.recordKey(opts.schemaHash, opts.keyHash, opts.keyRange);
     if (opts.mutationType === "delete") this.records.delete(key);
     else this.records.set(key, { ...opts.fields });
@@ -468,7 +561,13 @@ class FakeClient implements LastDbPublisherClient {
   }
 
   async queryByHash(opts: { schemaHash: string; keyHash: string; maxRows: number }) {
-    return this.partition(opts.schemaHash, opts.keyHash).slice(0, opts.maxRows);
+    this.hashQueries.push({ schemaHash: opts.schemaHash, keyHash: opts.keyHash });
+    const rows = this.partition(opts.schemaHash, opts.keyHash).slice(0, opts.maxRows);
+    if (opts.schemaHash === "hash-FleetRoutineStatus" && this.hideNextFleetRow && rows.length > 0) {
+      this.hideNextFleetRow = false;
+      return rows.slice(1);
+    }
+    return rows;
   }
 
   seed(schemaHash: string, keyHash: string, keyRange: string | undefined, fields: Record<string, string>): void {
@@ -489,6 +588,17 @@ class FakeClient implements LastDbPublisherClient {
   private recordKey(schemaHash: string, keyHash: string, keyRange?: string): string {
     return `${schemaHash}\u0000${keyHash}\u0000${keyRange ?? ""}`;
   }
+}
+
+function schemaHashes() {
+  return {
+    snapshot: "hash-RoutineFleetSnapshot",
+    status: "hash-RoutineStatus",
+    runSummary: "hash-RoutineRunSummary",
+    fleetStatus: "hash-FleetRoutineStatus",
+    fleetSummary: "hash-FleetSummary",
+    runSummaryV2: "hash-RoutineRunSummaryV2",
+  } as const;
 }
 
 class FakeDeliveryClient implements LastDbDeliveryClient {
