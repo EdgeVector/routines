@@ -4,10 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
+  DEFAULT_STAGGER_MS,
   dueOccurrence,
   evaluateOnce,
-  formatConcurrency,
-  normalizeConcurrency,
+  formatStagger,
+  normalizeStaggerMs,
   startDaemon,
 } from "../src/daemon.ts";
 import { loadEntry } from "../src/registry.ts";
@@ -110,7 +111,13 @@ describe("daemon evaluateOnce", () => {
       for (const id of ["matrix-live", "smoke-grok"]) {
         writeState({ id, lastFire: "2000-01-01T00:00:00.000Z" });
       }
-      const results = await evaluateOnce({ once: true, catchupMs: 60_000, log: () => {} });
+      // staggerMs: 0 — this asserts routing across several routines in one pass.
+      const results = await evaluateOnce({
+        once: true,
+        catchupMs: 60_000,
+        staggerMs: 0,
+        log: () => {},
+      });
       return new Map(results.map((result) => [
         result.id,
         JSON.parse(readFileSync(join(result.runDir, "meta.json"), "utf8")),
@@ -160,6 +167,7 @@ describe("daemon evaluateOnce", () => {
     const results = await evaluateOnce({
       once: true,
       catchupMs: 60_000,
+      staggerMs: 0, // asserting both harnesses in one pass
       log: (e) => events.push(`${e.kind}:${e.id ?? ""}`),
     });
 
@@ -210,6 +218,7 @@ describe("daemon evaluateOnce", () => {
     const results = await evaluateOnce({
       once: true,
       catchupMs: 60_000,
+      staggerMs: 0, // both routines must start together to race the gate
       log: () => {},
     });
     const timed = results.find((result) => result.id === "a-timeout");
@@ -452,7 +461,7 @@ describe("daemon evaluateOnce", () => {
     expect(stdout).toContain(`LASTDB_SOCKET_PATH=${socket}`);
   });
 
-  test("default concurrency is unlimited (no skip-cap when many are due)", async () => {
+  test("stagger off dispatches every due routine in one pass (no cap exists)", async () => {
     for (const id of ["u1", "u2", "u3", "u4", "u5"]) {
       writeRoutine(id, "claude");
     }
@@ -460,49 +469,75 @@ describe("daemon evaluateOnce", () => {
     const results = await evaluateOnce({
       once: true,
       catchupMs: 60_000,
-      // omit concurrency → unlimited
+      staggerMs: 0,
       log: (e) => events.push(`${e.kind}:${e.id ?? e.detail ?? ""}`),
     });
     expect(results.map((r) => r.id).sort()).toEqual(["u1", "u2", "u3", "u4", "u5"]);
-    expect(events.some((e) => e.startsWith("skip-cap:"))).toBe(false);
-    expect(events.some((e) => e.includes("concurrency=unlimited"))).toBe(true);
+    expect(events.some((e) => e.startsWith("defer-stagger:"))).toBe(false);
+    expect(events.some((e) => e.includes("stagger=off"))).toBe(true);
   });
 
-  test("positive concurrency still skip-caps when full (evaluateOnce)", async () => {
+  test("stagger admits one kickoff per pass and leaves the rest DUE, not skipped", async () => {
     writeRoutine("c1", "claude");
     writeRoutine("c2", "claude");
     writeRoutine("c3", "claude");
-    const events: string[] = [];
+    const events: { kind: string; detail?: string }[] = [];
     const results = await evaluateOnce({
       once: true,
       catchupMs: 60_000,
-      concurrency: 1,
-      log: (e) => events.push(`${e.kind}:${e.id ?? ""}`),
+      log: (e) => events.push({ kind: e.kind, detail: e.detail }),
     });
-    // Alphabetical: c1 starts; c2 and c3 skip-cap in the same pass.
+
+    // Fair order is oldest-lastFire-first; none have fired, so it falls back to
+    // id order. c1 starts; c2 and c3 are held by the 60s gap.
     expect(results.map((r) => r.id)).toEqual(["c1"]);
-    expect(events.filter((e) => e.startsWith("skip-cap:")).length).toBeGreaterThanOrEqual(2);
+
+    // ONE summary line for the whole pass, not one per deferred routine.
+    const defers = events.filter((e) => e.kind === "defer-stagger");
+    expect(defers.length).toBe(1);
+    expect(defers[0]?.detail).toContain("2 due");
+    expect(defers[0]?.detail).toContain("c2");
+
+    // The point of a stagger over a cap: the deferred runs are not lost. They
+    // never recorded a lastFire, so the next tick still sees them as due.
+    expect(readState("c1").lastFire).toBeTruthy();
+    expect(readState("c2").lastFire).toBeFalsy();
+    expect(readState("c3").lastFire).toBeFalsy();
   });
 });
 
-describe("normalizeConcurrency / formatConcurrency", () => {
-  test("0 / unset / negative mean unlimited", () => {
-    expect(normalizeConcurrency(undefined)).toBe(0);
-    expect(normalizeConcurrency(0)).toBe(0);
-    expect(normalizeConcurrency(-1)).toBe(0);
-    expect(normalizeConcurrency(NaN)).toBe(0);
-    expect(formatConcurrency(0)).toBe("unlimited");
-    expect(formatConcurrency(10)).toBe("10");
+describe("normalizeStaggerMs / formatStagger", () => {
+  test("unset falls back to ROUTINES_STAGGER_MS, then to the 60s default", () => {
+    delete process.env.ROUTINES_STAGGER_MS;
+    expect(normalizeStaggerMs(undefined)).toBe(DEFAULT_STAGGER_MS);
+    expect(DEFAULT_STAGGER_MS).toBe(60_000);
+
+    process.env.ROUTINES_STAGGER_MS = "5000";
+    expect(normalizeStaggerMs(undefined)).toBe(5_000);
+    process.env.ROUTINES_STAGGER_MS = "0";
+    expect(normalizeStaggerMs(undefined)).toBe(0);
+    delete process.env.ROUTINES_STAGGER_MS;
+  });
+
+  test("explicit 0 disables; junk falls back to the default", () => {
+    expect(normalizeStaggerMs(0)).toBe(0);
+    expect(normalizeStaggerMs(1_500)).toBe(1_500);
+    expect(normalizeStaggerMs(-1)).toBe(DEFAULT_STAGGER_MS);
+    expect(normalizeStaggerMs(NaN)).toBe(DEFAULT_STAGGER_MS);
+    expect(formatStagger(0)).toBe("off");
+    expect(formatStagger(60_000)).toBe("60000ms");
   });
 });
 
 describe("daemon free-slot pool", () => {
-  test("when a slot frees, the next due routine starts without waiting for the whole batch", async () => {
-    // Slow harness (~200ms). HOURLY rrule so a completed routine is not
-    // immediately due again; free-slot + fair order must then drain b and c.
+  test("kickoffs are spaced by the stagger, and runs still overlap (no cap)", async () => {
+    // Harness sleeps ~600ms while the stagger is 100ms, so a later kickoff is
+    // expected to land while an earlier run is still going. That margin is what
+    // makes the overlap assertion robust on a loaded machine. HOURLY rrule so a
+    // completed routine is not immediately due again.
     const slow = stub(
       join(home, "slow-harness"),
-      "#!/bin/sh\nsleep 0.2\necho SLOW-OK\nexit 0\n",
+      "#!/bin/sh\nsleep 0.6\necho SLOW-OK\nexit 0\n",
     );
     process.env.ROUTINES_CLAUDE_BIN = slow;
     process.env.ROUTINES_CODEX_BIN = slow;
@@ -522,18 +557,20 @@ describe("daemon free-slot pool", () => {
 
     const events: { t: number; kind: string; id?: string }[] = [];
     const t0 = Date.now();
+    const staggerMs = 100;
     const handle = startDaemon({
-      tickMs: 40,
-      concurrency: 1,
+      tickMs: 30,
+      staggerMs,
       catchupMs: 3_600_000, // one hourly occurrence due
       log: (e) => events.push({ t: Date.now() - t0, kind: e.kind, id: e.id }),
     });
 
-    const deadline = Date.now() + 5000;
+    // Generous: this asserts ordering, not speed, and CI hosts are often busy.
+    const deadline = Date.now() + 20_000;
     while (Date.now() < deadline) {
       const doneIds = new Set(events.filter((e) => e.kind === "complete").map((e) => e.id));
       if (doneIds.size >= 3) break;
-      await new Promise((r) => setTimeout(r, 40));
+      await new Promise((r) => setTimeout(r, 30));
     }
     handle.stop();
     await handle.done;
@@ -543,13 +580,27 @@ describe("daemon free-slot pool", () => {
     expect(new Set(dispatches)).toEqual(new Set(["fs-a", "fs-b", "fs-c"]));
     expect(new Set(completes)).toEqual(new Set(["fs-a", "fs-b", "fs-c"]));
 
-    // Free-slot: after first complete, another dispatch happens (not batch-wait).
+    // The other due routines are deferred by the stagger, not dropped.
+    expect(events.some((e) => e.kind === "defer-stagger")).toBe(true);
+
+    // Every kickoff is separated by at least the stagger. Timer slop can only
+    // make a gap longer, never shorter, so this is the whole contract: no two
+    // routines ever start in the same instant.
+    const kickoffs = events.filter((e) => e.kind === "dispatch").map((e) => e.t);
+    expect(kickoffs.length).toBe(3);
+    for (let i = 1; i < kickoffs.length; i++) {
+      expect(kickoffs[i]! - kickoffs[i - 1]!).toBeGreaterThanOrEqual(staggerMs);
+    }
+
+    // Spacing kickoffs must NOT serialize the fleet. With a 600ms harness and a
+    // 100ms gap, later kickoffs land while an earlier run is still in flight —
+    // this is the regression guard for the removed concurrency cap.
     const timeline = events.filter((e) => e.kind === "dispatch" || e.kind === "complete");
     const firstCompleteIdx = timeline.findIndex((e) => e.kind === "complete");
     expect(firstCompleteIdx).toBeGreaterThanOrEqual(0);
-    expect(timeline.slice(firstCompleteIdx + 1).some((e) => e.kind === "dispatch")).toBe(true);
-
-    // Under concurrency=1 the other due routines skip-cap until a slot frees.
-    expect(events.some((e) => e.kind === "skip-cap")).toBe(true);
+    const dispatchesBeforeFirstComplete = timeline
+      .slice(0, firstCompleteIdx)
+      .filter((e) => e.kind === "dispatch").length;
+    expect(dispatchesBeforeFirstComplete).toBeGreaterThanOrEqual(2);
   });
 });
