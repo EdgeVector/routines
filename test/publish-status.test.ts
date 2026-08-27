@@ -242,6 +242,7 @@ test("publication deletes routines that left the registry before advancing the s
   const client = new FakeClient();
   await publishFleetStatus({ client, now: new Date("2026-07-15T02:00:00.000Z"), runLimit: 1 });
   const oldStatus = client.record("hash-RoutineStatus", "alpha")!;
+  const writeStart = client.writes.length;
   rmSync(join(home, "registry", "alpha.toml"));
 
   const result = await publishFleetStatus({ client, now: new Date("2026-07-15T03:00:00.000Z"), runLimit: 1 });
@@ -249,6 +250,16 @@ test("publication deletes routines that left the registry before advancing the s
   expect(result.written.deletedStatusRows).toBe(1);
   expect(client.record("hash-RoutineStatus", "alpha")).toBeNull();
   expect(client.record("hash-FleetRoutineStatus", oldStatus.fleet_bucket!, oldStatus.sk!)).toBeNull();
+  expect(client.writes).toContainEqual({
+    schemaHash: "hash-FleetRoutineStatus",
+    keyHash: oldStatus.fleet_bucket!,
+    keyRange: oldStatus.sk!,
+    fields: {},
+    mutationType: "delete",
+  });
+  const currentWrites = client.writes.slice(writeStart);
+  expect(currentWrites.findIndex((write) => write.schemaHash === "hash-FleetRoutineStatus" && write.mutationType === "delete"))
+    .toBeLessThan(currentWrites.findIndex((write) => write.schemaHash === "hash-FleetSummary"));
   expect(client.record("hash-FleetSummary", "routines")?.row_count).toBe("0");
   expect((await readFleetStatus({ client, schemaHashes: schemaHashes() })).rows).toEqual([]);
   expect(client.writes.at(-1)?.schemaHash).toBe("hash-FleetSummary");
@@ -625,19 +636,16 @@ class FakeClient implements LastDbPublisherClient {
     const key = this.recordKey(opts.schemaHash, opts.keyHash, opts.keyRange);
     if (opts.mutationType === "delete") this.records.delete(key);
     else this.records.set(key, { ...opts.fields });
-    if (opts.schemaHash === "hash-RoutineStatus") {
-      const routineId = opts.mutationType === "delete" ? opts.keyHash : opts.fields.id;
+    if (opts.schemaHash === "hash-RoutineStatus" && opts.mutationType !== "delete") {
       for (const [recordKey, fields] of this.records.entries()) {
-        if (recordKey.startsWith("hash-FleetRoutineStatus\u0000") && fields.id === routineId) {
+        if (recordKey.startsWith("hash-FleetRoutineStatus\u0000") && fields.id === opts.fields.id) {
           this.records.delete(recordKey);
         }
       }
-      if (opts.mutationType !== "delete") {
-        this.records.set(
-          this.recordKey("hash-FleetRoutineStatus", opts.fields.fleet_bucket!, opts.fields.sk),
-          { ...opts.fields },
-        );
-      }
+      this.records.set(
+        this.recordKey("hash-FleetRoutineStatus", opts.fields.fleet_bucket!, opts.fields.sk),
+        { ...opts.fields },
+      );
     }
     if (opts.schemaHash === "hash-RoutineRunSummary" && opts.mutationType === "create") {
       const { slug: _slug, ...sharedFields } = opts.fields;
