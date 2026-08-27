@@ -117,6 +117,7 @@ test("publishFleetStatus declares schemas and writes only bounded fleet records"
   expect(result.written).toEqual({
     snapshots: 0,
     rows: 1,
+    deletedStatusRows: 0,
     runSummaries: 0,
     fleetRows: 1,
     runSummariesV2: 1,
@@ -193,6 +194,7 @@ test("FleetSummary is the last write and a failed row pass does not advance it",
 test("bounded reader validates FleetSummary against all fixed bucket pages", async () => {
   const client = new FakeClient();
   await publishFleetStatus({ client, now: new Date("2026-07-15T02:00:00.000Z"), runLimit: 1 });
+  client.hashQueries = [];
 
   const result = await readFleetStatus({
     client,
@@ -234,6 +236,22 @@ test("unchanged publication skips primary status and V2 run writes", async () =>
   expect(client.writes.some((write) => write.schemaHash === "hash-RoutineRunSummary")).toBe(false);
   expect(writes.some((write) => write.schemaHash === "hash-RoutineStatus")).toBe(false);
   expect(writes.some((write) => write.schemaHash === "hash-RoutineRunSummaryV2" && write.mutationType !== "delete")).toBe(false);
+});
+
+test("publication deletes routines that left the registry before advancing the summary", async () => {
+  const client = new FakeClient();
+  await publishFleetStatus({ client, now: new Date("2026-07-15T02:00:00.000Z"), runLimit: 1 });
+  const oldStatus = client.record("hash-RoutineStatus", "alpha")!;
+  rmSync(join(home, "registry", "alpha.toml"));
+
+  const result = await publishFleetStatus({ client, now: new Date("2026-07-15T03:00:00.000Z"), runLimit: 1 });
+
+  expect(result.written.deletedStatusRows).toBe(1);
+  expect(client.record("hash-RoutineStatus", "alpha")).toBeNull();
+  expect(client.record("hash-FleetRoutineStatus", oldStatus.fleet_bucket!, oldStatus.sk!)).toBeNull();
+  expect(client.record("hash-FleetSummary", "routines")?.row_count).toBe("0");
+  expect((await readFleetStatus({ client, schemaHashes: schemaHashes() })).rows).toEqual([]);
+  expect(client.writes.at(-1)?.schemaHash).toBe("hash-FleetSummary");
 });
 
 test("status move lets protein rekey remove the old fleet sort key", async () => {
@@ -607,16 +625,19 @@ class FakeClient implements LastDbPublisherClient {
     const key = this.recordKey(opts.schemaHash, opts.keyHash, opts.keyRange);
     if (opts.mutationType === "delete") this.records.delete(key);
     else this.records.set(key, { ...opts.fields });
-    if (opts.schemaHash === "hash-RoutineStatus" && opts.mutationType !== "delete") {
+    if (opts.schemaHash === "hash-RoutineStatus") {
+      const routineId = opts.mutationType === "delete" ? opts.keyHash : opts.fields.id;
       for (const [recordKey, fields] of this.records.entries()) {
-        if (recordKey.startsWith("hash-FleetRoutineStatus\u0000") && fields.id === opts.fields.id) {
+        if (recordKey.startsWith("hash-FleetRoutineStatus\u0000") && fields.id === routineId) {
           this.records.delete(recordKey);
         }
       }
-      this.records.set(
-        this.recordKey("hash-FleetRoutineStatus", opts.fields.fleet_bucket!, opts.fields.sk),
-        { ...opts.fields },
-      );
+      if (opts.mutationType !== "delete") {
+        this.records.set(
+          this.recordKey("hash-FleetRoutineStatus", opts.fields.fleet_bucket!, opts.fields.sk),
+          { ...opts.fields },
+        );
+      }
     }
     if (opts.schemaHash === "hash-RoutineRunSummary" && opts.mutationType === "create") {
       const { slug: _slug, ...sharedFields } = opts.fields;
