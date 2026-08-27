@@ -37,8 +37,8 @@ export interface PublishStatusResult extends FleetPublication {
 export interface LastDbPublisherClient {
   autoIdentity(): Promise<{ userHash: string }>;
   declareAppSchema(appId: string, schema: SchemaDefinition): Promise<{ canonical: string; schemaName: string }>;
-  queryByKey(opts: { schemaHash: string; keyHash: string; fields: string[] }): Promise<FieldMap | null>;
-  mutate(opts: { schemaHash: string; keyHash: string; fields: FieldMap; mutationType: "create" | "update" }): Promise<void>;
+  queryByKey(opts: { schemaHash: string; keyHash: string; keyRange?: string; fields: string[] }): Promise<FieldMap | null>;
+  mutate(opts: { schemaHash: string; keyHash: string; keyRange?: string; fields: FieldMap; mutationType: "create" | "update" }): Promise<void>;
 }
 
 export interface LastDbDeliveryClient {
@@ -93,16 +93,16 @@ export interface DeliveryApproveResult {
   messageType: string;
 }
 
-type SchemaKey = "snapshot" | "status" | "runSummary";
+type SchemaKey = "snapshot" | "status" | "runSummary" | "fleetStatus" | "fleetSummary" | "runSummaryV2";
 type FieldType = "String" | { Array: "String" };
 
-interface SchemaDefinition {
+export interface SchemaDefinition {
   name: string;
   owner_app_id: string;
   descriptive_name: string;
   purpose_statement: string;
-  schema_type: "Hash";
-  key: { hash_field: string };
+  schema_type: "Hash" | "HashRange";
+  key: { hash_field: string; range_field?: string };
   fields: string[];
   field_types: Record<string, FieldType>;
   field_descriptions: Record<string, string>;
@@ -160,6 +160,34 @@ const RUN_SUMMARY_FIELDS = [
   "updated_at",
 ] as const;
 
+export const FLEET_STATUS_BUCKET_COUNT = 16;
+export const ROUTINE_STATUS_MAX_BYTES = 8 * 1024;
+export const LAST_OUTCOME_DETAIL_MAX_BYTES = 1024;
+export const FLEET_SUMMARY_MAX_BYTES = 4 * 1024;
+export const RUN_SUMMARY_V2_MAX_BYTES = 8 * 1024;
+export const RUN_SUMMARY_LOG_TAIL_MAX_BYTES = 2 * 1024;
+
+const FLEET_ROUTINE_STATUS_FIELDS = ["fleet_bucket", "sk", ...STATUS_FIELDS] as const;
+
+const FLEET_SUMMARY_FIELDS = [
+  "fleet_id",
+  "captured_at",
+  "layout_version",
+  "bucket_count",
+  "row_count",
+  "active_count",
+  "paused_count",
+  "fenced_count",
+  "running_count",
+  "error_count",
+  "run_summary_count",
+  "situations_ok",
+  "situations_error",
+  "content_digest",
+] as const;
+
+const RUN_SUMMARY_V2_FIELDS = RUN_SUMMARY_FIELDS.filter((field) => field !== "slug");
+
 const SCHEMAS: Record<SchemaKey, SchemaDefinition> = {
   snapshot: schema(
     "RoutineFleetSnapshot",
@@ -178,6 +206,26 @@ const SCHEMAS: Record<SchemaKey, SchemaDefinition> = {
     "A capped recent run summary for one routine execution, without prompts or full logs",
     [...RUN_SUMMARY_FIELDS],
     "slug",
+  ),
+  fleetStatus: hashRangeSchema(
+    "FleetRoutineStatus",
+    `A bounded routine status index split across ${FLEET_STATUS_BUCKET_COUNT} stable fleet buckets; each row stays below ${ROUTINE_STATUS_MAX_BYTES} bytes`,
+    [...FLEET_ROUTINE_STATUS_FIELDS],
+    "fleet_bucket",
+    "sk",
+  ),
+  fleetSummary: schema(
+    "FleetSummary",
+    `A bounded fleet manifest with counts and a digest; each row stays below ${FLEET_SUMMARY_MAX_BYTES} bytes`,
+    [...FLEET_SUMMARY_FIELDS],
+    "fleet_id",
+  ),
+  runSummaryV2: hashRangeSchema(
+    "RoutineRunSummaryV2",
+    `A bounded run summary keyed by routine and run stamp; each row stays below ${RUN_SUMMARY_V2_MAX_BYTES} bytes and log_tail stays below ${RUN_SUMMARY_LOG_TAIL_MAX_BYTES} bytes`,
+    [...RUN_SUMMARY_V2_FIELDS],
+    "id",
+    "stamp",
   ),
 };
 
@@ -385,6 +433,21 @@ function schema(name: string, purpose: string, fields: string[], hashField: stri
   };
 }
 
+function hashRangeSchema(
+  name: string,
+  purpose: string,
+  fields: string[],
+  hashField: string,
+  rangeField: string,
+): SchemaDefinition {
+  const definition = schema(name, purpose, fields, hashField);
+  return {
+    ...definition,
+    schema_type: "HashRange",
+    key: { hash_field: hashField, range_field: rangeField },
+  };
+}
+
 function boolString(value: boolean): string {
   return value ? "true" : "false";
 }
@@ -443,23 +506,23 @@ export function newLastDbPublisherClient(opts: LastDbClientOptions = {}): LastDb
       }
       return { canonical, schemaName };
     },
-    async queryByKey({ schemaHash, keyHash, fields }) {
+    async queryByKey({ schemaHash, keyHash, keyRange, fields }) {
       const body = await callJson("POST", "/api/query", {
         schema_name: schemaHash,
         fields,
-        filter: { HashKey: keyHash },
+        filter: keyRange === undefined ? { HashKey: keyHash } : { HashRangeKey: { hash: keyHash, range: keyRange } },
         limit: 1,
         offset: 0,
       }, userHash);
       const rows = queryRows(body);
-      return rows.find((row) => row.key.hash === keyHash)?.fields ?? null;
+      return rows.find((row) => row.key.hash === keyHash && (keyRange === undefined || row.key.range === keyRange))?.fields ?? null;
     },
-    async mutate({ schemaHash, keyHash, fields, mutationType }) {
+    async mutate({ schemaHash, keyHash, keyRange, fields, mutationType }) {
       await callJson("POST", "/api/mutation", {
         type: "mutation",
         schema: schemaHash,
         fields_and_values: fields,
-        key_value: { hash: keyHash, range: null },
+        key_value: { hash: keyHash, range: keyRange ?? null },
         mutation_type: mutationType,
       }, userHash);
     },
