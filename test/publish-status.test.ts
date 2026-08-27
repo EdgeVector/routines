@@ -7,6 +7,7 @@ import {
   buildDeliveryStageRequest,
   buildFleetPublication,
   deliverFleetStatus,
+  fleetStatusBucket,
   newLastDbDeliveryClient,
   newLastDbPublisherClient,
   publishFleetStatus,
@@ -109,7 +110,14 @@ test("publishFleetStatus declares schemas and upserts snapshot, rows, and run su
     fleetSummary: "hash-FleetSummary",
     runSummaryV2: "hash-RoutineRunSummaryV2",
   });
-  expect(result.written).toEqual({ snapshots: 1, rows: 1, runSummaries: 1 });
+  expect(result.written).toEqual({
+    snapshots: 1,
+    rows: 1,
+    runSummaries: 1,
+    fleetRows: 1,
+    runSummariesV2: 1,
+    deletedRunSummariesV2: 0,
+  });
   expect(client.declared.map((schema) => schema.name)).toEqual([
     "RoutineFleetSnapshot",
     "RoutineStatus",
@@ -154,6 +162,87 @@ test("publishFleetStatus declares schemas and upserts snapshot, rows, and run su
     ["hash-RoutineStatus", "alpha", "create"],
     ["hash-RoutineRunSummary", "alpha/20260715T010203Z", "create"],
   ]);
+  const status = client.record("hash-RoutineStatus", "alpha");
+  expect(status).toMatchObject({
+    fleet_bucket: fleetStatusBucket("alpha"),
+    sk: "active#other#alpha",
+  });
+  expect(status?.content_digest).toHaveLength(64);
+  expect(client.record("hash-FleetRoutineStatus", status!.fleet_bucket!, status!.sk!)).toMatchObject({ id: "alpha" });
+});
+
+test("unchanged publication skips primary status and V2 run writes", async () => {
+  const client = new FakeClient();
+  const options = { client, now: new Date("2026-07-15T02:00:00.000Z"), runLimit: 1 };
+  await publishFleetStatus(options);
+  const start = client.writes.length;
+
+  const result = await publishFleetStatus(options);
+  const writes = client.writes.slice(start);
+
+  expect(result.written.rows).toBe(0);
+  expect(result.written.fleetRows).toBe(0);
+  expect(result.written.runSummariesV2).toBe(0);
+  expect(writes.some((write) => write.schemaHash === "hash-RoutineStatus")).toBe(false);
+  expect(writes.some((write) => write.schemaHash === "hash-RoutineRunSummaryV2" && write.mutationType !== "delete")).toBe(false);
+});
+
+test("status move lets protein rekey remove the old fleet sort key", async () => {
+  const client = new FakeClient();
+  await publishFleetStatus({ client, now: new Date("2026-07-15T02:00:00.000Z"), runLimit: 1 });
+  const before = client.record("hash-RoutineStatus", "alpha")!;
+  writeFileSync(join(home, "registry", "alpha.toml"), [
+    'harness = "codex"',
+    'model = "gpt-5.5"',
+    'effort = "medium"',
+    'rrule = "FREQ=HOURLY"',
+    'prompt = "do not publish this prompt"',
+    `cwd = "${home}"`,
+    "timeout_min = 5",
+    'status = "paused"',
+    "",
+  ].join("\n"));
+
+  const result = await publishFleetStatus({ client, now: new Date("2026-07-15T03:00:00.000Z"), runLimit: 1 });
+  const after = client.record("hash-RoutineStatus", "alpha")!;
+
+  expect(result.written.rows).toBe(1);
+  expect(client.writes.some((write) => write.schemaHash === "hash-FleetRoutineStatus")).toBe(false);
+  expect(client.record("hash-FleetRoutineStatus", before.fleet_bucket!, before.sk!)).toBeNull();
+  expect(after.sk).toBe("paused#other#alpha");
+  expect(client.record("hash-FleetRoutineStatus", after.fleet_bucket!, after.sk!)).toMatchObject({ status: "paused" });
+});
+
+test("retention deletes only old exact keys in one routine partition", async () => {
+  const client = new FakeClient();
+  for (const stamp of ["20260712T010203Z", "20260713T010203Z", "20260714T010203Z"]) {
+    client.seed("hash-RoutineRunSummaryV2", "alpha", stamp, {
+      id: "alpha",
+      stamp,
+      started_at: stamp === "20260712T010203Z" ? "2026-07-12T01:02:03.000Z" : "2026-07-14T01:02:03.000Z",
+    });
+  }
+
+  const result = await publishFleetStatus({
+    client,
+    now: new Date("2026-07-15T02:00:00.000Z"),
+    runLimit: 1,
+    runRetentionCount: 2,
+    runRetentionDays: 30,
+  });
+
+  expect(result.written.deletedRunSummariesV2).toBe(2);
+  const deletes = client.writes.filter((write) => write.schemaHash === "hash-RoutineRunSummaryV2" && write.mutationType === "delete");
+  expect(deletes.map((write) => write.keyRange).sort()).toEqual(["20260712T010203Z", "20260713T010203Z"]);
+  expect(client.partition("hash-RoutineRunSummaryV2", "alpha").map((row) => row.keyRange).sort()).toEqual([
+    "20260714T010203Z",
+    "20260715T010203Z",
+  ]);
+});
+
+test("stable fleet buckets spread independent routine ids", () => {
+  expect(fleetStatusBucket("alpha")).toBe(fleetStatusBucket("alpha"));
+  expect(fleetStatusBucket("alpha")).not.toBe(fleetStatusBucket("charlie"));
 });
 
 test("buildDeliveryStageRequest targets snapshot plus capped routine status rows", () => {
@@ -322,7 +411,14 @@ test("LastDB delivery identifies explicit loopback requests", async () => {
 
 class FakeClient implements LastDbPublisherClient {
   declared: SchemaDefinition[] = [];
-  writes: Array<{ schemaHash: string; keyHash: string; mutationType: "create" | "update" }> = [];
+  writes: Array<{
+    schemaHash: string;
+    keyHash: string;
+    keyRange?: string;
+    fields: Record<string, string>;
+    mutationType: "create" | "update" | "delete";
+  }> = [];
+  private records = new Map<string, Record<string, string>>();
 
   async autoIdentity(): Promise<{ userHash: string }> {
     return { userHash: "user" };
@@ -336,16 +432,62 @@ class FakeClient implements LastDbPublisherClient {
     return { canonical: `hash-${schema.name}`, schemaName: `routines/${schema.name}` };
   }
 
-  async queryByKey(): Promise<Record<string, string> | null> {
-    return null;
+  async queryByKey(opts: { schemaHash: string; keyHash: string; keyRange?: string }): Promise<Record<string, string> | null> {
+    return this.record(opts.schemaHash, opts.keyHash, opts.keyRange);
   }
 
   async mutate(opts: {
     schemaHash: string;
     keyHash: string;
-    mutationType: "create" | "update";
+    keyRange?: string;
+    fields: Record<string, string>;
+    mutationType: "create" | "update" | "delete";
   }): Promise<void> {
     this.writes.push(opts);
+    const key = this.recordKey(opts.schemaHash, opts.keyHash, opts.keyRange);
+    if (opts.mutationType === "delete") this.records.delete(key);
+    else this.records.set(key, { ...opts.fields });
+    if (opts.schemaHash === "hash-RoutineStatus" && opts.mutationType !== "delete") {
+      for (const [recordKey, fields] of this.records.entries()) {
+        if (recordKey.startsWith("hash-FleetRoutineStatus\u0000") && fields.id === opts.fields.id) {
+          this.records.delete(recordKey);
+        }
+      }
+      this.records.set(
+        this.recordKey("hash-FleetRoutineStatus", opts.fields.fleet_bucket!, opts.fields.sk),
+        { ...opts.fields },
+      );
+    }
+    if (opts.schemaHash === "hash-RoutineRunSummary" && opts.mutationType === "create") {
+      const { slug: _slug, ...sharedFields } = opts.fields;
+      this.records.set(
+        this.recordKey("hash-RoutineRunSummaryV2", opts.fields.id!, opts.fields.stamp),
+        sharedFields,
+      );
+    }
+  }
+
+  async queryByHash(opts: { schemaHash: string; keyHash: string; maxRows: number }) {
+    return this.partition(opts.schemaHash, opts.keyHash).slice(0, opts.maxRows);
+  }
+
+  seed(schemaHash: string, keyHash: string, keyRange: string | undefined, fields: Record<string, string>): void {
+    this.records.set(this.recordKey(schemaHash, keyHash, keyRange), { ...fields });
+  }
+
+  record(schemaHash: string, keyHash: string, keyRange?: string): Record<string, string> | null {
+    return this.records.get(this.recordKey(schemaHash, keyHash, keyRange)) ?? null;
+  }
+
+  partition(schemaHash: string, keyHash: string): Array<{ keyRange: string; fields: Record<string, string> }> {
+    const prefix = `${schemaHash}\u0000${keyHash}\u0000`;
+    return [...this.records.entries()]
+      .filter(([key]) => key.startsWith(prefix))
+      .map(([key, fields]) => ({ keyRange: key.slice(prefix.length), fields }));
+  }
+
+  private recordKey(schemaHash: string, keyHash: string, keyRange?: string): string {
+    return `${schemaHash}\u0000${keyHash}\u0000${keyRange ?? ""}`;
   }
 }
 
