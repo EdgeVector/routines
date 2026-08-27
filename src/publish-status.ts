@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -13,6 +14,8 @@ export interface PublishStatusOptions {
   now?: Date;
   runLimit?: number;
   logTailBytes?: number;
+  runRetentionCount?: number;
+  runRetentionDays?: number;
   dryRun?: boolean;
   client?: LastDbPublisherClient;
 }
@@ -30,6 +33,9 @@ export interface PublishStatusResult extends FleetPublication {
     snapshots: number;
     rows: number;
     runSummaries: number;
+    fleetRows: number;
+    runSummariesV2: number;
+    deletedRunSummariesV2: number;
   };
   dryRun: boolean;
 }
@@ -38,7 +44,8 @@ export interface LastDbPublisherClient {
   autoIdentity(): Promise<{ userHash: string }>;
   declareAppSchema(appId: string, schema: SchemaDefinition): Promise<{ canonical: string; schemaName: string }>;
   queryByKey(opts: { schemaHash: string; keyHash: string; keyRange?: string; fields: string[] }): Promise<FieldMap | null>;
-  mutate(opts: { schemaHash: string; keyHash: string; keyRange?: string; fields: FieldMap; mutationType: "create" | "update" }): Promise<void>;
+  queryByHash(opts: { schemaHash: string; keyHash: string; fields: string[]; maxRows: number }): Promise<Array<{ keyRange: string; fields: FieldMap }>>;
+  mutate(opts: { schemaHash: string; keyHash: string; keyRange?: string; fields: FieldMap; mutationType: "create" | "update" | "delete" }): Promise<void>;
 }
 
 export interface LastDbDeliveryClient {
@@ -122,6 +129,8 @@ const SNAPSHOT_FIELDS = [
 ] as const;
 
 const STATUS_FIELDS = [
+  "fleet_bucket",
+  "sk",
   "id",
   "status",
   "harness",
@@ -143,6 +152,7 @@ const STATUS_FIELDS = [
   "noop_rate",
   "useful_rate",
   "outcome_window",
+  "content_digest",
   "updated_at",
 ] as const;
 
@@ -160,6 +170,7 @@ const RUN_SUMMARY_FIELDS = [
   "updated_at",
 ] as const;
 
+export const ROUTINES_FLEET_ID = "routines";
 export const FLEET_STATUS_BUCKET_COUNT = 16;
 export const ROUTINE_STATUS_MAX_BYTES = 8 * 1024;
 export const LAST_OUTCOME_DETAIL_MAX_BYTES = 1024;
@@ -167,7 +178,7 @@ export const FLEET_SUMMARY_MAX_BYTES = 4 * 1024;
 export const RUN_SUMMARY_V2_MAX_BYTES = 8 * 1024;
 export const RUN_SUMMARY_LOG_TAIL_MAX_BYTES = 2 * 1024;
 
-const FLEET_ROUTINE_STATUS_FIELDS = ["fleet_bucket", "sk", ...STATUS_FIELDS] as const;
+const FLEET_ROUTINE_STATUS_FIELDS = [...STATUS_FIELDS] as const;
 
 const FLEET_SUMMARY_FIELDS = [
   "fleet_id",
@@ -259,13 +270,59 @@ export async function publishFleetStatus(options: PublishStatusOptions = {}): Pr
   const schemaHashes = await declareSchemas(client);
   publication.snapshot.schema_hashes_json = JSON.stringify(schemaHashes);
 
+  const written = {
+    snapshots: 0,
+    rows: 0,
+    runSummaries: 0,
+    fleetRows: 0,
+    runSummariesV2: 0,
+    deletedRunSummariesV2: 0,
+  };
+
   if (!options.dryRun) {
     await upsert(client, schemaHashes.snapshot, requiredField(publication.snapshot, "slug"), publication.snapshot, [...SNAPSHOT_FIELDS]);
+    written.snapshots = 1;
     for (const row of publication.rows) {
-      await upsert(client, schemaHashes.status, requiredField(row, "id"), row, [...STATUS_FIELDS]);
+      const prepared = routineStatusFields(row);
+      const existing = await client.queryByKey({
+        schemaHash: schemaHashes.status,
+        keyHash: requiredField(prepared, "id"),
+        fields: [...STATUS_FIELDS],
+      });
+      if (existing?.content_digest === prepared.content_digest) continue;
+      await client.mutate({
+        schemaHash: schemaHashes.status,
+        keyHash: requiredField(prepared, "id"),
+        fields: prepared,
+        mutationType: existing ? "update" : "create",
+      });
+      written.rows += 1;
+      written.fleetRows += 1;
     }
     for (const run of publication.runSummaries) {
-      await upsert(client, schemaHashes.runSummary, requiredField(run, "slug"), run, [...RUN_SUMMARY_FIELDS]);
+      const existing = await client.queryByKey({
+        schemaHash: schemaHashes.runSummary,
+        keyHash: requiredField(run, "slug"),
+        fields: [...RUN_SUMMARY_FIELDS],
+      });
+      if (!existing) {
+        await client.mutate({
+          schemaHash: schemaHashes.runSummary,
+          keyHash: requiredField(run, "slug"),
+          fields: run,
+          mutationType: "create",
+        });
+        written.runSummaries += 1;
+        written.runSummariesV2 += 1;
+      }
+    }
+    for (const row of publication.rows) {
+      written.deletedRunSummariesV2 += await enforceRunSummaryRetention(client, schemaHashes.runSummaryV2, {
+        id: requiredField(row, "id"),
+        now: new Date(publication.capturedAt),
+        keepCount: positiveInt(options.runRetentionCount, 100),
+        keepDays: positiveInt(options.runRetentionDays, 30),
+      });
     }
   }
 
@@ -273,9 +330,7 @@ export async function publishFleetStatus(options: PublishStatusOptions = {}): Pr
     ...publication,
     schemaHashes,
     dryRun: options.dryRun === true,
-    written: options.dryRun
-      ? { snapshots: 0, rows: 0, runSummaries: 0 }
-      : { snapshots: 1, rows: publication.rows.length, runSummaries: publication.runSummaries.length },
+    written,
   };
 }
 
@@ -379,7 +434,7 @@ function statusFields(row: StatusRow, capturedAt: string): FieldMap {
     current_started_at: row.currentStartedAt ?? "",
     fenced: typeof row.fenced === "string" ? row.fenced : boolString(row.fenced),
     last_outcome: row.lastOutcome ?? "",
-    last_outcome_detail: row.lastOutcomeDetail ?? "",
+    last_outcome_detail: truncateUtf8(row.lastOutcomeDetail ?? "", LAST_OUTCOME_DETAIL_MAX_BYTES),
     noop_rate: rateString(row.noopRate),
     useful_rate: rateString(row.usefulRate),
     outcome_window: String(row.outcomeWindow),
@@ -388,7 +443,8 @@ function statusFields(row: StatusRow, capturedAt: string): FieldMap {
 }
 
 function runSummaryFields(id: string, run: RunSummary, capturedAt: string, logTailBytes: number): FieldMap {
-  const detail = readRun(id, run.stamp, logTailBytes);
+  const cappedLogTailBytes = Math.min(logTailBytes, RUN_SUMMARY_LOG_TAIL_MAX_BYTES);
+  const detail = readRun(id, run.stamp, cappedLogTailBytes);
   const combinedTail = detail
     ? [detail.summary ?? "", detail.stdoutTail, detail.stderrTail].filter(Boolean).join("\n")
     : "";
@@ -400,9 +456,9 @@ function runSummaryFields(id: string, run: RunSummary, capturedAt: string, logTa
     finished_at: run.finishedAt ?? "",
     exit_code: run.exitCode == null ? "" : String(run.exitCode),
     outcome: run.outcome,
-    outcome_detail: run.outcomeDetail ?? "",
+    outcome_detail: truncateUtf8(run.outcomeDetail ?? "", LAST_OUTCOME_DETAIL_MAX_BYTES),
     duration_ms: run.durationMs == null ? "" : String(run.durationMs),
-    log_tail: redactLogTail(combinedTail, logTailBytes),
+    log_tail: redactLogTail(combinedTail, cappedLogTailBytes),
     updated_at: capturedAt,
   };
 }
@@ -414,6 +470,75 @@ function redactLogTail(input: string, maxBytes: number): string {
   const bytes = new TextEncoder().encode(redacted);
   if (bytes.length <= maxBytes) return redacted;
   return new TextDecoder().decode(bytes.slice(bytes.length - maxBytes));
+}
+
+export function fleetStatusBucket(id: string, fleetId = ROUTINES_FLEET_ID): string {
+  const bucket = createHash("sha256").update(id).digest()[0]! % FLEET_STATUS_BUCKET_COUNT;
+  return `${fleetId}#${bucket.toString(16).padStart(2, "0")}`;
+}
+
+export function fleetStatusSortKey(fields: FieldMap): string {
+  return `${requiredField(fields, "status")}#${requiredField(fields, "group_id")}#${requiredField(fields, "id")}`;
+}
+
+function routineStatusFields(row: FieldMap): FieldMap {
+  const fields: FieldMap = {
+    ...row,
+    fleet_bucket: fleetStatusBucket(requiredField(row, "id")),
+    sk: fleetStatusSortKey(row),
+  };
+  fields.content_digest = contentDigest(fields, new Set(["content_digest", "updated_at"]));
+  assertSerializedSize(fields, ROUTINE_STATUS_MAX_BYTES, `RoutineStatus/${requiredField(row, "id")}`);
+  return fields;
+}
+
+async function enforceRunSummaryRetention(
+  client: LastDbPublisherClient,
+  schemaHash: string,
+  opts: { id: string; now: Date; keepCount: number; keepDays: number },
+): Promise<number> {
+  const rows = await client.queryByHash({
+    schemaHash,
+    keyHash: opts.id,
+    fields: [...RUN_SUMMARY_V2_FIELDS],
+    maxRows: Math.max(opts.keepCount + 1, 4096),
+  });
+  rows.sort((a, b) => b.keyRange.localeCompare(a.keyRange));
+  const cutoffMs = opts.now.getTime() - opts.keepDays * 24 * 60 * 60 * 1000;
+  let deleted = 0;
+  for (const [index, row] of rows.entries()) {
+    const startedMs = Date.parse(row.fields.started_at ?? "");
+    const expired = Number.isFinite(startedMs) && startedMs < cutoffMs;
+    if (index < opts.keepCount && !expired) continue;
+    await client.mutate({
+      schemaHash,
+      keyHash: opts.id,
+      keyRange: row.keyRange,
+      fields: row.fields,
+      mutationType: "delete",
+    });
+    deleted += 1;
+  }
+  return deleted;
+}
+
+function contentDigest(fields: FieldMap, excluded: Set<string>): string {
+  const normalized = Object.keys(fields)
+    .filter((key) => !excluded.has(key))
+    .sort()
+    .map((key) => [key, fields[key] ?? ""]);
+  return createHash("sha256").update(JSON.stringify(normalized)).digest("hex");
+}
+
+function truncateUtf8(input: string, maxBytes: number): string {
+  const bytes = new TextEncoder().encode(input);
+  if (bytes.length <= maxBytes) return input;
+  return new TextDecoder().decode(bytes.slice(0, maxBytes));
+}
+
+function assertSerializedSize(fields: FieldMap, maxBytes: number, label: string): void {
+  const size = new TextEncoder().encode(JSON.stringify(fields)).length;
+  if (size > maxBytes) throw new LastDbPublishError("row_too_large", `${label} is ${size} bytes; limit is ${maxBytes}.`);
 }
 
 function schema(name: string, purpose: string, fields: string[], hashField: string): SchemaDefinition {
@@ -516,6 +641,23 @@ export function newLastDbPublisherClient(opts: LastDbClientOptions = {}): LastDb
       }, userHash);
       const rows = queryRows(body);
       return rows.find((row) => row.key.hash === keyHash && (keyRange === undefined || row.key.range === keyRange))?.fields ?? null;
+    },
+    async queryByHash({ schemaHash, keyHash, fields, maxRows }) {
+      const pageSize = Math.min(200, maxRows);
+      const out: Array<{ keyRange: string; fields: FieldMap }> = [];
+      for (let offset = 0; out.length < maxRows; offset += pageSize) {
+        const body = await callJson("POST", "/api/query", {
+          schema_name: schemaHash,
+          fields,
+          filter: { HashKey: keyHash },
+          limit: Math.min(pageSize, maxRows - out.length),
+          offset,
+        }, userHash);
+        const rows = queryRows(body).filter((row) => row.key.hash === keyHash && row.key.range);
+        out.push(...rows.map((row) => ({ keyRange: row.key.range!, fields: row.fields })));
+        if (rows.length < pageSize) break;
+      }
+      return out;
     },
     async mutate({ schemaHash, keyHash, keyRange, fields, mutationType }) {
       await callJson("POST", "/api/mutation", {
