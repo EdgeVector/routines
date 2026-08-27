@@ -20,7 +20,16 @@ smoke_script="${LASTDB_LOCAL_SMOKE_SCRIPT:-$HOME/code/edgevector/.claude/run-las
 heartbeat_bin="${LASTDB_LOCAL_SMOKE_HEARTBEAT_BIN:-$last_stack/bin/last-stack-brain-append-heartbeat}"
 brain_bin="${LASTDB_LOCAL_SMOKE_BRAIN_BIN:-$(command -v brain 2>/dev/null || true)}"
 resolver_timeout_sec="${LASTDB_LOCAL_SMOKE_RESOLVER_TIMEOUT_SEC:-90}"
-smoke_timeout_sec="${LASTDB_LOCAL_SMOKE_TIMEOUT_SEC:-720}"
+# 720s was under-budget from the day it landed (2026-08-20). The gate spends
+# almost all of its wall clock on two phases that test nothing: the CoW clone
+# of ~/.lastdb and the rm -rf of that clone. Both scale with database size.
+# Timed end-to-end on the primary 2026-08-27, the smoke returned VERDICT: GREEN
+# in 751s: clone 283s, boot+identity+schemas+Board query 22s, teardown 445s.
+# A healthy candidate did not fit in 720s, so the gate reported a false RED on
+# 7 of its last 10 runs. 1800s is 2.4x the measured GREEN run and still sits
+# inside the routine's own timeout_min = 90 (5400s).
+# papercut-lastdb-local-smoke-gate-720s-budget-reports-false-red
+smoke_timeout_sec="${LASTDB_LOCAL_SMOKE_TIMEOUT_SEC:-1800}"
 
 timeout_bin="${LASTDB_LOCAL_SMOKE_TIMEOUT_BIN:-}"
 if [ -z "$timeout_bin" ]; then
