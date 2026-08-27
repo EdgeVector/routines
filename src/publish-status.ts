@@ -313,8 +313,9 @@ export async function publishFleetStatus(options: PublishStatusOptions = {}): Pr
 
   if (!options.dryRun) {
     const currentIds = new Set(preparedRows.map((row) => requiredField(row, "id")));
-    const retiredIds = await findRetiredRoutineIds(client, schemaHashes.fleetStatus, currentIds);
-    for (const id of retiredIds) {
+    const retiredRows = await findRetiredRoutineRows(client, schemaHashes.fleetStatus, currentIds);
+    for (const retired of retiredRows) {
+      const { id } = retired;
       const existing = await client.queryByKey({
         schemaHash: schemaHashes.status,
         keyHash: id,
@@ -329,6 +330,13 @@ export async function publishFleetStatus(options: PublishStatusOptions = {}): Pr
       await client.mutate({
         schemaHash: schemaHashes.status,
         keyHash: id,
+        fields: {},
+        mutationType: "delete",
+      });
+      await client.mutate({
+        schemaHash: schemaHashes.fleetStatus,
+        keyHash: retired.fleetBucket,
+        keyRange: retired.sk,
         fields: {},
         mutationType: "delete",
       });
@@ -398,25 +406,27 @@ export async function publishFleetStatus(options: PublishStatusOptions = {}): Pr
   };
 }
 
-async function findRetiredRoutineIds(
+async function findRetiredRoutineRows(
   client: LastDbPublisherClient,
   fleetStatusSchemaHash: string,
   currentIds: Set<string>,
-): Promise<string[]> {
-  const retired = new Set<string>();
+): Promise<Array<{ id: string; fleetBucket: string; sk: string }>> {
+  const retired = new Map<string, { id: string; fleetBucket: string; sk: string }>();
   for (let bucket = 0; bucket < FLEET_STATUS_BUCKET_COUNT; bucket += 1) {
+    const fleetBucket = fleetBucketKey(ROUTINES_FLEET_ID, bucket);
     const page = await client.queryByHash({
       schemaHash: fleetStatusSchemaHash,
-      keyHash: fleetBucketKey(ROUTINES_FLEET_ID, bucket),
-      fields: ["id"],
+      keyHash: fleetBucket,
+      fields: ["id", "sk"],
       maxRows: 100_000,
     });
     for (const item of page) {
       const id = item.fields.id;
-      if (id && !currentIds.has(id)) retired.add(id);
+      const sk = item.fields.sk || item.keyRange;
+      if (id && sk && !currentIds.has(id)) retired.set(id, { id, fleetBucket, sk });
     }
   }
-  return [...retired].sort();
+  return [...retired.values()].sort((a, b) => a.id.localeCompare(b.id));
 }
 
 export async function deliverFleetStatus(options: DeliverStatusOptions): Promise<DeliverStatusResult> {
