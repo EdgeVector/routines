@@ -88,13 +88,28 @@ export function plistOptionsForEntrypoint(opts: {
   env?: Record<string, string>;
 }): PlistOptions {
   if (opts.entrypoint.startsWith("/$bunfs/") || opts.entrypoint.startsWith("$bunfs/")) {
-    return { program: opts.execPath, direct: true, env: opts.env };
+    return { program: stableHostTrackExecutable(opts.execPath), direct: true, env: opts.env };
   }
   return {
     program: opts.entrypoint,
     runtime: opts.execPath,
     env: opts.env,
   };
+}
+
+/**
+ * Keep launchd on the stable host-track `current` link, not one version tree.
+ *
+ * A running daemon can outlive artifact pruning. If its plist names the old
+ * immutable version, KeepAlive cannot execute that missing path after a later
+ * SIGTERM. The app-specific current link always resolves to the active build.
+ */
+export function stableHostTrackExecutable(execPath: string): string {
+  const normalized = execPath.replace(/\\/g, "/");
+  return normalized.replace(
+    /(\/\.host-track\/apps\/routines)\/versions\/[0-9a-f]{64}\//,
+    "$1/current/",
+  );
 }
 
 export interface InstallResult {
@@ -111,28 +126,70 @@ export function writePlist(opts: PlistOptions): string {
   return p;
 }
 
+export type LaunchctlRunner = (args: string[]) => void;
+
+function systemLaunchctl(args: string[]): void {
+  execFileSync("launchctl", args, { stdio: "pipe" });
+}
+
+function daemonLoaded(uid: number, runLaunchctl: LaunchctlRunner): boolean {
+  try {
+    runLaunchctl(["print", `gui/${uid}/${LAUNCHD_LABEL}`]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Reload a daemon plist and recover if the first bootstrap loses the job. */
+export function reloadDaemonPlist(
+  p: string,
+  uid: number,
+  runLaunchctl: LaunchctlRunner = systemLaunchctl,
+): Pick<InstallResult, "loaded" | "message"> {
+  const domain = `gui/${uid}`;
+  const service = `${domain}/${LAUNCHD_LABEL}`;
+  try {
+    runLaunchctl(["bootout", service]);
+  } catch {
+    /* not loaded yet */
+  }
+
+  const errors: string[] = [];
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      runLaunchctl(["bootstrap", domain, p]);
+    } catch (err) {
+      errors.push(`bootstrap ${attempt}: ${(err as Error).message}`);
+    }
+    if (daemonLoaded(uid, runLaunchctl)) {
+      const recovered = attempt > 1 || errors.length > 0 ? " after retry" : "";
+      return { loaded: true, message: `bootstrapped ${service}${recovered}` };
+    }
+  }
+
+  // `load -w` is the compatibility recovery path for a failed modern
+  // bootstrap. Verify the service after it returns; command success alone is
+  // not enough because the original incident left the plist but lost the job.
+  try {
+    runLaunchctl(["load", "-w", p]);
+  } catch (err) {
+    errors.push(`load: ${(err as Error).message}`);
+  }
+  if (daemonLoaded(uid, runLaunchctl)) {
+    return { loaded: true, message: `loaded ${service} with compatibility recovery` };
+  }
+
+  return {
+    loaded: false,
+    message: `could not load ${service}: ${errors.join("; ") || "launchctl did not register the service"}`,
+  };
+}
+
 export function installDaemon(opts: PlistOptions): InstallResult {
   const p = writePlist(opts);
-  // Prefer modern `bootstrap`; fall back to legacy `load`.
   const uid = process.getuid?.() ?? 0;
-  try {
-    // Unload first so re-install is idempotent.
-    try {
-      execFileSync("launchctl", ["bootout", `gui/${uid}/${LAUNCHD_LABEL}`], { stdio: "ignore" });
-    } catch {
-      /* not loaded yet */
-    }
-    execFileSync("launchctl", ["bootstrap", `gui/${uid}`, p], { stdio: "pipe" });
-    return { plistPath: p, loaded: true, message: `bootstrapped gui/${uid}/${LAUNCHD_LABEL}` };
-  } catch (err) {
-    return {
-      plistPath: p,
-      loaded: false,
-      message:
-        `wrote plist but launchctl bootstrap failed: ${(err as Error).message}. ` +
-        `Load manually: launchctl bootstrap gui/${uid} ${p}`,
-    };
-  }
+  return { plistPath: p, ...reloadDaemonPlist(p, uid) };
 }
 
 export function uninstallDaemon(): InstallResult {
