@@ -10,6 +10,7 @@ import {
   newLastDbDeliveryClient,
   newLastDbPublisherClient,
   publishFleetStatus,
+  type SchemaDefinition,
   type LastDbDeliveryClient,
   type LastDbPublisherClient,
 } from "../src/publish-status.ts";
@@ -104,9 +105,50 @@ test("publishFleetStatus declares schemas and upserts snapshot, rows, and run su
     snapshot: "hash-RoutineFleetSnapshot",
     status: "hash-RoutineStatus",
     runSummary: "hash-RoutineRunSummary",
+    fleetStatus: "hash-FleetRoutineStatus",
+    fleetSummary: "hash-FleetSummary",
+    runSummaryV2: "hash-RoutineRunSummaryV2",
   });
   expect(result.written).toEqual({ snapshots: 1, rows: 1, runSummaries: 1 });
-  expect(client.declared).toEqual(["RoutineFleetSnapshot", "RoutineStatus", "RoutineRunSummary"]);
+  expect(client.declared.map((schema) => schema.name)).toEqual([
+    "RoutineFleetSnapshot",
+    "RoutineStatus",
+    "RoutineRunSummary",
+    "FleetRoutineStatus",
+    "FleetSummary",
+    "RoutineRunSummaryV2",
+  ]);
+  expect(client.declared[3]).toMatchObject({
+    schema_type: "HashRange",
+    key: { hash_field: "fleet_bucket", range_field: "sk" },
+    fields: expect.arrayContaining(["fleet_bucket", "sk", "id", "status", "group_id"]),
+  });
+  expect(client.declared[4]).toMatchObject({
+    schema_type: "Hash",
+    key: { hash_field: "fleet_id" },
+    fields: [
+      "fleet_id",
+      "captured_at",
+      "layout_version",
+      "bucket_count",
+      "row_count",
+      "active_count",
+      "paused_count",
+      "fenced_count",
+      "running_count",
+      "error_count",
+      "run_summary_count",
+      "situations_ok",
+      "situations_error",
+      "content_digest",
+    ],
+  });
+  expect(client.declared[4]!.fields).not.toContain("rows_json");
+  expect(client.declared[5]).toMatchObject({
+    schema_type: "HashRange",
+    key: { hash_field: "id", range_field: "stamp" },
+  });
+  expect(client.declared[5]!.fields).not.toContain("slug");
   expect(client.writes.map((w) => [w.schemaHash, w.keyHash, w.mutationType])).toEqual([
     ["hash-RoutineFleetSnapshot", "fleet-latest", "create"],
     ["hash-RoutineStatus", "alpha", "create"],
@@ -120,6 +162,9 @@ test("buildDeliveryStageRequest targets snapshot plus capped routine status rows
       snapshot: "hash-RoutineFleetSnapshot",
       status: "hash-RoutineStatus",
       runSummary: "hash-RoutineRunSummary",
+      fleetStatus: "hash-FleetRoutineStatus",
+      fleetSummary: "hash-FleetSummary",
+      runSummaryV2: "hash-RoutineRunSummaryV2",
     },
     recipient: {
       recipientPubkey: "recipient-ed25519",
@@ -203,6 +248,42 @@ test("LastDB publisher identifies socket requests and preserves auth and JSON he
   expect(queryHeaders.get("Content-Type")).toBe("application/json");
 });
 
+test("LastDB publisher sends exact HashRange query and mutation keys", async () => {
+  const socketPath = join(home, "lastdb.sock");
+  writeFileSync(socketPath, "");
+  const requests: Array<{ url: string; init: RequestInit & { unix?: string } }> = [];
+  const client = newLastDbPublisherClient({
+    socketPath,
+    fetchImpl: async (input, init = {}) => {
+      requests.push({ url: String(input), init });
+      if (String(input).endsWith("/api/system/auto-identity")) return Response.json({ user_hash: "user-1" });
+      return Response.json({ results: [] });
+    },
+  });
+
+  await client.autoIdentity();
+  await client.queryByKey({
+    schemaHash: "schema-1",
+    keyHash: "fleet-07",
+    keyRange: "active#group-a#alpha",
+    fields: ["id"],
+  });
+  await client.mutate({
+    schemaHash: "schema-1",
+    keyHash: "fleet-07",
+    keyRange: "active#group-a#alpha",
+    fields: { id: "alpha" },
+    mutationType: "create",
+  });
+
+  expect(JSON.parse(String(requests[1]!.init.body))).toMatchObject({
+    filter: { HashRangeKey: { hash: "fleet-07", range: "active#group-a#alpha" } },
+  });
+  expect(JSON.parse(String(requests[2]!.init.body))).toMatchObject({
+    key_value: { hash: "fleet-07", range: "active#group-a#alpha" },
+  });
+});
+
 test("LastDB delivery identifies explicit loopback requests", async () => {
   const requests: Array<{ url: string; init: RequestInit & { unix?: string } }> = [];
   const client = newLastDbDeliveryClient({
@@ -240,7 +321,7 @@ test("LastDB delivery identifies explicit loopback requests", async () => {
 });
 
 class FakeClient implements LastDbPublisherClient {
-  declared: string[] = [];
+  declared: SchemaDefinition[] = [];
   writes: Array<{ schemaHash: string; keyHash: string; mutationType: "create" | "update" }> = [];
 
   async autoIdentity(): Promise<{ userHash: string }> {
@@ -249,9 +330,9 @@ class FakeClient implements LastDbPublisherClient {
 
   async declareAppSchema(
     _appId: string,
-    schema: { name: string },
+    schema: SchemaDefinition,
   ): Promise<{ canonical: string; schemaName: string }> {
-    this.declared.push(schema.name);
+    this.declared.push(schema);
     return { canonical: `hash-${schema.name}`, schemaName: `routines/${schema.name}` };
   }
 
