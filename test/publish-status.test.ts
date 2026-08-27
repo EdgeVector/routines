@@ -265,7 +265,7 @@ test("publication deletes routines that left the registry before advancing the s
   expect(client.writes.at(-1)?.schemaHash).toBe("hash-FleetSummary");
 });
 
-test("status move lets protein rekey remove the old fleet sort key", async () => {
+test("status move deletes the old fleet sort key directly", async () => {
   const client = new FakeClient();
   await publishFleetStatus({ client, now: new Date("2026-07-15T02:00:00.000Z"), runLimit: 1 });
   const before = client.record("hash-RoutineStatus", "alpha")!;
@@ -285,10 +285,36 @@ test("status move lets protein rekey remove the old fleet sort key", async () =>
   const after = client.record("hash-RoutineStatus", "alpha")!;
 
   expect(result.written.rows).toBe(1);
-  expect(client.writes.some((write) => write.schemaHash === "hash-FleetRoutineStatus")).toBe(false);
+  expect(result.written.deletedStatusRows).toBe(1);
+  expect(client.writes).toContainEqual({
+    schemaHash: "hash-FleetRoutineStatus",
+    keyHash: before.fleet_bucket!,
+    keyRange: before.sk!,
+    fields: {},
+    mutationType: "delete",
+  });
   expect(client.record("hash-FleetRoutineStatus", before.fleet_bucket!, before.sk!)).toBeNull();
   expect(after.sk).toBe("paused#other#alpha");
   expect(client.record("hash-FleetRoutineStatus", after.fleet_bucket!, after.sk!)).toMatchObject({ status: "paused" });
+});
+
+test("publication deletes an obsolete fleet address for a current routine", async () => {
+  const client = new FakeClient();
+  await publishFleetStatus({ client, now: new Date("2026-07-15T02:00:00.000Z"), runLimit: 1 });
+  const current = client.record("hash-RoutineStatus", "alpha")!;
+  const staleSk = "paused#other#alpha";
+  client.seed("hash-FleetRoutineStatus", current.fleet_bucket!, staleSk, {
+    ...current,
+    status: "paused",
+    sk: staleSk,
+  });
+
+  const result = await publishFleetStatus({ client, now: new Date("2026-07-15T03:00:00.000Z"), runLimit: 1 });
+
+  expect(result.written.deletedStatusRows).toBe(1);
+  expect(client.record("hash-RoutineStatus", "alpha")).toMatchObject({ status: "active" });
+  expect(client.record("hash-FleetRoutineStatus", current.fleet_bucket!, current.sk!)).toMatchObject({ status: "active" });
+  expect(client.record("hash-FleetRoutineStatus", current.fleet_bucket!, staleSk)).toBeNull();
 });
 
 test("retention deletes only old exact keys in one routine partition", async () => {

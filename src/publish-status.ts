@@ -312,31 +312,35 @@ export async function publishFleetStatus(options: PublishStatusOptions = {}): Pr
   };
 
   if (!options.dryRun) {
-    const currentIds = new Set(preparedRows.map((row) => requiredField(row, "id")));
-    const retiredRows = await findRetiredRoutineRows(client, schemaHashes.fleetStatus, currentIds);
-    for (const retired of retiredRows) {
-      const { id } = retired;
-      const existing = await client.queryByKey({
-        schemaHash: schemaHashes.status,
-        keyHash: id,
-        fields: ["id"],
-      });
-      if (!existing) {
-        throw new LastDbPublishError(
-          "retired_fleet_row_without_primary",
-          `FleetRoutineStatus contains retired routine ${id}, but RoutineStatus has no exact primary row.`,
-        );
+    const currentAddresses = new Map(preparedRows.map((row) => [
+      requiredField(row, "id"),
+      {
+        fleetBucket: requiredField(row, "fleet_bucket"),
+        sk: requiredField(row, "sk"),
+      },
+    ]));
+    const staleRows = await findStaleRoutineRows(client, schemaHashes.fleetStatus, currentAddresses);
+    for (const stale of staleRows) {
+      const { id } = stale;
+      if (!currentAddresses.has(id)) {
+        const existing = await client.queryByKey({
+          schemaHash: schemaHashes.status,
+          keyHash: id,
+          fields: ["id"],
+        });
+        if (existing) {
+          await client.mutate({
+            schemaHash: schemaHashes.status,
+            keyHash: id,
+            fields: {},
+            mutationType: "delete",
+          });
+        }
       }
       await client.mutate({
-        schemaHash: schemaHashes.status,
-        keyHash: id,
-        fields: {},
-        mutationType: "delete",
-      });
-      await client.mutate({
         schemaHash: schemaHashes.fleetStatus,
-        keyHash: retired.fleetBucket,
-        keyRange: retired.sk,
+        keyHash: stale.fleetBucket,
+        keyRange: stale.sk,
         fields: {},
         mutationType: "delete",
       });
@@ -406,12 +410,12 @@ export async function publishFleetStatus(options: PublishStatusOptions = {}): Pr
   };
 }
 
-async function findRetiredRoutineRows(
+async function findStaleRoutineRows(
   client: LastDbPublisherClient,
   fleetStatusSchemaHash: string,
-  currentIds: Set<string>,
+  currentAddresses: Map<string, { fleetBucket: string; sk: string }>,
 ): Promise<Array<{ id: string; fleetBucket: string; sk: string }>> {
-  const retired = new Map<string, { id: string; fleetBucket: string; sk: string }>();
+  const stale = new Map<string, { id: string; fleetBucket: string; sk: string }>();
   for (let bucket = 0; bucket < FLEET_STATUS_BUCKET_COUNT; bucket += 1) {
     const fleetBucket = fleetBucketKey(ROUTINES_FLEET_ID, bucket);
     const page = await client.queryByHash({
@@ -423,10 +427,16 @@ async function findRetiredRoutineRows(
     for (const item of page) {
       const id = item.fields.id;
       const sk = item.fields.sk || item.keyRange;
-      if (id && sk && !currentIds.has(id)) retired.set(id, { id, fleetBucket, sk });
+      if (!id || !sk) continue;
+      const current = currentAddresses.get(id);
+      if (!current || current.fleetBucket !== fleetBucket || current.sk !== sk) {
+        stale.set(`${fleetBucket}\0${sk}`, { id, fleetBucket, sk });
+      }
     }
   }
-  return [...retired.values()].sort((a, b) => a.id.localeCompare(b.id));
+  return [...stale.values()].sort((a, b) =>
+    a.id.localeCompare(b.id) || a.fleetBucket.localeCompare(b.fleetBucket) || a.sk.localeCompare(b.sk)
+  );
 }
 
 export async function deliverFleetStatus(options: DeliverStatusOptions): Promise<DeliverStatusResult> {
