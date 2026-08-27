@@ -167,6 +167,7 @@ routines route <id> --harness codex --model gpt-5.5
 routines route <id> --harness grok --model grok-4.5
 routines logs <id>            # recent runs (--path, --tail, --json)
 routines publish-status       # publish slim fleet status + recent run summaries to LastDB
+routines read-status          # read and validate the bounded fleet view
 routines deliver-status       # publish + stage/admin-approve a fleet-status delivery
 routines hygiene              # mechanical cleanup (prune runs/memory, daemon check, publish)
 routines hygiene --dry-run    # report only
@@ -226,13 +227,14 @@ The JSON API (for scripting): `GET /api/routines`, `GET /api/routines/<id>/runs`
 
 ## LastDB fleet status publish
 
-`routines publish-status` writes a slim, admin-deliverable fleet snapshot to the
-local LastDB Mini socket. It reuses `collectStatus()` and `listRuns()`, declares
-the app-owned schemas on first run, and upserts:
+`routines publish-status` writes a bounded fleet view to the local LastDB Mini
+socket. It reuses `collectStatus()` and `listRuns()`, declares the app-owned
+schemas on first run, and writes:
 
-- `routines/RoutineFleetSnapshot` key `fleet-latest`
-- `routines/RoutineStatus` key `<routine id>`
-- `routines/RoutineRunSummary` key `<routine id>/<run stamp>`
+- `routines/RoutineStatus` key `<routine id>`, only when its content changes
+- `routines/FleetRoutineStatus` in 16 stable hash buckets through protein fold
+- `routines/RoutineRunSummaryV2` key `<routine id>, <run stamp>`, once per run
+- `routines/FleetSummary` key `routines`, last as the publication marker
 
 The publisher intentionally excludes prompts and full logs. Recent run evidence
 is capped (`--tail-bytes`, default 2048) and common secret-looking assignments
@@ -242,16 +244,23 @@ are redacted before write.
 routines publish-status --json
 routines publish-status --runs 5 --tail-bytes 2048
 routines publish-status --dry-run --json
+routines publish-status --clear-legacy-snapshot
+routines read-status --json
 ```
 
 ## Admin fleet status deliver
 
-`routines deliver-status` dogfoods LastDB Mini deliver for the routines fleet
-slice. It first runs the same publisher as `routines publish-status`, then
-stages a `lastdb.slice.v1` delivery with two legs:
+`routines deliver-status` uses the bounded view by default. It validates the
+`FleetSummary` marker against all 16 bucket pages, then stages a
+`lastdb.slice.v1` delivery with two legs:
 
-- `routines/RoutineFleetSnapshot` key `fleet-latest`
-- a capped `routines/RoutineStatus` sample (`--max-records`, default 20)
+- `routines/FleetSummary` key `routines`
+- the 16 `routines/FleetRoutineStatus` bucket keys
+
+A rollback read needs both `--legacy-view` and an ISO deadline in
+`ROUTINES_FLEET_LEGACY_READ_UNTIL`. The deadline must be within seven days.
+Remove this path after the live bounded-view proof and the legacy snapshot
+clear. The normal publisher never writes `RoutineFleetSnapshot`.
 
 Recipient keys are operational inputs, not repository config. Pass them as
 flags or environment variables; do not commit them:

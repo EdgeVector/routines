@@ -67,6 +67,7 @@ export interface DeliverStatusOptions extends PublishStatusOptions {
   maxRecords?: number;
   approve?: boolean;
   boundedView?: boolean;
+  legacyView?: boolean;
   deliveryClient?: LastDbDeliveryClient;
 }
 
@@ -87,6 +88,16 @@ export interface ReadFleetStatusOptions {
   client?: LastDbPublisherClient;
   schemaHashes?: Record<SchemaKey, string>;
   maxAttempts?: number;
+}
+
+export interface LegacyFleetReadResult {
+  snapshot: FieldMap;
+  rows: FieldMap[];
+}
+
+export interface LegacySnapshotOptions {
+  client?: LastDbPublisherClient;
+  schemaHashes?: Record<SchemaKey, string>;
 }
 
 export interface DeliveryStageRequest {
@@ -299,8 +310,6 @@ export async function publishFleetStatus(options: PublishStatusOptions = {}): Pr
   };
 
   if (!options.dryRun) {
-    await upsert(client, schemaHashes.snapshot, requiredField(publication.snapshot, "slug"), publication.snapshot, [...SNAPSHOT_FIELDS]);
-    written.snapshots = 1;
     for (const prepared of preparedRows) {
       const existing = await client.queryByKey({
         schemaHash: schemaHashes.status,
@@ -318,19 +327,23 @@ export async function publishFleetStatus(options: PublishStatusOptions = {}): Pr
       written.fleetRows += 1;
     }
     for (const run of publication.runSummaries) {
+      const id = requiredField(run, "id");
+      const stamp = requiredField(run, "stamp");
       const existing = await client.queryByKey({
-        schemaHash: schemaHashes.runSummary,
-        keyHash: requiredField(run, "slug"),
-        fields: [...RUN_SUMMARY_FIELDS],
+        schemaHash: schemaHashes.runSummaryV2,
+        keyHash: id,
+        keyRange: stamp,
+        fields: [...RUN_SUMMARY_V2_FIELDS],
       });
       if (!existing) {
+        const fields = Object.fromEntries(RUN_SUMMARY_V2_FIELDS.map((field) => [field, run[field] ?? ""]));
         await client.mutate({
-          schemaHash: schemaHashes.runSummary,
-          keyHash: requiredField(run, "slug"),
-          fields: run,
+          schemaHash: schemaHashes.runSummaryV2,
+          keyHash: id,
+          keyRange: stamp,
+          fields,
           mutationType: "create",
         });
-        written.runSummaries += 1;
         written.runSummariesV2 += 1;
       }
     }
@@ -364,16 +377,21 @@ export async function publishFleetStatus(options: PublishStatusOptions = {}): Pr
 export async function deliverFleetStatus(options: DeliverStatusOptions): Promise<DeliverStatusResult> {
   const publisherClient = options.client ?? newLastDbPublisherClient();
   const publication = await publishFleetStatus({ ...options, client: publisherClient });
-  const boundedView = options.boundedView && !options.dryRun
+  const useLegacyView = options.legacyView === true;
+  if (useLegacyView) assertLegacyReadWindow(options.now ?? new Date());
+  const boundedView = !useLegacyView && !options.dryRun
     ? await readFleetStatus({ client: publisherClient, schemaHashes: publication.schemaHashes })
     : null;
-  const deliveryRequest = options.boundedView
-    ? buildBoundedDeliveryStageRequest({
+  if (useLegacyView && !options.dryRun) {
+    await readLegacyFleetStatus({ client: publisherClient, schemaHashes: publication.schemaHashes });
+  }
+  const deliveryRequest = useLegacyView
+    ? buildDeliveryStageRequest({
         schemaHashes: publication.schemaHashes,
         recipient: options.recipient,
         maxRecords: options.maxRecords,
       })
-    : buildDeliveryStageRequest({
+    : buildBoundedDeliveryStageRequest({
         schemaHashes: publication.schemaHashes,
         recipient: options.recipient,
         maxRecords: options.maxRecords,
@@ -454,6 +472,59 @@ export async function readFleetStatus(options: ReadFleetStatusOptions = {}): Pro
     };
   }
   throw new LastDbPublishError("fleet_view_inconsistent", `Bounded fleet view did not converge: ${lastReason}.`);
+}
+
+export async function readLegacyFleetStatus(options: LegacySnapshotOptions = {}): Promise<LegacyFleetReadResult> {
+  const client = options.client ?? newLastDbPublisherClient();
+  const schemaHashes = options.schemaHashes ?? await declareSchemas(client);
+  const snapshot = await client.queryByKey({
+    schemaHash: schemaHashes.snapshot,
+    keyHash: "fleet-latest",
+    fields: [...SNAPSHOT_FIELDS],
+  });
+  if (!snapshot) throw new LastDbPublishError("legacy_fleet_missing", "Legacy fleet snapshot is missing.");
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(snapshot.rows_json ?? "");
+  } catch {
+    throw new LastDbPublishError("legacy_fleet_invalid", "Legacy fleet snapshot rows_json is invalid.");
+  }
+  if (!Array.isArray(parsed) || parsed.some((row) => !row || typeof row !== "object" || Array.isArray(row))) {
+    throw new LastDbPublishError("legacy_fleet_invalid", "Legacy fleet snapshot rows_json is not a row array.");
+  }
+  return { snapshot, rows: parsed as FieldMap[] };
+}
+
+export async function clearLegacyFleetSnapshot(options: LegacySnapshotOptions = {}): Promise<boolean> {
+  const client = options.client ?? newLastDbPublisherClient();
+  const schemaHashes = options.schemaHashes ?? await declareSchemas(client);
+  const existing = await client.queryByKey({
+    schemaHash: schemaHashes.snapshot,
+    keyHash: "fleet-latest",
+    fields: [...SNAPSHOT_FIELDS],
+  });
+  if (!existing || !existing.rows_json) return false;
+  const fields = Object.fromEntries(SNAPSHOT_FIELDS.map((field) => [field, existing[field] ?? ""]));
+  fields.rows_json = "";
+  await client.mutate({
+    schemaHash: schemaHashes.snapshot,
+    keyHash: "fleet-latest",
+    fields,
+    mutationType: "update",
+  });
+  return true;
+}
+
+function assertLegacyReadWindow(now: Date): void {
+  const raw = process.env.ROUTINES_FLEET_LEGACY_READ_UNTIL ?? "";
+  const deadline = Date.parse(raw);
+  const maxWindowMs = 7 * 24 * 60 * 60 * 1000;
+  if (!Number.isFinite(deadline) || deadline <= now.getTime() || deadline - now.getTime() > maxWindowMs) {
+    throw new LastDbPublishError(
+      "legacy_read_window_closed",
+      "Legacy fleet reads require ROUTINES_FLEET_LEGACY_READ_UNTIL within the next seven days.",
+    );
+  }
 }
 
 /** Snapshot fields safe for the ~64KB sealed-message cap. Exclude rows_json —

@@ -48,7 +48,7 @@ import { registryDir, routinesHome, runsDir } from "./paths.ts";
 import { runRoutine } from "./runner.ts";
 import { startServer } from "./server.ts";
 import { loadProjectConfig } from "./project-config.ts";
-import { deliverFleetStatus, publishFleetStatus, type DeliveryRecipient } from "./publish-status.ts";
+import { clearLegacyFleetSnapshot, deliverFleetStatus, publishFleetStatus, readFleetStatus, type DeliveryRecipient } from "./publish-status.ts";
 import { initRoutinesSentry } from "./observability.ts";
 import { runCapacityControllerTick } from "./capacity-runtime.ts";
 import { resolveProbePath } from "./probes.ts";
@@ -68,6 +68,7 @@ Commands:
   logs <id>                   show recent runs for a routine (--json, --path, --tail)
   probe-path <id>              print the installed path for a versioned probe harness
   publish-status              write slim fleet status records to LastDB (--json)
+  read-status                 read and validate the bounded fleet view (--json)
   deliver-status              publish + stage a fleet-status delivery; --approve sends it
   hygiene                     mechanical cleanup (prune runs/memory, daemon check,
                               publish-status). No LLM. See --help notes below.
@@ -97,6 +98,9 @@ Environment:
   ROUTINES_GEMINI_BIN         agy binary override when explicitly allowed
   ROUTINES_FSITUATIONS_BIN    fsituations binary (default: fsituations)
   ROUTINES_FBRAIN_BIN         fbrain binary for heartbeats (default: fbrain)
+  ROUTINES_FLEET_LEGACY_READ_UNTIL
+                              temporary ISO deadline for deliver-status --legacy-view;
+                              must be within seven days
 
 Import:
   --force                     refresh existing registry files
@@ -153,6 +157,8 @@ async function main(argv: string[]): Promise<number> {
       return cmdProbePath(rest);
     case "publish-status":
       return await cmdPublishStatus(rest);
+    case "read-status":
+      return await cmdReadStatus(rest);
     case "deliver-status":
       return await cmdDeliverStatus(rest);
     case "hygiene":
@@ -459,6 +465,7 @@ async function cmdPublishStatus(rest: string[]): Promise<number> {
       "dry-run": { type: "boolean" },
       runs: { type: "string" },
       "tail-bytes": { type: "string" },
+      "clear-legacy-snapshot": { type: "boolean" },
     },
     allowPositionals: true,
   });
@@ -472,14 +479,21 @@ async function cmdPublishStatus(rest: string[]): Promise<number> {
     console.error(`invalid --tail-bytes ${values["tail-bytes"]}`);
     return 2;
   }
+  if (values["dry-run"] && values["clear-legacy-snapshot"]) {
+    console.error("--clear-legacy-snapshot cannot be used with --dry-run");
+    return 2;
+  }
 
   const result = await publishFleetStatus({
     dryRun: values["dry-run"] === true,
     runLimit,
     logTailBytes,
   });
+  const legacySnapshotCleared = values["clear-legacy-snapshot"] === true
+    ? await clearLegacyFleetSnapshot()
+    : false;
   if (values.json) {
-    console.log(JSON.stringify(result, null, 2));
+    console.log(JSON.stringify({ ...result, legacySnapshotCleared }, null, 2));
     return 0;
   }
   const action = result.dryRun ? "DRY-RUN" : "PUBLISHED";
@@ -488,6 +502,24 @@ async function cmdPublishStatus(rest: string[]): Promise<number> {
   );
   console.log(
     `schemas snapshot=${result.schemaHashes.snapshot} status=${result.schemaHashes.status} run_summary=${result.schemaHashes.runSummary}`,
+  );
+  if (values["clear-legacy-snapshot"]) console.log(`legacy_snapshot_cleared=${legacySnapshotCleared}`);
+  return 0;
+}
+
+async function cmdReadStatus(rest: string[]): Promise<number> {
+  const { values } = parseArgs({
+    args: rest,
+    options: { json: { type: "boolean" } },
+    allowPositionals: false,
+  });
+  const result = await readFleetStatus();
+  if (values.json) {
+    console.log(JSON.stringify(result, null, 2));
+    return 0;
+  }
+  console.log(
+    `READ routines fleet status captured_at=${result.summary.captured_at} rows=${result.rows.length} attempts=${result.attempts}`,
   );
   return 0;
 }
@@ -500,6 +532,7 @@ async function cmdDeliverStatus(rest: string[]): Promise<number> {
       "dry-run": { type: "boolean" },
       approve: { type: "boolean" },
       "bounded-view": { type: "boolean" },
+      "legacy-view": { type: "boolean" },
       runs: { type: "string" },
       "tail-bytes": { type: "string" },
       "max-records": { type: "string" },
@@ -543,6 +576,7 @@ async function cmdDeliverStatus(rest: string[]): Promise<number> {
     logTailBytes,
     maxRecords,
     boundedView: values["bounded-view"] === true,
+    legacyView: values["legacy-view"] === true,
   });
   if (values.json) {
     console.log(JSON.stringify(result, null, 2));

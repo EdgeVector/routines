@@ -7,6 +7,7 @@ import {
   buildDeliveryStageRequest,
   buildBoundedDeliveryStageRequest,
   buildFleetPublication,
+  clearLegacyFleetSnapshot,
   deliverFleetStatus,
   fleetStatusBucket,
   newLastDbDeliveryClient,
@@ -73,6 +74,7 @@ afterEach(() => {
   rmSync(binDir, { recursive: true, force: true });
   delete process.env.ROUTINES_HOME;
   delete process.env.ROUTINES_SITUATIONS_CLI;
+  delete process.env.ROUTINES_FLEET_LEGACY_READ_UNTIL;
 });
 
 test("buildFleetPublication emits slim rows and capped redacted run summaries", () => {
@@ -96,7 +98,7 @@ test("buildFleetPublication emits slim rows and capped redacted run summaries", 
   expect(pub.snapshot.rows_json).not.toContain("do not publish this prompt");
 });
 
-test("publishFleetStatus declares schemas and upserts snapshot, rows, and run summaries", async () => {
+test("publishFleetStatus declares schemas and writes only bounded fleet records", async () => {
   const client = new FakeClient();
   const result = await publishFleetStatus({
     client,
@@ -113,9 +115,9 @@ test("publishFleetStatus declares schemas and upserts snapshot, rows, and run su
     runSummaryV2: "hash-RoutineRunSummaryV2",
   });
   expect(result.written).toEqual({
-    snapshots: 1,
+    snapshots: 0,
     rows: 1,
-    runSummaries: 1,
+    runSummaries: 0,
     fleetRows: 1,
     runSummariesV2: 1,
     deletedRunSummariesV2: 0,
@@ -161,9 +163,8 @@ test("publishFleetStatus declares schemas and upserts snapshot, rows, and run su
   });
   expect(client.declared[5]!.fields).not.toContain("slug");
   expect(client.writes.map((w) => [w.schemaHash, w.keyHash, w.mutationType])).toEqual([
-    ["hash-RoutineFleetSnapshot", "fleet-latest", "create"],
     ["hash-RoutineStatus", "alpha", "create"],
-    ["hash-RoutineRunSummary", "alpha/20260715T010203Z", "create"],
+    ["hash-RoutineRunSummaryV2", "alpha", "create"],
     ["hash-FleetSummary", "routines", "create"],
   ]);
   const status = client.record("hash-RoutineStatus", "alpha");
@@ -177,7 +178,7 @@ test("publishFleetStatus declares schemas and upserts snapshot, rows, and run su
 
 test("FleetSummary is the last write and a failed row pass does not advance it", async () => {
   const client = new FakeClient();
-  client.failSchemaHash = "hash-RoutineRunSummary";
+  client.failSchemaHash = "hash-RoutineRunSummaryV2";
 
   await expect(publishFleetStatus({
     client,
@@ -186,7 +187,7 @@ test("FleetSummary is the last write and a failed row pass does not advance it",
   })).rejects.toThrow("forced mutation failure");
 
   expect(client.record("hash-FleetSummary", "routines")).toBeNull();
-  expect(client.writes.at(-1)?.schemaHash).toBe("hash-RoutineRunSummary");
+  expect(client.writes.at(-1)?.schemaHash).toBe("hash-RoutineRunSummaryV2");
 });
 
 test("bounded reader validates FleetSummary against all fixed bucket pages", async () => {
@@ -227,6 +228,10 @@ test("unchanged publication skips primary status and V2 run writes", async () =>
   expect(result.written.rows).toBe(0);
   expect(result.written.fleetRows).toBe(0);
   expect(result.written.runSummariesV2).toBe(0);
+  expect(result.written.snapshots).toBe(0);
+  expect(result.written.runSummaries).toBe(0);
+  expect(client.writes.some((write) => write.schemaHash === "hash-RoutineFleetSnapshot")).toBe(false);
+  expect(client.writes.some((write) => write.schemaHash === "hash-RoutineRunSummary")).toBe(false);
   expect(writes.some((write) => write.schemaHash === "hash-RoutineStatus")).toBe(false);
   expect(writes.some((write) => write.schemaHash === "hash-RoutineRunSummaryV2" && write.mutationType !== "delete")).toBe(false);
 });
@@ -371,6 +376,68 @@ test("deliverFleetStatus publishes, stages, and optionally approves", async () =
   expect(delivery.approvedIds).toEqual(["delivery-1"]);
   expect(result.staged?.deliveryId).toBe("delivery-1");
   expect(result.approved?.shared).toBe(2);
+  expect(result.boundedView?.rows).toHaveLength(1);
+  expect(delivery.stagedRequests[0]!.legs.map((leg) => leg.schema_name)).toEqual([
+    "hash-FleetSummary",
+    "hash-FleetRoutineStatus",
+  ]);
+});
+
+test("deliverFleetStatus permits the legacy view only inside the rollback window", async () => {
+  const publisher = new FakeClient();
+  publisher.seed("hash-RoutineFleetSnapshot", "fleet-latest", undefined, {
+    slug: "fleet-latest",
+    rows_json: JSON.stringify([{ id: "alpha" }]),
+  });
+  process.env.ROUTINES_FLEET_LEGACY_READ_UNTIL = "2026-07-16T00:00:00.000Z";
+  const delivery = new FakeDeliveryClient();
+
+  const result = await deliverFleetStatus({
+    client: publisher,
+    deliveryClient: delivery,
+    legacyView: true,
+    now: new Date("2026-07-15T02:00:00.000Z"),
+    recipient: {
+      recipientPubkey: "recipient-ed25519",
+      messagingPublicKey: "messaging-x25519",
+      messagingPseudonym: "00000000-0000-0000-0000-000000000001",
+    },
+  });
+
+  expect(result.boundedView).toBeNull();
+  expect(delivery.stagedRequests[0]!.legs.map((leg) => leg.schema_name)).toEqual([
+    "hash-RoutineFleetSnapshot",
+    "hash-RoutineStatus",
+  ]);
+});
+
+test("deliverFleetStatus rejects an expired legacy rollback window", async () => {
+  process.env.ROUTINES_FLEET_LEGACY_READ_UNTIL = "2026-07-15T01:00:00.000Z";
+  await expect(deliverFleetStatus({
+    client: new FakeClient(),
+    deliveryClient: new FakeDeliveryClient(),
+    legacyView: true,
+    now: new Date("2026-07-15T02:00:00.000Z"),
+    recipient: {
+      recipientPubkey: "recipient-ed25519",
+      messagingPublicKey: "messaging-x25519",
+      messagingPseudonym: "00000000-0000-0000-0000-000000000001",
+    },
+  })).rejects.toThrow("ROUTINES_FLEET_LEGACY_READ_UNTIL");
+});
+
+test("clearLegacyFleetSnapshot clears the point row once", async () => {
+  const client = new FakeClient();
+  client.seed("hash-RoutineFleetSnapshot", "fleet-latest", undefined, {
+    slug: "fleet-latest",
+    rows_json: "large legacy value",
+  });
+
+  expect(await clearLegacyFleetSnapshot({ client, schemaHashes: schemaHashes() })).toBe(true);
+  expect(client.record("hash-RoutineFleetSnapshot", "fleet-latest")?.rows_json).toBe("");
+  const writeCount = client.writes.length;
+  expect(await clearLegacyFleetSnapshot({ client, schemaHashes: schemaHashes() })).toBe(false);
+  expect(client.writes).toHaveLength(writeCount);
 });
 
 test("deliverFleetStatus can validate and stage the bounded view", async () => {
