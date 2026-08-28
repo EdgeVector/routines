@@ -74,8 +74,11 @@ export interface DeliverStatusOptions extends PublishStatusOptions {
 
 export interface DeliverStatusResult extends PublishStatusResult {
   deliveryRequest: DeliveryStageRequest;
+  deliveryRequests: DeliveryStageRequest[];
   staged: DeliveryStageResult | null;
+  stagedPages: DeliveryStageResult[];
   approved: DeliveryApproveResult | null;
+  approvedPages: DeliveryApproveResult[];
   boundedView: FleetReadResult | null;
 }
 
@@ -450,26 +453,50 @@ export async function deliverFleetStatus(options: DeliverStatusOptions): Promise
   if (useLegacyView && !options.dryRun) {
     await readLegacyFleetStatus({ client: publisherClient, schemaHashes: publication.schemaHashes });
   }
-  const deliveryRequest = useLegacyView
-    ? buildDeliveryStageRequest({
+  const deliveryRequests = useLegacyView
+    ? [buildDeliveryStageRequest({
         schemaHashes: publication.schemaHashes,
         recipient: options.recipient,
         maxRecords: options.maxRecords,
-      })
-    : buildBoundedDeliveryStageRequest({
+      })]
+    : buildBoundedDeliveryStageRequests({
         schemaHashes: publication.schemaHashes,
         recipient: options.recipient,
         maxRecords: options.maxRecords,
       });
+  const deliveryRequest = deliveryRequests[0]!;
 
   if (options.dryRun) {
-    return { ...publication, deliveryRequest, staged: null, approved: null, boundedView };
+    return {
+      ...publication,
+      deliveryRequest,
+      deliveryRequests,
+      staged: null,
+      stagedPages: [],
+      approved: null,
+      approvedPages: [],
+      boundedView,
+    };
   }
 
   const client = options.deliveryClient ?? newLastDbDeliveryClient();
-  const staged = await client.stageDelivery(deliveryRequest);
-  const approved = options.approve ? await client.approveDelivery(staged.deliveryId) : null;
-  return { ...publication, deliveryRequest, staged, approved, boundedView };
+  const stagedPages: DeliveryStageResult[] = [];
+  const approvedPages: DeliveryApproveResult[] = [];
+  for (const request of deliveryRequests) {
+    const page = await client.stageDelivery(request);
+    stagedPages.push(page);
+    if (options.approve) approvedPages.push(await client.approveDelivery(page.deliveryId));
+  }
+  return {
+    ...publication,
+    deliveryRequest,
+    deliveryRequests,
+    staged: stagedPages[0] ?? null,
+    stagedPages,
+    approved: approvedPages[0] ?? null,
+    approvedPages,
+    boundedView,
+  };
 }
 
 export async function readFleetStatus(options: ReadFleetStatusOptions = {}): Promise<FleetReadResult> {
@@ -654,7 +681,26 @@ export function buildBoundedDeliveryStageRequest(opts: {
   recipient: DeliveryRecipient;
   maxRecords?: number;
 }): DeliveryStageRequest {
-  return {
+  return buildBoundedDeliveryStageRequests(opts)[0]!;
+}
+
+const FLEET_DELIVERY_BUCKETS_PER_PAGE = 4;
+
+/** Deliver fixed bucket groups as separate sealed slices. One full-fleet slice
+ * exceeds the server's 64 KiB seal limit even though the storage reads are
+ * bounded. Four buckets per slice keeps the current 72-row fleet well below
+ * the limit without dropping a routine. */
+export function buildBoundedDeliveryStageRequests(opts: {
+  schemaHashes: Record<SchemaKey, string>;
+  recipient: DeliveryRecipient;
+  maxRecords?: number;
+}): DeliveryStageRequest[] {
+  const bucketKeys = Array.from({ length: FLEET_STATUS_BUCKET_COUNT }, (_, bucket) =>
+    fleetBucketKey(ROUTINES_FLEET_ID, bucket),
+  );
+  const pages: DeliveryStageRequest[] = [];
+  for (let offset = 0; offset < bucketKeys.length; offset += FLEET_DELIVERY_BUCKETS_PER_PAGE) {
+    pages.push({
     recipient_pubkey: opts.recipient.recipientPubkey,
     ...(opts.recipient.recipientDisplayName ? { recipient_display_name: opts.recipient.recipientDisplayName } : {}),
     messaging_public_key: opts.recipient.messagingPublicKey,
@@ -670,12 +716,12 @@ export function buildBoundedDeliveryStageRequest(opts: {
       {
         schema_name: opts.schemaHashes.fleetStatus,
         fields: [...BOUNDED_STATUS_DELIVER_FIELDS],
-        hash_keys: Array.from({ length: FLEET_STATUS_BUCKET_COUNT }, (_, bucket) =>
-          fleetBucketKey(ROUTINES_FLEET_ID, bucket),
-        ),
+        hash_keys: bucketKeys.slice(offset, offset + FLEET_DELIVERY_BUCKETS_PER_PAGE),
       },
     ],
-  };
+    });
+  }
+  return pages;
 }
 
 async function declareSchemas(client: LastDbPublisherClient): Promise<Record<SchemaKey, string>> {
