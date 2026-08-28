@@ -32,6 +32,13 @@ const GROK_BALANCE_STDERR =
 /** Same failure as the grok CLI's streaming-json stdout one-liner. */
 const GROK_BALANCE_STDOUT_LINE =
   '{"type":"error","message":"Internal error: {\\n  \\"message\\": \\"API error (status 402 Payment Required): Grok Build usage balance exhausted\\",\\n  \\"http_status\\": 402\\n}"}';
+/** Real Claude Code weekly-limit 429 (2026-08-28 last-stack-groom-board). */
+const CLAUDE_WEEKLY_LIMIT_ASSISTANT =
+  '{"type":"assistant","message":{"content":[{"type":"text","text":"You\'ve hit your weekly limit · resets Aug 29 at 11am (America/Los_Angeles)"}]},"error":"rate_limit","is_api_error_message":true}';
+const CLAUDE_WEEKLY_LIMIT_RESULT =
+  '{"is_error":true,"type":"result","subtype":"success","result":"You\'ve hit your weekly limit · resets Aug 29 at 11am (America/Los_Angeles)","terminal_reason":"api_error","api_error_status":429}';
+const CLAUDE_TRANSIENT_429 =
+  '{"is_error":true,"type":"result","result":"Too many requests","terminal_reason":"api_error","api_error_status":429}';
 
 let home: string;
 const prevHome = process.env.ROUTINES_HOME;
@@ -150,6 +157,39 @@ describe("classifyHarnessOutage", () => {
     expect(out?.kind).toBe("usage-limit");
   });
 
+  test("claude weekly-limit 429 stdout classifies as usage-limit", () => {
+    const r = result("");
+    writeFileSync(
+      join(r.runDir, "stdout.log"),
+      `${CLAUDE_WEEKLY_LIMIT_ASSISTANT}\n${CLAUDE_WEEKLY_LIMIT_RESULT}\n`,
+    );
+    const out = classifyHarnessOutage(r, { nowMs: Date.parse("2026-08-28T09:00:00Z") });
+    expect(out).not.toBeNull();
+    expect(out!.kind).toBe("usage-limit");
+    expect(out!.evidence.toLowerCase()).toContain("weekly limit");
+    expect(out!.resetHint).toMatch(/Aug 29 at 11am/i);
+    expect(out!.resetAt).toBe("2026-08-29T18:00:00.000Z");
+  });
+
+  test("claude weekly-limit result line alone classifies as usage-limit", () => {
+    const r = result("");
+    writeFileSync(join(r.runDir, "stdout.log"), `${CLAUDE_WEEKLY_LIMIT_RESULT}\n`);
+    const out = classifyHarnessOutage(r);
+    expect(out?.kind).toBe("usage-limit");
+  });
+
+  test("ordinary Claude 429 without weekly-limit is not an outage", () => {
+    const r = result("");
+    writeFileSync(join(r.runDir, "stdout.log"), `${CLAUDE_TRANSIENT_429}\n`);
+    expect(classifyHarnessOutage(r)).toBeNull();
+  });
+
+  test("ignores claude weekly-limit text quoted inside a filed Situation summary", () => {
+    const quoted =
+      '{"slug":"harness-outage-claude","summary":"The claude harness is out of service (usage-limit); evidence: \\"You\'ve hit your weekly limit · resets Aug 29 at 11am (America/Los_Angeles)\\". Filed by routinesd harness-outage; Tom paged via Telegram."}';
+    expect(classifyHarnessOutage(result(quoted))).toBeNull();
+  });
+
   test("ignores grok 402 text quoted inside a filed Situation summary", () => {
     const quoted =
       '{"slug":"harness-outage-grok","summary":"The grok harness is out of service (usage-limit); evidence: \\"API error (status 402 Payment Required): Grok Build usage balance exhausted\\". Filed by routinesd harness-outage; Tom paged via Telegram."}';
@@ -237,6 +277,15 @@ describe("parseResetHint", () => {
 
   test("no hint", () => {
     expect(parseResetHint("nothing here", 0)).toEqual({ hint: null, iso: null });
+  });
+
+  test("parses Claude weekly-limit resets hint in America/Los_Angeles", () => {
+    const { hint, iso } = parseResetHint(
+      "You've hit your weekly limit · resets Aug 29 at 11am (America/Los_Angeles)",
+      Date.parse("2026-08-28T09:00:00Z"),
+    );
+    expect(hint).toBe("Aug 29 at 11am (America/Los_Angeles)");
+    expect(iso).toBe("2026-08-29T18:00:00.000Z");
   });
 });
 
@@ -399,6 +448,34 @@ describe("handleHarnessOutage via escalateRoutineError", () => {
     expect(out.escalated).toBe(true);
     expect(out.detail).toContain("situation FAILED");
     expect(out.detail).toContain("telegram FAILED");
+  });
+
+  test("claude weekly-limit posts a Claude Situation and does not fence Grok", () => {
+    const situations = stubBin("situations-stub");
+    const ra = stubBin("ra-stub");
+    writeRegistryEntry("last-stack-groom-board", "claude");
+    const r = result("");
+    writeFileSync(
+      join(r.runDir, "stdout.log"),
+      `${CLAUDE_WEEKLY_LIMIT_ASSISTANT}\n${CLAUDE_WEEKLY_LIMIT_RESULT}\n`,
+    );
+    const nowMs = Date.parse("2026-08-28T09:00:00Z");
+    const outage = classifyHarnessOutage(r, { nowMs })!;
+    const out = handleHarnessOutage(entry("last-stack-groom-board", "claude"), r, outage, {
+      nowMs,
+      situationsBin: situations.bin,
+      raBin: ra.bin,
+      quiet: true,
+      fenceRoutines: false,
+    });
+    expect(out.escalated).toBe(true);
+    expect(out.detail).toContain("fence:none-fallback-active");
+    const sit = JSON.parse(readFileSync(situations.stdinFile, "utf8"));
+    expect(sit.slug).toBe(outageSituationSlug("claude"));
+    expect(sit.scope_routines).toEqual([]);
+    expect(sit.blocked_actions).toEqual(["dispatch-claude-agents"]);
+    expect(sit.blocked_actions).not.toContain("dispatch-grok-agents");
+    expect(sit.expires_at).toBe("2026-08-29T18:00:00.000Z");
   });
 
   test("claude outage while codex primaries are on fallback fences the whole substituted fleet", () => {

@@ -98,6 +98,12 @@ const USAGE_LIMIT_PATTERNS: RegExp[] = [
   /status 402 payment required/i,
   /ineligibletiererror/i,
   /you are not logged into antigravity/i,
+  // Claude Code weekly quota (2026-08-28): stream-json
+  // `"error":"rate_limit"` + `api_error_status:429` +
+  // "You've hit your weekly limit · resets Aug 29 at 11am (America/Los_Angeles)".
+  // "usage limit" did not match, so outage=false and the fire never reached Grok.
+  /you'?ve hit your weekly limit/i,
+  /hit your (?:weekly|monthly) limit/i,
 ];
 
 const CAPACITY_PATTERNS: RegExp[] = [
@@ -170,6 +176,16 @@ function matchLine(text: string, patterns: RegExp[]): string | null {
       ) {
         score += 8;
       }
+      // Claude weekly/monthly quota: stream-json one-liners with
+      // "You've hit your weekly limit" and `"error":"rate_limit"`. Boost
+      // before JSON demotion. Do not boost a bare 429 / rate_limit — those
+      // can be short transient throttles, not a dead harness.
+      if (
+        /you'?ve hit your weekly limit/i.test(line) ||
+        /hit your (?:weekly|monthly) limit/i.test(line)
+      ) {
+        score += 8;
+      }
       if (/\b(ERROR|error)\b/.test(line) && line.length < 240) score += 2;
       // Demote Situation / JSON / card-body echoes.
       if (/"summary"\s*:/.test(line) || /"preflight_message"\s*:/.test(line)) score -= 10;
@@ -184,17 +200,109 @@ function matchLine(text: string, patterns: RegExp[]): string | null {
   return scored[0]!.score >= 3 ? scored[0]!.line : null;
 }
 
+/**
+ * Parse a wall-clock like "Aug 29 at 11am (America/Los_Angeles)" into UTC ms.
+ * Returns NaN when the text is not that shape.
+ */
+function parseZonedWallClock(text: string, nowMs: number): number {
+  const m = text.match(
+    /^([A-Za-z]{3,9})\s+(\d{1,2})\s+at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?(?:\s*\(([^)]+)\))?$/i,
+  );
+  if (!m) return Number.NaN;
+  const monthIndex = new Date(`${m[1]} 1, 2000`).getMonth();
+  if (Number.isNaN(monthIndex)) return Number.NaN;
+  const day = Number(m[2]);
+  let hour = Number(m[3]);
+  const minute = m[4] ? Number(m[4]) : 0;
+  const ampm = (m[5] ?? "").toLowerCase();
+  if (ampm === "pm" && hour < 12) hour += 12;
+  if (ampm === "am" && hour === 12) hour = 0;
+  const timeZone = (m[6] ?? "").trim();
+  const now = new Date(nowMs);
+  for (const year of [now.getUTCFullYear(), now.getUTCFullYear() + 1]) {
+    const ts = timeZone
+      ? wallClockInZoneToUtcMs(year, monthIndex, day, hour, minute, timeZone)
+      : Date.UTC(year, monthIndex, day, hour, minute);
+    if (ts != null && !Number.isNaN(ts) && ts > nowMs) return ts;
+  }
+  return Number.NaN;
+}
+
+/** Interpret a local wall clock in an IANA zone as UTC milliseconds. */
+function wallClockInZoneToUtcMs(
+  year: number,
+  monthIndex: number,
+  day: number,
+  hour: number,
+  minute: number,
+  timeZone: string,
+): number | null {
+  try {
+    const fmt = new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hourCycle: "h23",
+    });
+    const partsOf = (ms: number) => {
+      const rec = Object.fromEntries(
+        fmt
+          .formatToParts(new Date(ms))
+          .filter((p) => p.type !== "literal")
+          .map((p) => [p.type, p.value]),
+      );
+      const h = Number(rec.hour);
+      return {
+        year: Number(rec.year),
+        month: Number(rec.month) - 1,
+        day: Number(rec.day),
+        hour: h === 24 ? 0 : h,
+        minute: Number(rec.minute),
+      };
+    };
+    const same = (
+      a: ReturnType<typeof partsOf>,
+    ) =>
+      a.year === year &&
+      a.month === monthIndex &&
+      a.day === day &&
+      a.hour === hour &&
+      a.minute === minute;
+    const utcGuess = Date.UTC(year, monthIndex, day, hour, minute);
+    const shown = partsOf(utcGuess);
+    const shownAsUtc = Date.UTC(shown.year, shown.month, shown.day, shown.hour, shown.minute);
+    const adjusted = utcGuess + (utcGuess - shownAsUtc);
+    if (same(partsOf(adjusted))) return adjusted;
+    for (const delta of [-3_600_000, 3_600_000, -7_200_000, 7_200_000]) {
+      if (same(partsOf(adjusted + delta))) return adjusted + delta;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 /** Parse provider reset hints like "try again at Jul 22nd, 2026 10:00 PM". */
 export function parseResetHint(text: string, nowMs: number): {
   hint: string | null;
   iso: string | null;
 } {
-  const m = text.match(/try again (?:at|after) ([^.\n]+)/i);
+  const m =
+    text.match(/try again (?:at|after) ([^.\n]+)/i) ??
+    text.match(
+      /resets\s+([A-Za-z]{3,9}\s+\d{1,2}\s+at\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?(?:\s*\([^)]+\))?)/i,
+    );
   if (!m) return { hint: null, iso: null };
   const hint = m[1]!.trim();
   // Strip ordinal suffixes (22nd → 22) so Date.parse has a chance.
   const cleaned = hint.replace(/(\d+)(st|nd|rd|th)\b/gi, "$1");
-  const ts = Date.parse(cleaned);
+  // Prefer IANA-zone wall clocks (Claude weekly-limit) over Date.parse, which
+  // would treat "Aug 29 at 11am (America/Los_Angeles)" as the host local zone.
+  let ts = parseZonedWallClock(cleaned, nowMs);
+  if (Number.isNaN(ts)) ts = Date.parse(cleaned);
   if (Number.isNaN(ts) || ts <= nowMs) return { hint, iso: null };
   return { hint, iso: new Date(ts).toISOString() };
 }

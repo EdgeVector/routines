@@ -660,6 +660,141 @@ describe("runRoutine same-run fallback", () => {
     expect(toml).not.toContain('harness = "claude"');
   });
 
+  // Required gate: 2026-08-28 Claude weekly-limit 429. Codex already fenced.
+  // Claude returned api_error_status 429 "You've hit your weekly limit".
+  // Grok was live. meta recorded outage=false and stopped before Grok.
+  test("claude weekly-limit 429 + fenced codex still reaches grok in the same fire", async () => {
+    process.env.ROUTINES_FALLBACK_CHAIN = "codex:gpt-5.6-terra,claude:sonnet,grok:grok-4.5";
+    const weeklyAssistant = JSON.stringify({
+      type: "assistant",
+      message: {
+        content: [
+          {
+            type: "text",
+            text: "You've hit your weekly limit · resets Aug 29 at 11am (America/Los_Angeles)",
+          },
+        ],
+      },
+      error: "rate_limit",
+      is_api_error_message: true,
+    });
+    const weeklyResult = JSON.stringify({
+      is_error: true,
+      type: "result",
+      subtype: "success",
+      result: "You've hit your weekly limit · resets Aug 29 at 11am (America/Los_Angeles)",
+      terminal_reason: "api_error",
+      api_error_status: 429,
+    });
+    process.env.ROUTINES_CLAUDE_BIN = stub(
+      join(home, "claude-bin"),
+      [
+        "#!/bin/sh",
+        `printf '%s\\n' ${JSON.stringify(weeklyAssistant)}`,
+        `printf '%s\\n' ${JSON.stringify(weeklyResult)}`,
+        "exit 1",
+        "",
+      ].join("\n"),
+    );
+    const codexMarker = join(home, "codex-called");
+    process.env.ROUTINES_CODEX_BIN = stub(
+      join(home, "codex-bin"),
+      ["#!/bin/sh", `echo called >> ${JSON.stringify(codexMarker)}`, "exit 1", ""].join("\n"),
+    );
+    process.env.ROUTINES_GROK_BIN = stub(
+      join(home, "grok-bin"),
+      [
+        "#!/bin/sh",
+        "printf '%s\\n' 'last-stack-groom-board 2026-08-28T09:00:00Z ok GREEN findings=0'",
+        "exit 0",
+        "",
+      ].join("\n"),
+    );
+    process.env.ROUTINES_SITUATIONS_CLI = stub(join(home, "sit"), "#!/bin/sh\nexit 0\n");
+    process.env.ROUTINES_RA_BIN = stub(join(home, "ra"), "#!/bin/sh\nexit 0\n");
+
+    mkdirSync(join(home, "harness-outage"), { recursive: true });
+    writeFileSync(
+      join(home, "harness-outage", "codex.json"),
+      JSON.stringify({
+        kind: "capacity",
+        lastSeenAt: "2026-08-28T06:32:32.898Z",
+        situationSlug: "harness-outage-codex",
+        expiresAt: "2099-01-01T00:00:00.000Z",
+      }) + "\n",
+    );
+
+    writeFileSync(
+      join(home, "registry", "last-stack-groom-board.toml"),
+      [
+        'harness = "claude"',
+        'model = "sonnet"',
+        'rrule = "FREQ=HOURLY"',
+        'prompt = "groom"',
+        "timeout_min = 0.5",
+      ].join("\n") + "\n",
+    );
+
+    const entry = loadEntry("last-stack-groom-board");
+    expect(isHarnessOutaged("codex")).toBe(true);
+    const planned = routesForFire(entry);
+    expect(planned.map((s) => s.harness)).toEqual(["claude", "grok"]);
+
+    const result = await runRoutine(entry, { quiet: true, trigger: "scheduled" });
+    expect(result.exitCode).toBe(0);
+    expect(["ok", "noop"]).toContain(result.outcome.kind);
+
+    const meta = JSON.parse(readFileSync(join(result.runDir, "meta.json"), "utf8"));
+    expect(meta.harness).toBe("grok");
+    expect(meta.usedFallback).toBe(true);
+    expect(meta.primaryHarness).toBe("claude");
+    expect(Array.isArray(meta.fallbackAttempts)).toBe(true);
+    expect(meta.fallbackAttempts[0].harness).toBe("claude");
+    expect(meta.fallbackAttempts[0].outage).toBe(true);
+    expect(meta.fallbackAttempts.some((a: { harness: string }) => a.harness === "grok")).toBe(
+      true,
+    );
+    expect(meta.outcome).not.toBe("error");
+    expect(existsSync(codexMarker)).toBe(false);
+    expect(isHarnessOutaged("claude")).toBe(true);
+    expect(isHarnessOutaged("grok")).toBe(false);
+  });
+
+  test("ordinary Claude exit 1 that is not quota does not advance fallback", async () => {
+    process.env.ROUTINES_CLAUDE_BIN = stub(
+      join(home, "claude-bin"),
+      ["#!/bin/sh", "printf '%s\\n' 'TypeError: undefined is not a function'", "exit 1", ""].join(
+        "\n",
+      ),
+    );
+    const grokMarker = join(home, "grok-called");
+    process.env.ROUTINES_GROK_BIN = stub(
+      join(home, "grok-bin"),
+      ["#!/bin/sh", `echo called >> ${JSON.stringify(grokMarker)}`, "exit 0", ""].join("\n"),
+    );
+    process.env.ROUTINES_ERROR_ESCALATE = "0";
+
+    writeFileSync(
+      join(home, "registry", "demo.toml"),
+      [
+        'harness = "claude"',
+        'model = "sonnet"',
+        'rrule = "FREQ=HOURLY"',
+        'prompt = "hello"',
+        "timeout_min = 0.5",
+      ].join("\n") + "\n",
+    );
+
+    const result = await runRoutine(loadEntry("demo"), { quiet: true, trigger: "scheduled" });
+    expect(result.exitCode).not.toBe(0);
+    expect(result.outcome.kind).toBe("error");
+    expect(existsSync(grokMarker)).toBe(false);
+    const meta = JSON.parse(readFileSync(join(result.runDir, "meta.json"), "utf8"));
+    expect(meta.fallbackAttempts).toHaveLength(1);
+    expect(meta.fallbackAttempts[0].outage).toBe(false);
+    expect(meta.fallbackAttempts[0].harness).toBe("claude");
+  });
+
   // Required gate: N simultaneous grok 402s must not spawn N Claude children
   // in the same second. Cap is visible. An exit-124 under load must not open
   // harness-outage-claude.
