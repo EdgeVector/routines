@@ -387,7 +387,8 @@ test("buildDeliveryStageRequest targets snapshot plus capped routine status rows
   expect(req.legs[1]!.fields).toContain("last_outcome");
 });
 
-test("buildBoundedDeliveryStageRequests split the 16 buckets into four sealed slices", () => {
+test("buildBoundedDeliveryStageRequests pages RoutineStatus ids and rejects a full-fleet inline field", () => {
+  const ids = Array.from({ length: 72 }, (_, index) => `r${String(index).padStart(2, "0")}`);
   const pages = buildBoundedDeliveryStageRequests({
     schemaHashes: schemaHashes(),
     recipient: {
@@ -395,21 +396,29 @@ test("buildBoundedDeliveryStageRequests split the 16 buckets into four sealed sl
       messagingPublicKey: "messaging-x25519",
       messagingPseudonym: "00000000-0000-0000-0000-000000000001",
     },
+    rowIds: ids,
   });
 
-  expect(pages).toHaveLength(4);
-  expect(pages.flatMap((page) => page.legs[1]!.hash_keys ?? [])).toEqual(
-    Array.from({ length: 16 }, (_, bucket) => `routines#${bucket.toString(16).padStart(2, "0")}`),
-  );
+  expect(pages).toHaveLength(6);
+  expect(pages.flatMap((page) => page.legs[1]?.hash_keys ?? [])).toEqual(ids);
   for (const page of pages) {
-    expect(page.max_records).toBe(128);
+    const encoded = JSON.stringify(page);
+    expect(encoded).not.toContain("rows_json");
     expect(page.legs[0]).toMatchObject({
       schema_name: "hash-FleetSummary",
       hash_keys: ["routines"],
     });
-    expect(page.legs[1]!.schema_name).toBe("hash-FleetRoutineStatus");
-    expect(page.legs[1]!.hash_keys).toHaveLength(4);
-    expect(JSON.stringify(page).length).toBeLessThan(64 * 1024);
+    expect(page.legs[1]!.schema_name).toBe("hash-RoutineStatus");
+    expect(page.legs[1]!.hash_keys!.length).toBeGreaterThan(0);
+    expect(page.legs[1]!.hash_keys!.length).toBeLessThanOrEqual(12);
+    expect(page.max_records).toBe(page.legs[1]!.hash_keys!.length + 1);
+    expect(encoded.length).toBeLessThan(64 * 1024);
+    for (const leg of page.legs) {
+      if (leg.schema_name === "hash-RoutineStatus" || leg.schema_name === "hash-FleetRoutineStatus") {
+        expect(leg.hash_keys?.length ?? 0).toBeGreaterThan(0);
+      }
+      expect(leg.fields).not.toContain("rows_json");
+    }
   }
   expect(buildBoundedDeliveryStageRequest({
     schemaHashes: schemaHashes(),
@@ -418,6 +427,7 @@ test("buildBoundedDeliveryStageRequests split the 16 buckets into four sealed sl
       messagingPublicKey: "messaging-x25519",
       messagingPseudonym: "00000000-0000-0000-0000-000000000001",
     },
+    rowIds: ids,
   })).toEqual(pages[0]!);
 });
 
@@ -439,18 +449,20 @@ test("deliverFleetStatus publishes, stages, and optionally approves", async () =
   });
 
   expect(publisher.writes.map((w) => w.schemaHash)).toContain("hash-RoutineStatus");
-  expect(delivery.stagedRequests).toHaveLength(4);
-  expect(delivery.stagedRequests[0]!.max_records).toBe(3);
-  expect(delivery.approvedIds).toEqual(["delivery-1", "delivery-2", "delivery-3", "delivery-4"]);
+  expect(delivery.stagedRequests).toHaveLength(1);
+  expect(delivery.stagedRequests[0]!.max_records).toBe(2);
+  expect(delivery.approvedIds).toEqual(["delivery-1"]);
   expect(result.staged?.deliveryId).toBe("delivery-1");
   expect(result.approved?.shared).toBe(2);
-  expect(result.stagedPages).toHaveLength(4);
-  expect(result.approvedPages).toHaveLength(4);
+  expect(result.stagedPages).toHaveLength(1);
+  expect(result.approvedPages).toHaveLength(1);
   expect(result.boundedView?.rows).toHaveLength(1);
   expect(delivery.stagedRequests[0]!.legs.map((leg) => leg.schema_name)).toEqual([
     "hash-FleetSummary",
-    "hash-FleetRoutineStatus",
+    "hash-RoutineStatus",
   ]);
+  expect(delivery.stagedRequests[0]!.legs[1]!.hash_keys).toEqual(["alpha"]);
+  expect(JSON.stringify(delivery.stagedRequests)).not.toContain("rows_json");
 });
 
 test("deliverFleetStatus permits the legacy view only inside the rollback window", async () => {
@@ -529,8 +541,9 @@ test("deliverFleetStatus can validate and stage the bounded view", async () => {
   expect(result.boundedView?.rows).toHaveLength(1);
   expect(delivery.stagedRequests[0]!.legs.map((leg) => leg.schema_name)).toEqual([
     "hash-FleetSummary",
-    "hash-FleetRoutineStatus",
+    "hash-RoutineStatus",
   ]);
+  expect(delivery.stagedRequests[0]!.legs[1]!.hash_keys).toEqual(["alpha"]);
 });
 
 test("LastDB publisher identifies socket requests and preserves auth and JSON headers", async () => {

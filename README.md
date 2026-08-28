@@ -251,11 +251,14 @@ routines read-status --json
 ## Admin fleet status deliver
 
 `routines deliver-status` uses the bounded view by default. It validates the
-`FleetSummary` marker against all 16 bucket pages, then stages a
-`lastdb.slice.v1` delivery with two legs:
+`FleetSummary` marker against all 16 bucket pages, then stages one
+`lastdb.slice.v1` delivery per batch of at most 12 `RoutineStatus` Hash keys:
 
 - `routines/FleetSummary` key `routines`
-- the 16 `routines/FleetRoutineStatus` bucket keys
+- explicit `routines/RoutineStatus` ids from the bounded reader
+
+Do not deliver `FleetRoutineStatus` HashRange buckets. A live 72-row fleet
+still sealed at about 118 KiB per bucket page.
 
 A rollback read needs both `--legacy-view` and an ISO deadline in
 `ROUTINES_FLEET_LEGACY_READ_UNTIL`. The deadline must be within seven days.
