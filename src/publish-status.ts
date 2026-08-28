@@ -463,6 +463,7 @@ export async function deliverFleetStatus(options: DeliverStatusOptions): Promise
         schemaHashes: publication.schemaHashes,
         recipient: options.recipient,
         maxRecords: options.maxRecords,
+        rowIds: (boundedView?.rows ?? publication.rows).map((row) => row.id ?? ""),
       });
   const deliveryRequest = deliveryRequests[0]!;
 
@@ -680,48 +681,62 @@ export function buildBoundedDeliveryStageRequest(opts: {
   schemaHashes: Record<SchemaKey, string>;
   recipient: DeliveryRecipient;
   maxRecords?: number;
+  rowIds?: string[];
 }): DeliveryStageRequest {
   return buildBoundedDeliveryStageRequests(opts)[0]!;
 }
 
-const FLEET_DELIVERY_BUCKETS_PER_PAGE = 4;
+/** Live hourly seal limit is 87382 base64 chars. A HashRange bucket list still
+ * serialized the whole 72-row fleet (~118 KiB) on each page. Hash-keyed
+ * RoutineStatus batches of 12 match the last successful live slice size. */
+const STATUS_IDS_PER_DELIVERY_PAGE = 12;
 
-/** Deliver fixed bucket groups as separate sealed slices. One full-fleet slice
- * exceeds the server's 64 KiB seal limit even though the storage reads are
- * bounded. Four buckets per slice keeps the current 72-row fleet well below
- * the limit without dropping a routine. */
+/** Deliver explicit RoutineStatus Hash keys in small pages. Do not query
+ * FleetRoutineStatus from delivery: hash_keys on that HashRange schema still
+ * sealed the full fleet. */
 export function buildBoundedDeliveryStageRequests(opts: {
   schemaHashes: Record<SchemaKey, string>;
   recipient: DeliveryRecipient;
   maxRecords?: number;
+  rowIds?: string[];
 }): DeliveryStageRequest[] {
-  const bucketKeys = Array.from({ length: FLEET_STATUS_BUCKET_COUNT }, (_, bucket) =>
-    fleetBucketKey(ROUTINES_FLEET_ID, bucket),
-  );
-  const pages: DeliveryStageRequest[] = [];
-  for (let offset = 0; offset < bucketKeys.length; offset += FLEET_DELIVERY_BUCKETS_PER_PAGE) {
-    pages.push({
+  const ids = uniqueSortedIds(opts.rowIds ?? []);
+  const chunkSize = positiveInt(opts.maxRecords, STATUS_IDS_PER_DELIVERY_PAGE);
+  const chunks = ids.length === 0 ? [[]] : chunkIds(ids, chunkSize);
+  return chunks.map((chunk) => ({
     recipient_pubkey: opts.recipient.recipientPubkey,
     ...(opts.recipient.recipientDisplayName ? { recipient_display_name: opts.recipient.recipientDisplayName } : {}),
     messaging_public_key: opts.recipient.messagingPublicKey,
     messaging_pseudonym: opts.recipient.messagingPseudonym,
-    mode: "snapshot",
-    max_records: positiveInt(opts.maxRecords, 128),
+    mode: "snapshot" as const,
+    max_records: Math.max(chunk.length + 1, 1),
     legs: [
       {
         schema_name: opts.schemaHashes.fleetSummary,
         fields: [...FLEET_SUMMARY_FIELDS],
         hash_keys: [ROUTINES_FLEET_ID],
       },
-      {
-        schema_name: opts.schemaHashes.fleetStatus,
-        fields: [...BOUNDED_STATUS_DELIVER_FIELDS],
-        hash_keys: bucketKeys.slice(offset, offset + FLEET_DELIVERY_BUCKETS_PER_PAGE),
-      },
+      ...(chunk.length === 0
+        ? []
+        : [{
+            schema_name: opts.schemaHashes.status,
+            fields: [...BOUNDED_STATUS_DELIVER_FIELDS],
+            hash_keys: chunk,
+          }]),
     ],
-    });
+  }));
+}
+
+function uniqueSortedIds(ids: string[]): string[] {
+  return [...new Set(ids.map((id) => id.trim()).filter(Boolean))].sort();
+}
+
+function chunkIds(ids: string[], chunkSize: number): string[][] {
+  const chunks: string[][] = [];
+  for (let offset = 0; offset < ids.length; offset += chunkSize) {
+    chunks.push(ids.slice(offset, offset + chunkSize));
   }
-  return pages;
+  return chunks;
 }
 
 async function declareSchemas(client: LastDbPublisherClient): Promise<Record<SchemaKey, string>> {
