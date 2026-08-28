@@ -585,7 +585,7 @@ async function cmdDeliverStatus(rest: string[]): Promise<number> {
     return 0;
   }
   if (result.dryRun) {
-    console.log(`DRY-RUN routines fleet delivery rows=${result.rows.length} max_records=${result.deliveryRequest.max_records}`);
+    console.log(`DRY-RUN routines fleet delivery rows=${result.rows.length} pages=${result.deliveryRequests.length} max_records=${result.deliveryRequest.max_records}`);
     console.log(`schemas snapshot=${result.schemaHashes.snapshot} status=${result.schemaHashes.status}`);
     return 0;
   }
@@ -593,13 +593,15 @@ async function cmdDeliverStatus(rest: string[]): Promise<number> {
     console.error("delivery stage returned no result");
     return 1;
   }
-  if (result.approved) {
+  if (result.approvedPages.length > 0) {
+    const shared = result.approvedPages.reduce((sum, page) => sum + page.shared, 0);
     console.log(
-      `DELIVERED routines fleet status delivery_id=${result.approved.deliveryId} shared=${result.approved.shared} message_type=${result.approved.messageType}`,
+      `DELIVERED routines fleet status deliveries=${result.approvedPages.length} shared=${shared} message_type=${result.approvedPages[0]!.messageType}`,
     );
   } else {
+    const records = result.stagedPages.reduce((sum, page) => sum + page.recordCount, 0);
     console.log(
-      `STAGED routines fleet status delivery_id=${result.staged.deliveryId} records=${result.staged.recordCount}; re-run with --approve to send`,
+      `STAGED routines fleet status deliveries=${result.stagedPages.length} records=${records}; re-run with --approve to send`,
     );
   }
   console.log(`schemas snapshot=${result.schemaHashes.snapshot} status=${result.schemaHashes.status}`);

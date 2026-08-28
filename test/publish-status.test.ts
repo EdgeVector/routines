@@ -6,6 +6,7 @@ import { join } from "node:path";
 import {
   buildDeliveryStageRequest,
   buildBoundedDeliveryStageRequest,
+  buildBoundedDeliveryStageRequests,
   buildFleetPublication,
   clearLegacyFleetSnapshot,
   deliverFleetStatus,
@@ -386,8 +387,8 @@ test("buildDeliveryStageRequest targets snapshot plus capped routine status rows
   expect(req.legs[1]!.fields).toContain("last_outcome");
 });
 
-test("buildBoundedDeliveryStageRequest targets the manifest and 16 bucket partitions", () => {
-  const req = buildBoundedDeliveryStageRequest({
+test("buildBoundedDeliveryStageRequests split the 16 buckets into four sealed slices", () => {
+  const pages = buildBoundedDeliveryStageRequests({
     schemaHashes: schemaHashes(),
     recipient: {
       recipientPubkey: "recipient-ed25519",
@@ -396,16 +397,28 @@ test("buildBoundedDeliveryStageRequest targets the manifest and 16 bucket partit
     },
   });
 
-  expect(req.max_records).toBe(128);
-  expect(req.legs[0]).toMatchObject({
-    schema_name: "hash-FleetSummary",
-    hash_keys: ["routines"],
-  });
-  expect(req.legs[1]!.schema_name).toBe("hash-FleetRoutineStatus");
-  expect(req.legs[1]!.hash_keys).toHaveLength(16);
-  expect(req.legs[1]!.hash_keys).toContain("routines#00");
-  expect(req.legs[1]!.hash_keys).toContain("routines#0f");
-  expect(JSON.stringify(req).length).toBeLessThan(64 * 1024);
+  expect(pages).toHaveLength(4);
+  expect(pages.flatMap((page) => page.legs[1]!.hash_keys ?? [])).toEqual(
+    Array.from({ length: 16 }, (_, bucket) => `routines#${bucket.toString(16).padStart(2, "0")}`),
+  );
+  for (const page of pages) {
+    expect(page.max_records).toBe(128);
+    expect(page.legs[0]).toMatchObject({
+      schema_name: "hash-FleetSummary",
+      hash_keys: ["routines"],
+    });
+    expect(page.legs[1]!.schema_name).toBe("hash-FleetRoutineStatus");
+    expect(page.legs[1]!.hash_keys).toHaveLength(4);
+    expect(JSON.stringify(page).length).toBeLessThan(64 * 1024);
+  }
+  expect(buildBoundedDeliveryStageRequest({
+    schemaHashes: schemaHashes(),
+    recipient: {
+      recipientPubkey: "recipient-ed25519",
+      messagingPublicKey: "messaging-x25519",
+      messagingPseudonym: "00000000-0000-0000-0000-000000000001",
+    },
+  })).toEqual(pages[0]!);
 });
 
 test("deliverFleetStatus publishes, stages, and optionally approves", async () => {
@@ -426,11 +439,13 @@ test("deliverFleetStatus publishes, stages, and optionally approves", async () =
   });
 
   expect(publisher.writes.map((w) => w.schemaHash)).toContain("hash-RoutineStatus");
-  expect(delivery.stagedRequests).toHaveLength(1);
+  expect(delivery.stagedRequests).toHaveLength(4);
   expect(delivery.stagedRequests[0]!.max_records).toBe(3);
-  expect(delivery.approvedIds).toEqual(["delivery-1"]);
+  expect(delivery.approvedIds).toEqual(["delivery-1", "delivery-2", "delivery-3", "delivery-4"]);
   expect(result.staged?.deliveryId).toBe("delivery-1");
   expect(result.approved?.shared).toBe(2);
+  expect(result.stagedPages).toHaveLength(4);
+  expect(result.approvedPages).toHaveLength(4);
   expect(result.boundedView?.rows).toHaveLength(1);
   expect(delivery.stagedRequests[0]!.legs.map((leg) => leg.schema_name)).toEqual([
     "hash-FleetSummary",
@@ -730,7 +745,7 @@ class FakeDeliveryClient implements LastDbDeliveryClient {
   async stageDelivery(request: Parameters<LastDbDeliveryClient["stageDelivery"]>[0]) {
     this.stagedRequests.push(request);
     return {
-      deliveryId: "delivery-1",
+      deliveryId: `delivery-${this.stagedRequests.length}`,
       recordCount: 2,
       fields: ["id", "status"],
       note: "staged only",
