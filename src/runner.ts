@@ -236,6 +236,26 @@ export async function runRoutine(entry: RoutineEntry, opts: RunOptions = {}): Pr
   const attempts: FallbackAttempt[] = [];
   let last: RunResult | null = null;
 
+  const allRoutesFenced =
+    routes.length > 0 && routes.every((step) => isHarnessOutaged(step.harness));
+  if (allRoutesFenced) {
+    const step = routes[0]!;
+    const runEntry = entryForRoute(entry, step);
+    const routeMeta: RunOnceMeta = {
+      primaryHarness: entry.harness,
+      primaryModel: entry.model,
+      routeIndex: 0,
+      routeCount: routes.length,
+      allRoutesFenced: [...new Set(routes.map((route) => route.harness))],
+    };
+
+    // A zero-LLM gate is useful precisely when every provider is unavailable.
+    // Let the gate finish the routine, but never let an exit-10 gate proceed
+    // onto a harness that an active outage fence protects.
+    if (runEntry.gateCommand) return runOnce(runEntry, opts, routeMeta);
+    return recordAllRoutesFenced(runEntry, opts, routeMeta);
+  }
+
   for (let i = 0; i < routes.length; i++) {
     const step = routes[i]!;
     // An already-fenced hop is skipped, not a reason to stop the fire.
@@ -365,6 +385,120 @@ interface RunOnceMeta {
   primaryModel: string;
   routeIndex: number;
   routeCount: number;
+  allRoutesFenced?: string[];
+}
+
+/**
+ * Record a clean no-dispatch result when every route has an active outage.
+ * This keeps manual callers and the daemon out of the null-result path while
+ * the harness-outage Situations remain the source of provider health truth.
+ */
+function recordAllRoutesFenced(
+  entry: RoutineEntry,
+  opts: RunOptions,
+  routeMeta: RunOnceMeta,
+  existing?: {
+    runDir: string;
+    startedAt: Date;
+    gateCommand: string | null;
+    gateProceeded: boolean;
+  },
+): RunResult {
+  const trigger = opts.trigger ?? "scheduled";
+  const startedAt = existing?.startedAt ?? new Date();
+  const runDir = existing?.runDir ?? join(runsDir(), entry.id, runStamp(startedAt));
+  mkdirSync(runDir, { recursive: true });
+  mkdirSync(join(runDir, "scratch"), { recursive: true });
+
+  const harnesses = routeMeta.allRoutesFenced ?? [];
+  const detail = `all-routes-fenced harnesses=${harnesses.join(",") || "none"}`;
+  const stdout = `ROUTINE_RESULT outcome=noop detail=${detail}\n`;
+  writeRunFile(join(runDir, "stdout.log"), stdout);
+  writeRunFile(join(runDir, "stderr.log"), "");
+  writeRunFile(
+    join(runDir, "prompt.txt"),
+    "(all routes fenced by active harness outages; harness not spawned)\n",
+  );
+
+  const finishedAt = new Date();
+  const invocation: HarnessInvocation = {
+    bin: "harness-outage-fence",
+    args: [],
+    display: "harness-outage-fence: all routes fenced",
+  };
+  const result: RunResult = {
+    id: entry.id,
+    runDir,
+    invocation,
+    exitCode: 0,
+    signal: null,
+    timedOut: false,
+    startedAt: startedAt.toISOString(),
+    finishedAt: finishedAt.toISOString(),
+    durationMs: finishedAt.getTime() - startedAt.getTime(),
+    heartbeat: { attempted: false, ok: true },
+    outcome: { kind: "noop", detail, source: "safe_skip" },
+    harnessPid: null,
+  };
+  result.heartbeat = writeHeartbeat(entry, result);
+
+  writeRunFile(
+    join(runDir, "meta.json"),
+    JSON.stringify(
+      {
+        id: entry.id,
+        trigger,
+        harness: entry.harness,
+        model: entry.model,
+        effort: entry.effort ?? null,
+        cwd: entry.cwd,
+        command: invocation.display,
+        gateCommand: existing?.gateCommand ?? null,
+        gateSkippedHarness: true,
+        gateProceeded: existing?.gateProceeded === true,
+        fencedRoutes: harnesses,
+        exitCode: result.exitCode,
+        signal: result.signal,
+        timedOut: result.timedOut,
+        startedAt: result.startedAt,
+        finishedAt: result.finishedAt,
+        durationMs: result.durationMs,
+        harnessPid: null,
+        daemonPid: process.pid,
+        status: "finished",
+        outcome: result.outcome.kind,
+        outcomeDetail: result.outcome.detail,
+        outcomeSource: result.outcome.source,
+        stdoutTail: stdout.trim(),
+        stderrTail: "",
+        heartbeat: result.heartbeat,
+        primaryHarness: routeMeta.primaryHarness,
+        primaryModel: routeMeta.primaryModel,
+        routeIndex: routeMeta.routeIndex,
+        routeCount: routeMeta.routeCount,
+        resolvedBy: entry.resolvedBy,
+        difficulty: entry.difficulty ?? null,
+        matrixResolution: entry.matrixResolution ?? null,
+      },
+      null,
+      2,
+    ) + "\n",
+  );
+
+  const bootstrapManualStatus =
+    trigger === "manual" && result.exitCode === 0 && !readState(entry.id).lastRun;
+  if (trigger === "scheduled" || bootstrapManualStatus) {
+    patchState(entry.id, {
+      lastRun: result.finishedAt,
+      lastExit: result.exitCode,
+      lastRunDir: runDir,
+      lastOutcome: result.outcome.kind,
+      lastOutcomeDetail: result.outcome.detail ?? undefined,
+    });
+  }
+
+  releaseLockIfOwned(entry.id, process.pid);
+  return result;
 }
 
 /**
@@ -505,6 +639,15 @@ async function runOnce(
     });
     if (gated) return Promise.resolve(gated);
     gateProceeded = true;
+  }
+
+  if (routeMeta?.allRoutesFenced) {
+    return recordAllRoutesFenced(entry, opts, routeMeta, {
+      runDir,
+      startedAt,
+      gateCommand: gateCommandUsed,
+      gateProceeded,
+    });
   }
 
   const maxLogBytes = runLogMaxBytes();
