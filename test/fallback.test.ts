@@ -56,6 +56,20 @@ function baseEntry(over: Partial<RoutineEntry> = {}): RoutineEntry {
   };
 }
 
+function markHarnessOutaged(harness: string): void {
+  const dir = join(home, "harness-outage");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, `${harness}.json`),
+    JSON.stringify({
+      kind: "usage-limit",
+      lastSeenAt: "2026-08-29T00:00:00.000Z",
+      situationSlug: `harness-outage-${harness}`,
+      expiresAt: "2099-01-01T00:00:00.000Z",
+    }) + "\n",
+  );
+}
+
 beforeEach(() => {
   process.env = { ...savedEnv };
   home = mkdtempSync(join(tmpdir(), "routines-fallback-"));
@@ -245,6 +259,81 @@ exit 0
 });
 
 describe("runRoutine same-run fallback", () => {
+  test("all fenced routes return a clean no-dispatch result", async () => {
+    process.env.ROUTINES_FALLBACK_CHAIN = "claude:sonnet,grok:grok-4.5";
+    for (const harness of ["codex", "claude", "grok"]) markHarnessOutaged(harness);
+
+    const result = await runRoutine(baseEntry({ prompt: "hello" }), {
+      quiet: true,
+      trigger: "manual",
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.outcome.kind).toBe("noop");
+    expect(result.outcome.detail).toContain("all-routes-fenced");
+    expect(result.harnessPid).toBeNull();
+    const meta = JSON.parse(readFileSync(join(result.runDir, "meta.json"), "utf8"));
+    expect(meta.fencedRoutes).toEqual(["codex", "claude", "grok"]);
+    expect(meta.gateSkippedHarness).toBe(true);
+    expect(meta.command).toContain("all routes fenced");
+  });
+
+  test("an all-fenced routine still runs its zero-LLM gate", async () => {
+    process.env.ROUTINES_FALLBACK_CHAIN = "claude:sonnet,grok:grok-4.5";
+    for (const harness of ["codex", "claude", "grok"]) markHarnessOutaged(harness);
+    const gateMarker = join(home, "gate-ran");
+    const gate = stub(
+      join(home, "all-fenced-gate"),
+      [
+        "#!/bin/sh",
+        `printf 'yes\\n' > ${JSON.stringify(gateMarker)}`,
+        "printf '%s\\n' 'ROUTINE_RESULT outcome=ok detail=mechanical-proof-refreshed'",
+        "exit 0",
+        "",
+      ].join("\n"),
+    );
+
+    const result = await runRoutine(baseEntry({ prompt: "hello", gateCommand: gate }), {
+      quiet: true,
+      trigger: "scheduled",
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.outcome.kind).toBe("ok");
+    expect(result.outcome.detail).toBe("mechanical-proof-refreshed");
+    expect(result.harnessPid).toBeNull();
+    expect(readFileSync(gateMarker, "utf8")).toBe("yes\n");
+    const meta = JSON.parse(readFileSync(join(result.runDir, "meta.json"), "utf8"));
+    expect(meta.gateSkippedHarness).toBe(true);
+    expect(meta.command).toContain("gate_command");
+  });
+
+  test("an exit-10 gate cannot dispatch onto an all-fenced harness", async () => {
+    process.env.ROUTINES_FALLBACK_CHAIN = "claude:sonnet,grok:grok-4.5";
+    for (const harness of ["codex", "claude", "grok"]) markHarnessOutaged(harness);
+    const harnessMarker = join(home, "harness-ran");
+    process.env.ROUTINES_CODEX_BIN = stub(
+      join(home, "must-not-run-fenced-harness"),
+      ["#!/bin/sh", `printf 'yes\\n' > ${JSON.stringify(harnessMarker)}`, "exit 0", ""].join("\n"),
+    );
+    const gate = stub(join(home, "all-fenced-proceed-gate"), "#!/bin/sh\nexit 10\n");
+
+    const result = await runRoutine(baseEntry({ prompt: "hello", gateCommand: gate }), {
+      quiet: true,
+      trigger: "manual",
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.outcome.kind).toBe("noop");
+    expect(result.outcome.detail).toContain("all-routes-fenced");
+    expect(result.harnessPid).toBeNull();
+    expect(existsSync(harnessMarker)).toBe(false);
+    const meta = JSON.parse(readFileSync(join(result.runDir, "meta.json"), "utf8"));
+    expect(meta.gateProceeded).toBe(true);
+    expect(meta.gateSkippedHarness).toBe(true);
+    expect(meta.fencedRoutes).toEqual(["codex", "claude", "grok"]);
+  });
+
   test("codex out-of-credits then claude success; TOML stays codex", async () => {
     const codex = stub(
       join(home, "codex-bin"),
