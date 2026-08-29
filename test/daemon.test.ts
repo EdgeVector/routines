@@ -3,8 +3,10 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import type { DaemonEvent } from "../src/daemon.ts";
 import {
   DEFAULT_STAGGER_MS,
+  dispatchDue,
   dueOccurrence,
   evaluateOnce,
   formatStagger,
@@ -580,8 +582,12 @@ describe("daemon free-slot pool", () => {
     expect(new Set(dispatches)).toEqual(new Set(["fs-a", "fs-b", "fs-c"]));
     expect(new Set(completes)).toEqual(new Set(["fs-a", "fs-b", "fs-c"]));
 
-    // The other due routines are deferred by the stagger, not dropped.
-    expect(events.some((e) => e.kind === "defer-stagger")).toBe(true);
+    // NOTE: "the rest were deferred, not dropped" is asserted by the
+    // seeded-clock test below, not here. `staggerAllows` compares real
+    // instants, so on a host slow enough to spend more than `staggerMs`
+    // inside one tryDispatch, every kickoff is already spaced and
+    // `defer-stagger` is never emitted. Asserting it here made a loaded host
+    // red the whole ci-required gate (2026-08-29).
 
     // Every kickoff is separated by at least the stagger. Timer slop can only
     // make a gap longer, never shorter, so this is the whole contract: no two
@@ -602,5 +608,58 @@ describe("daemon free-slot pool", () => {
       .slice(0, firstCompleteIdx)
       .filter((e) => e.kind === "dispatch").length;
     expect(dispatchesBeforeFirstComplete).toBeGreaterThanOrEqual(2);
+  });
+
+  test("a routine held by the stagger is deferred, not dropped", async () => {
+    // Seed the kickoff clock instead of racing it. The gap is 60s and the
+    // seeded kickoff is "just now", so no amount of host slowness can let a
+    // routine through this pass — the deferral is the only possible outcome.
+    for (const id of ["dz-a", "dz-b", "dz-c"]) {
+      writeFileSync(
+        join(home, "registry", `${id}.toml`),
+        [
+          'harness = "claude"',
+          'model = "test-model"',
+          'rrule = "FREQ=HOURLY"',
+          `prompt = "hello from ${id}"`,
+        ].join("\n") + "\n",
+      );
+    }
+
+    const staggerMs = 60_000;
+    const lastDispatch = { at: Date.now() };
+    const held: DaemonEvent[] = [];
+    const startedWhileHeld = dispatchDue({
+      staggerMs,
+      catchupMs: 3_600_000,
+      lastDispatch,
+      log: (e) => held.push(e),
+    });
+    await Promise.all(startedWhileHeld);
+
+    expect(startedWhileHeld.length).toBe(0);
+    expect(held.some((e) => e.kind === "dispatch")).toBe(false);
+    const deferral = held.find((e) => e.kind === "defer-stagger");
+    expect(deferral).toBeDefined();
+    // One line for the whole backlog, naming how many were held.
+    expect(held.filter((e) => e.kind === "defer-stagger").length).toBe(1);
+    expect(deferral!.detail).toContain("3 due");
+
+    // Deferred, not dropped: the same routines are still due, so the next pass
+    // admits one as soon as the gap has elapsed.
+    lastDispatch.at = Date.now() - staggerMs;
+    const released: DaemonEvent[] = [];
+    const startedAfterGap = dispatchDue({
+      staggerMs,
+      catchupMs: 3_600_000,
+      lastDispatch,
+      log: (e) => released.push(e),
+    });
+    await Promise.all(startedAfterGap);
+
+    expect(startedAfterGap.length).toBe(1);
+    const dispatched = released.filter((e) => e.kind === "dispatch").map((e) => e.id);
+    expect(dispatched.length).toBe(1);
+    expect(["dz-a", "dz-b", "dz-c"]).toContain(dispatched[0]!);
   });
 });
