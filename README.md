@@ -65,6 +65,43 @@ harness = "grok"
 model = "grok-4.5"
 ```
 
+## Public route decision: `routines agent-exec`
+
+Routines owns provider policy for the whole fleet. An external agent host (Loom)
+must not keep its own provider order, model map, or outage patterns. It asks
+routines for the route instead:
+
+```sh
+routines agent-exec --difficulty hard --mode write \
+  --request-id loom-node-42 [--pin grok] [--timeout-ms 900000]
+```
+
+The scheduler dispatch pass and this command call **one** internal route engine
+(`src/route-engine.ts`), so the two callers cannot pick different providers for
+the same difficulty under the same Situations.
+
+The command resolves and prints JSON on stdout; it starts no agent.
+
+| field | meaning |
+|---|---|
+| `harness` / `model` | the selected provider and model (`null` on an empty route) |
+| `matrixVersion` | the routing-matrix version the decision used |
+| `reasons` | ordered decision tokens (order, fences, fallback, selection) |
+| `fenced` | fenced providers with their Situation slug and known retry time |
+| `retry` | `retryable`, earliest `retryAt`, and the fence Situation slugs |
+| `guardRequired` | a `write` that landed on a fallback: prove the guard token first |
+
+| exit | meaning |
+|------|---------|
+| **0** | a route was selected |
+| **2** | usage error |
+| **3** | empty route — every candidate provider is fenced; park the node and retry |
+
+Only an **active** `harness-outage-<provider>` Situation fences a provider. An
+ordinary agent error does not, so a bad prompt cannot take a provider out of the
+fleet's route. A durable `--pin` is not a preference: when the pinned provider is
+fenced the route is empty rather than silently falling to another provider.
+
 Optional `gate_command` runs **before** the LLM harness (zero-LLM):
 
 | exit | meaning |

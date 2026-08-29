@@ -43,6 +43,9 @@ import {
   type HygieneResult,
 } from "./hygiene.ts";
 import { loadActiveSituations } from "./situations.ts";
+import { isRouteMode, routeAgent, ROUTE_MODES } from "./route-engine.ts";
+import { DIFFICULTIES, isDifficulty } from "./difficulty-matrix.ts";
+import { HARNESSES, isHarness } from "./registry.ts";
 import { loadAll, loadEntry, resolvePrompt, type RoutineEntry } from "./registry.ts";
 import { collectStatus } from "./status.ts";
 import { registryDir, routinesHome, runsDir } from "./paths.ts";
@@ -66,6 +69,12 @@ Commands:
   pause <id>                  set status = paused
   resume <id>                 set status = active
   route <id> --harness X --model Y   change a routine's harness and/or model
+  agent-exec                  resolve one agent route from the global matrix +
+                              active provider fences; prints JSON. Required:
+                              --difficulty fast|normal|hard --mode read|write.
+                              Optional: --pin <provider>, --timeout-ms <n>,
+                              --request-id <id>. Exit 3 = empty route (every
+                              candidate provider is fenced; do not start one).
   logs <id>                   show recent runs for a routine (--json, --path, --tail)
   probe-path <id>              print the installed path for a versioned probe harness
   publish-status              write slim fleet status records to LastDB (--json)
@@ -149,6 +158,8 @@ async function main(argv: string[]): Promise<number> {
       return cmdSetStatus(rest, "active");
     case "route":
       return cmdRoute(rest);
+    case "agent-exec":
+      return cmdAgentExec(rest);
     case "import":
       return cmdImport(rest);
     case "migrate-kanban-ids":
@@ -355,6 +366,86 @@ function cmdRoute(rest: string[]): number {
     throw err;
   }
 }
+
+/**
+ * The public route decision. Loom (and any other agent host) calls this per
+ * node instead of keeping its own provider order or model map, so the fleet
+ * has one route policy owner. It resolves and prints — it starts no agent;
+ * an empty route (exit 3) is how a provider fence prevents process creation.
+ */
+function cmdAgentExec(rest: string[]): number {
+  let values;
+  try {
+    ({ values } = parseArgs({
+      args: rest,
+      options: {
+        difficulty: { type: "string" },
+        mode: { type: "string" },
+        pin: { type: "string" },
+        "timeout-ms": { type: "string" },
+        "request-id": { type: "string" },
+        json: { type: "boolean" },
+      },
+      allowPositionals: false,
+    }));
+  } catch (err) {
+    console.error(`${(err as Error).message}\n`);
+    console.error(AGENT_EXEC_USAGE);
+    return 2;
+  }
+
+  const difficulty = values.difficulty?.trim();
+  if (!difficulty || !isDifficulty(difficulty)) {
+    console.error(`--difficulty must be one of ${DIFFICULTIES.join("|")}\n`);
+    console.error(AGENT_EXEC_USAGE);
+    return 2;
+  }
+  const mode = values.mode?.trim();
+  if (!mode || !isRouteMode(mode)) {
+    console.error(`--mode must be one of ${ROUTE_MODES.join("|")}\n`);
+    console.error(AGENT_EXEC_USAGE);
+    return 2;
+  }
+  const pinRaw = values.pin?.trim();
+  if (pinRaw !== undefined && !isHarness(pinRaw)) {
+    console.error(`--pin must be one of ${HARNESSES.join("|")}\n`);
+    console.error(AGENT_EXEC_USAGE);
+    return 2;
+  }
+  let timeoutMs: number | undefined;
+  const timeoutRaw = values["timeout-ms"]?.trim();
+  if (timeoutRaw !== undefined) {
+    timeoutMs = Number(timeoutRaw);
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+      console.error("--timeout-ms must be a positive number of milliseconds\n");
+      console.error(AGENT_EXEC_USAGE);
+      return 2;
+    }
+  }
+
+  let decision;
+  try {
+    decision = routeAgent({
+      difficulty,
+      mode,
+      pin: pinRaw,
+      timeoutMs,
+      requestId: values["request-id"]?.trim() || undefined,
+    });
+  } catch (err) {
+    console.error(`agent-exec: ${(err as Error).message}`);
+    return 1;
+  }
+  console.log(JSON.stringify(decision, null, 2));
+  // 3 = no provider may start. The caller parks the node with
+  // decision.retry and resumes; it must not fall back to a fixed provider.
+  return decision.empty ? 3 : 0;
+}
+
+const AGENT_EXEC_USAGE = `usage: routines agent-exec --difficulty ${DIFFICULTIES.join("|")} --mode ${ROUTE_MODES.join("|")}
+                        [--pin ${HARNESSES.join("|")}] [--timeout-ms <n>] [--request-id <id>]
+
+Exit codes: 0 route selected · 2 usage error · 3 empty route (all fenced)`;
 
 function cmdImport(rest: string[]): number {
   const { values } = parseArgs({
