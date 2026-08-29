@@ -37,7 +37,14 @@ fi
 echo "== artifact build =="
 bun run build
 
-# 3. unit tests, once any exist
+# 3. agent-exec ↔ scheduler dispatch parity proof (isolated: temp
+# ROUTINES_HOME, stubbed situations CLI, no live provider or socket reads)
+if [ -f test/agent-exec-parity.ts ]; then
+  echo "== agent-exec parity =="
+  bun test/agent-exec-parity.ts
+fi
+
+# 4. unit tests, once any exist
 found_tests=0
 for f in test/*.test.ts src/*.test.ts; do
   found_tests=1
