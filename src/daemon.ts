@@ -35,8 +35,8 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 import { fenceFor, loadActiveSituations, type ActiveSituation } from "./situations.ts";
-import { isHarness, loadAll, type Harness, type RoutineEntry } from "./registry.ts";
-import { resolveDifficulty } from "./difficulty-matrix.ts";
+import { loadAll, type RoutineEntry } from "./registry.ts";
+import { harnessFromOutageSituation, routeAgent } from "./route-engine.ts";
 import { daemonIdentityPath, daemonLogDir, locksDir, runsDir } from "./paths.ts";
 import { nextAfter } from "./rrule.ts";
 import { patchState, readState } from "./state.ts";
@@ -48,32 +48,40 @@ import { loadProjectConfig } from "./project-config.ts";
 import { captureRoutineRunFailure, captureRoutinesException } from "./observability.ts";
 import { loadCapacityPolicy, planCapacity, type CapacityPolicy } from "./capacity.ts";
 
-function harnessFromOutageSituation(slug: string): string | null {
-  const m = slug.match(/^harness-outage-(.+)$/);
-  return m?.[1] ?? null;
-}
-
 /**
  * Resolve a matrix route against the active provider-outage Situations for
  * this dispatch pass. Explicit and legacy pins are deliberately unchanged.
+ *
+ * This is the scheduler's adapter over the shared route engine — the same
+ * engine `routines agent-exec` calls, so an external agent host and the
+ * scheduler cannot pick different providers for the same difficulty under the
+ * same Situations. `allFenced: "primary"` keeps the scheduler's documented
+ * posture: when every provider is fenced the configured primary stays, and the
+ * runner's own recovery chain probes for one that came back.
  */
 export function routeForAvailability(
   entry: RoutineEntry,
   situations: ActiveSituation[],
 ): RoutineEntry {
   if (entry.resolvedBy !== "matrix" || !entry.difficulty) return entry;
-  const unavailable = new Set<Harness>();
-  for (const situation of situations) {
-    const harness = harnessFromOutageSituation(situation.slug);
-    if (harness && isHarness(harness)) unavailable.add(harness);
-  }
-  const resolution = resolveDifficulty(entry.difficulty, unavailable);
-  if (resolution.harness === entry.harness && resolution.model === entry.model) return entry;
+  const decision = routeAgent({
+    difficulty: entry.difficulty,
+    mode: "write",
+    situations,
+    allFenced: "primary",
+  });
+  if (!decision.harness || !decision.model) return entry;
+  if (decision.harness === entry.harness && decision.model === entry.model) return entry;
   return {
     ...entry,
-    harness: resolution.harness,
-    model: resolution.model,
-    matrixResolution: resolution,
+    harness: decision.harness,
+    model: decision.model,
+    matrixResolution: {
+      version: decision.matrixVersion,
+      difficulty: entry.difficulty,
+      harness: decision.harness,
+      model: decision.model,
+    },
   };
 }
 
