@@ -44,6 +44,13 @@ export interface HygieneOptions {
   nowMs?: number;
   /** Override home (tests). */
   home?: string;
+  /** Override the launchd daemon probe (tests). */
+  daemonProbe?: () => HygieneResult["daemon"];
+  /** Override the optional artifact refresh (tests). */
+  ffInstallAction?: (
+    dryRun: boolean,
+    restart: boolean,
+  ) => HygieneResult["installFf"];
 }
 
 interface HygienePruneItem {
@@ -734,12 +741,8 @@ export function runHygiene(opts: HygieneOptions = {}): HygieneResult {
     /* ignore */
   }
 
-  const daemon = probeDaemon();
-  if (!daemon.loaded) {
-    warnings.push(`routinesd launchd not loaded (${daemon.detail})`);
-  } else if (daemon.pid == null) {
-    warnings.push(`routinesd loaded but no live pid (${daemon.detail})`);
-  }
+  const daemonProbe = opts.daemonProbe ?? probeDaemon;
+  let daemon = daemonProbe();
 
   const publish = publishStatus
     ? tryPublishStatus(dryRun)
@@ -752,7 +755,10 @@ export function runHygiene(opts: HygieneOptions = {}): HygieneResult {
   }
 
   const installFf = opts.ffInstall
-    ? tryFfInstall(dryRun, opts.restartDaemonAfterFf !== false)
+    ? (opts.ffInstallAction ?? tryFfInstall)(
+        dryRun,
+        opts.restartDaemonAfterFf !== false,
+      )
     : {
         attempted: false,
         ok: true,
@@ -760,6 +766,15 @@ export function runHygiene(opts: HygieneOptions = {}): HygieneResult {
         restarted: false,
       };
   if (installFf.attempted && !installFf.ok) warnings.push(installFf.detail);
+
+  // The artifact refresh can install or restart routinesd. Report the state
+  // after that repair, not the stale state that caused the repair.
+  if (installFf.ok && installFf.restarted) daemon = daemonProbe();
+  if (!daemon.loaded) {
+    warnings.push(`routinesd launchd not loaded (${daemon.detail})`);
+  } else if (daemon.pid == null) {
+    warnings.push(`routinesd loaded but no live pid (${daemon.detail})`);
+  }
 
   return {
     home,
