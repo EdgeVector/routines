@@ -44,6 +44,13 @@ beforeEach(() => {
   // Tests that assert the built-in fallback order must not inherit a live
   // fleet profile from the developer's shell.
   delete process.env.ROUTINES_FALLBACK_CHAIN;
+  // A fallback leg sleeps a RANDOM 0..DEFAULT_FALLBACK_JITTER_MS (8s) before it
+  // spawns, to spread a production burst. Inherited here it decided pass/fail by
+  // coin flip: "harness-outage fence bypasses only when local state selects an
+  // alternate route" measured 4.86s against bun's 5s default and failed roughly
+  // every other run. test/fallback.test.ts already pins this to 0; daemon tests
+  // need the same pin, since they assert scheduling, not burst spreading.
+  process.env.ROUTINES_FALLBACK_JITTER_MS = "0";
   mkdirSync(join(home, "registry"), { recursive: true });
 
   const harnessStub = stub(
@@ -384,6 +391,78 @@ describe("daemon evaluateOnce", () => {
     expect(meta.harness).toBe("grok");
     expect(meta.usedFallback).toBe(true);
     expect(events.some((e) => e.includes("bypassed via fallback chain"))).toBe(true);
+  });
+
+  // Regression: 2026-08-29. claude, codex and grok were all recorded outaged
+  // at once. `routesForFire` returns the chain WHOLE when no hop is healthy,
+  // so `[0]` was the fenced primary, the bypass was denied, and routinesd
+  // dispatched nothing for 14h54m. A zero-LLM gate needs no provider at all,
+  // and `runRoutine`'s own `allRoutesFenced` branch is written to run it.
+  function fenceEveryHarness() {
+    mkdirSync(join(home, "harness-outage"), { recursive: true });
+    for (const harness of ["claude", "codex", "grok", "gemini"]) {
+      writeFileSync(
+        join(home, "harness-outage", `${harness}.json`),
+        JSON.stringify(
+          {
+            kind: "usage-limit",
+            lastSeenAt: "2026-08-29T04:00:00.000Z",
+            situationSlug: `harness-outage-${harness}`,
+            expiresAt: "2999-01-01T00:00:00.000Z",
+          },
+          null,
+          2,
+        ),
+      );
+    }
+  }
+
+  test("every harness fenced still runs a zero-LLM gate routine", async () => {
+    process.env.ROUTINES_FSITUATIONS_BIN = stub(
+      join(home, "stub-fsituations"),
+      '#!/bin/sh\ncat <<\'JSON\'\n[{"slug":"harness-outage-grok","status":"active","scope_routines":["gated-routine"]}]\nJSON\n',
+    );
+    const gate = stub(
+      join(home, "zero-llm-gate"),
+      [
+        "#!/bin/sh",
+        "printf '%s\\n' 'ROUTINE_RESULT outcome=ok detail=gate-ran-without-a-provider'",
+        "exit 0",
+        "",
+      ].join("\n"),
+    );
+    writeRoutine("gated-routine", "grok", [`gate_command = ${JSON.stringify(gate)}`]);
+    fenceEveryHarness();
+
+    const events: string[] = [];
+    const results = await evaluateOnce({
+      once: true,
+      catchupMs: 60_000,
+      log: (e) => events.push(`${e.kind}:${e.id ?? ""}:${e.detail ?? ""}`),
+    });
+
+    expect(results.map((r) => r.id)).toEqual(["gated-routine"]);
+    expect(results[0]!.outcome.kind).toBe("ok");
+    expect(events.some((e) => e.startsWith("skip-fence:gated-routine:"))).toBe(false);
+  });
+
+  test("every harness fenced still fences a routine with no gate", async () => {
+    process.env.ROUTINES_FSITUATIONS_BIN = stub(
+      join(home, "stub-fsituations"),
+      '#!/bin/sh\ncat <<\'JSON\'\n[{"slug":"harness-outage-grok","status":"active","scope_routines":["ungated-routine"]}]\nJSON\n',
+    );
+    writeRoutine("ungated-routine", "grok");
+    fenceEveryHarness();
+
+    const events: string[] = [];
+    const results = await evaluateOnce({
+      once: true,
+      catchupMs: 60_000,
+      log: (e) => events.push(`${e.kind}:${e.id ?? ""}:${e.detail ?? ""}`),
+    });
+
+    expect(results.length).toBe(0);
+    expect(events.some((e) => e.startsWith("skip-fence:ungated-routine:"))).toBe(true);
   });
 
   test("dispatch envelope uses registry id for automation memory, not prompt frontmatter name", async () => {

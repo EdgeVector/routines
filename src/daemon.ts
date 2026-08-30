@@ -40,8 +40,7 @@ import { harnessFromOutageSituation, routeAgent } from "./route-engine.ts";
 import { daemonIdentityPath, daemonLogDir, locksDir, runsDir } from "./paths.ts";
 import { nextAfter } from "./rrule.ts";
 import { patchState, readState } from "./state.ts";
-import { isHarnessOutaged } from "./harness-outage.ts";
-import { routesForFire, runRoutine, type RunResult } from "./runner.ts";
+import { nextLiveRouteIndex, routesForFire, runRoutine, type RunResult } from "./runner.ts";
 import { readOutcomeSink } from "./runs.ts";
 import { parseOutcomeSink, OUTCOME_SINK_FILENAME } from "./outcome.ts";
 import { loadProjectConfig } from "./project-config.ts";
@@ -85,14 +84,41 @@ export function routeForAvailability(
   };
 }
 
-/** True when the route the runner would select avoids the fenced harness. */
+/**
+ * True when this fire has somewhere to go that the fenced harness does not own.
+ *
+ * Two ways that is so:
+ *
+ *  1. The local outage state already records the outage, so `routesForFire`
+ *     has dropped the fenced hop and selected a live alternate. This is the
+ *     pre-existing bypass and it is deliberately conditioned on LOCAL state,
+ *     not on the Situation: the runner picks its route from local state, so
+ *     bypassing on the Situation alone would hand the fire straight back to
+ *     the harness the fence protects.
+ *
+ *  2. EVERY hop is outaged, but the routine carries a zero-LLM `gateCommand`.
+ *     `runRoutine` is already written for this — its `allRoutesFenced` branch
+ *     runs the gate because "a zero-LLM gate is useful precisely when every
+ *     provider is unavailable" — but the daemon returned at the fence before
+ *     the runner was ever called, so that branch was unreachable from the
+ *     scheduler.
+ *
+ * Case 2 is not hypothetical. On 2026-08-29 claude, codex and grok were all
+ * recorded outaged at the same instant; `routesForFire` falls back to
+ * returning the chain WHOLE when no hop is healthy, so `[0]` was the fenced
+ * primary, the bypass was denied, and routinesd dispatched nothing for
+ * 14h54m — 368 skip-fence events over 52 routine ids. Seven of those routines
+ * needed no provider at all to do their work.
+ */
 function canBypassHarnessOutageFence(entry: RoutineEntry, situationSlug: string): boolean {
   const fencedHarness = harnessFromOutageSituation(situationSlug);
   if (!fencedHarness) return false;
   try {
-    const route = routesForFire(entry)[0];
-    if (!route || route.harness === fencedHarness) return false;
-    return !isHarnessOutaged(route.harness);
+    const routes = routesForFire(entry);
+    const live = nextLiveRouteIndex(routes, 0);
+    if (live >= 0) return routes[live]!.harness !== fencedHarness;
+    // No live provider anywhere. A zero-LLM gate still needs none.
+    return Boolean(entry.gateCommand);
   } catch {
     return false;
   }
