@@ -72,6 +72,10 @@ link_gate cloud-sync-health-fix-gate.sh routines-cloud-sync-health-fix-gate
 # lastdb-local-smoke: the scheduled canary must never spend its harness wall
 # clock compiling Fold; a separate 180-minute builder stages the binaries.
 link_gate lastdb-local-smoke-gate.sh routines-lastdb-local-smoke-gate
+# llms-txt-install-smoke: the smoke is fully mechanical and its measured GREEN
+# is 18m06s, which no LLM harness foreground cap allows. Run it zero-LLM so it
+# reaches its own timeout_min instead of the harness's 600s cap.
+link_gate llms-txt-install-smoke-gate.sh routines-llms-txt-install-smoke-gate
 
 # Keep launchd run-daemon on the same checkout as the PATH shim. Operators used
 # to pin ROUTINES_CLI at a disposable worktree while ~/.local/bin/routines still
