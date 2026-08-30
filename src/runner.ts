@@ -1125,7 +1125,24 @@ export async function runPreDispatchGate(
       timedOut: false,
       sink: readOutcomeSink(args.runDir),
     });
-    if (outcome.kind === "ok" || outcome.kind === "noop") {
+    if (outcome.kind === "error") {
+      // The gate DID produce a verdict and the verdict is a failure. Observer
+      // gates carry their verdict in the trailer and end `exit 0` on every
+      // path, including the ones that print
+      // `ROUTINE_RESULT outcome=error` — so the trailer is the only channel a
+      // gate failure has. Folding it into the `noop`/`safe_skip` branch below
+      // made `last-stack-why-stopped` report a healthy no-op on 10 of its last
+      // 12 fires while its loom probe failed `rc=3` every time, and on the
+      // last two while it also classified live freeze classes D+F.
+      // Keep the source parseOutcome derived: `safe_skip` asserts the skip was
+      // safe, which is the one thing an error is not.
+      // papercut-routines-gate-exit0-error-trailer-recorded-as-noop
+      outcome = {
+        kind: "error",
+        detail: outcome.detail ?? "gate-error",
+        source: outcome.source,
+      };
+    } else if (outcome.kind === "ok" || outcome.kind === "noop") {
       // Preserve the gate's explicit ROUTINE_RESULT / sink classification.
       // Prior code forced every exit-0 gate to noop, which made real work
       // gates (dashboard regenerate) report false noops forever.
