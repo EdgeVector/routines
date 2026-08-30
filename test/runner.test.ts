@@ -529,7 +529,7 @@ describe("runRoutine gate_command", () => {
     expect(meta.gateCommand).toBe(gate);
   });
 
-  test("hung gate skips harness with noop gate-timeout", async () => {
+  test("hung gate skips harness and records an error, not a benign noop", async () => {
     process.env.ROUTINES_GATE_TIMEOUT_MS = "400";
     const harnessLog = join(home, "hung-gate-harness.log");
     process.env.ROUTINES_CLAUDE_BIN = stub(
@@ -561,7 +561,13 @@ describe("runRoutine gate_command", () => {
     const result = await runRoutine(loadEntry("gate-hung"), { quiet: true, noFallback: true });
 
     expect(result.exitCode).toBe(0);
-    expect(result.outcome.kind).toBe("noop");
+    // A killed gate produced no verdict. Classifying that as a benign noop is
+    // what let `lastdb-local-smoke-test` go dark for two days while reporting
+    // `lastOutcome=noop` — the same value a healthy idle run reports.
+    // `parseOutcome` already classifies a harness timeout this way.
+    // papercut-routines-gate-timeout-records-benign-noop-safe-skip
+    expect(result.outcome.kind).toBe("error");
+    expect(result.outcome.source).toBe("exit");
     // The detail names the budget that fired, so a reader can tell this kill
     // from the gate's own self-classified timeout.
     expect(result.outcome.detail).toBe("gate-timeout budget_s=1");

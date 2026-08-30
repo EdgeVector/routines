@@ -1100,12 +1100,24 @@ export async function runPreDispatchGate(
   const combined = `${stdout}\n${stderr}`;
   let outcome: RunOutcome;
   if (timedOut) {
+    // A killed gate produced no verdict, so this is a failure to observe —
+    // not an observed nothing. `noop`/`safe_skip` asserted the skip was safe
+    // and hid `lastdb-local-smoke-test` going dark for two days: both runs
+    // reported `lastOutcome=noop`, the same value a healthy idle run reports,
+    // with 0 bytes of stdout and `gateProceeded: false`.
+    //
+    // `parseOutcome` already classifies the identical condition on the harness
+    // path as `{ kind: "error", source: "exit" }`, and every `safe_skip`
+    // producer in outcome.ts guards with `if (opts.timedOut) return null;`.
+    // This branch was the one place that called a timeout safe.
+    //
+    // Keep naming the budget that fired: without it the reader cannot tell an
+    // external kill from the gate's own self-classified timeout.
+    // papercut-routines-gate-timeout-records-benign-noop-safe-skip
     outcome = {
-      kind: "noop",
-      // Name the budget that fired. Without it the reader cannot tell an
-      // external kill from the gate's own self-classified timeout.
+      kind: "error",
       detail: `gate-timeout budget_s=${Math.max(1, Math.round(timeoutMs / 1000))}`,
-      source: "safe_skip",
+      source: "exit",
     };
   } else if (status === 0) {
     outcome = parseOutcome(entry.id, combined, {

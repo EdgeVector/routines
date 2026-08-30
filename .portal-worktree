@@ -1,4 +1,4 @@
 portal=/Users/tomtang/code/edgevector/routines
 slug=routines
-branch=kanban/routinesd-keepalive-miss-hour-unload-20260827
-created=2026-08-27T04:03:18Z
+branch=kanban/fix-gate-timeout-noop-classification
+created=2026-08-30T07:11:32Z
