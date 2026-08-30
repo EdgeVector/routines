@@ -16,7 +16,7 @@ function executable(path: string, body: string): string {
   return path;
 }
 
-function fixture(status: "ok" | "need_build", smokeExit = 0) {
+function fixture(status: "ok" | "need_build", smokeExit = 0, brainBody?: string) {
   const root = mkdtempSync(join(tmpdir(), "routines-lastdb-smoke-gate-"));
   roots.push(root);
   const runDir = join(root, "run");
@@ -51,7 +51,8 @@ function fixture(status: "ok" | "need_build", smokeExit = 0) {
   );
   const brain = executable(
     join(root, "brain"),
-    `if [ "$1" = put ]; then cat > '${join(root, "brain-put.md")}'; exit 0; fi\n[ "$1" = get ] && exit 0\nexit 1`,
+    brainBody ??
+      `if [ "$1" = put ]; then cat > '${join(root, "brain-put.md")}'; exit 0; fi\n[ "$1" = get ] && exit 0\nexit 1`,
   );
   return { root, runDir, timeout, resolver, smoke, envFile, heartbeat, brain };
 }
@@ -68,6 +69,7 @@ function run(f: ReturnType<typeof fixture>) {
       LASTDB_LOCAL_SMOKE_ENV_FILE: f.envFile,
       LASTDB_LOCAL_SMOKE_HEARTBEAT_BIN: f.heartbeat,
       LASTDB_LOCAL_SMOKE_BRAIN_BIN: f.brain,
+      LASTDB_LOCAL_SMOKE_CLOSEOUT_RETRY_SLEEP_SEC: "0",
     },
     stdout: "pipe",
     stderr: "pipe",
@@ -86,6 +88,45 @@ describe("lastdb local smoke gate", () => {
     expect(readFileSync(join(f.runDir, "lastdb-local-smoke.log"), "utf8")).toContain("VERDICT: GREEN");
     expect(readFileSync(join(f.root, "brain-put.md"), "utf8")).toContain("LastDB local real-data smoke GREEN");
     expect(readFileSync(join(f.root, "heartbeat.log"), "utf8")).toContain("lastdb-local-smoke-test");
+  });
+
+  test("keeps a GREEN verdict ok when the closeout report write never succeeds", () => {
+    const f = fixture("ok", 0, "exit 1");
+    const result = run(f);
+    const stdout = result.stdout.toString();
+
+    expect(result.exitCode).toBe(0);
+    expect(stdout).toContain("ROUTINE_RESULT outcome=ok detail=verdict=GREEN");
+    expect(stdout).toContain("closeout_report=write-failed");
+    expect(stdout).not.toContain("closeout-write-failed");
+    expect(readFileSync(join(f.runDir, "outcome.txt"), "utf8")).toMatch(
+      /^ok verdict=GREEN .*closeout_report=write-failed/,
+    );
+    // The failure stays visible even though it no longer decides the outcome.
+    expect(result.stderr.toString()).toContain("closeout-report write attempt 3/3 failed");
+  });
+
+  test("retries a transiently busy primary brain before giving up on the report", () => {
+    const root = mkdtempSync(join(tmpdir(), "routines-lastdb-smoke-brain-"));
+    roots.push(root);
+    const counter = join(root, "attempts");
+    const f = fixture(
+      "ok",
+      0,
+      `if [ "$1" = put ]; then\n` +
+        `  printf 'x' >> '${counter}'\n` +
+        `  cat > /dev/null\n` +
+        `  [ "$(wc -c < '${counter}' | tr -d ' ')" -ge 2 ] || exit 1\n` +
+        `  exit 0\n` +
+        `fi\n` +
+        `[ "$1" = get ] && exit 0\nexit 1`,
+    );
+    const result = run(f);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.toString()).toContain("ROUTINE_RESULT outcome=ok detail=verdict=GREEN");
+    expect(result.stdout.toString()).not.toContain("closeout_report=write-failed");
+    expect(readFileSync(counter, "utf8").length).toBe(2);
   });
 
   test("classifies a missing staged candidate as a build-free noop", () => {

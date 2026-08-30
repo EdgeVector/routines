@@ -30,6 +30,14 @@ resolver_timeout_sec="${LASTDB_LOCAL_SMOKE_RESOLVER_TIMEOUT_SEC:-90}"
 # inside the routine's own timeout_min = 90 (5400s).
 # papercut-lastdb-local-smoke-gate-720s-budget-reports-false-red
 smoke_timeout_sec="${LASTDB_LOCAL_SMOKE_TIMEOUT_SEC:-1800}"
+# The smoke verdict and the closeout report live in two different reliability
+# domains: the verdict comes from an isolated CoW copy, the report is a write to
+# the PRIMARY brain. The primary is briefly unwritable during a supervised
+# restart or a full mutation capture queue, so retry the report write instead of
+# letting one blip decide the routine outcome.
+# routine-error-lastdb-local-smoke-test-closeout-false-negative-20260830
+closeout_report_attempts="${LASTDB_LOCAL_SMOKE_CLOSEOUT_ATTEMPTS:-3}"
+closeout_report_retry_sleep_sec="${LASTDB_LOCAL_SMOKE_CLOSEOUT_RETRY_SLEEP_SEC:-3}"
 
 timeout_bin="${LASTDB_LOCAL_SMOKE_TIMEOUT_BIN:-}"
 if [ -z "$timeout_bin" ]; then
@@ -79,7 +87,7 @@ report_slug() {
 
 write_closeout_report() {
   local verdict="$1" detail="$2" log_path="$3"
-  local slug report_file
+  local slug report_file attempt
   [ -n "$brain_bin" ] && [ -x "$brain_bin" ] || return 1
   slug="$(report_slug)"
   report_file="${run_dir:+$run_dir/closeout.md}"
@@ -101,8 +109,20 @@ write_closeout_report() {
     printf '%s\n' '## Leftovers'
     printf '%s\n' 'None beyond any blocker named by the verdict.'
   } >"$report_file"
-  "$brain_bin" put "$slug" --type reference <"$report_file" >/dev/null 2>&1 || return 1
-  "$brain_bin" get "$slug" --type reference >/dev/null 2>&1
+  attempt=1
+  while [ "$attempt" -le "$closeout_report_attempts" ]; do
+    if "$brain_bin" put "$slug" --type reference <"$report_file" >/dev/null 2>&1 &&
+      "$brain_bin" get "$slug" --type reference >/dev/null 2>&1; then
+      return 0
+    fi
+    printf 'closeout-report write attempt %s/%s failed for %s\n' \
+      "$attempt" "$closeout_report_attempts" "$slug" >&2
+    attempt=$((attempt + 1))
+    if [ "$attempt" -le "$closeout_report_attempts" ]; then
+      sleep "$closeout_report_retry_sleep_sec"
+    fi
+  done
+  return 1
 }
 
 if [ ! -x "$resolver" ]; then
@@ -212,8 +232,11 @@ if [ "$smoke_rc" -eq 124 ] || [ "$smoke_rc" -eq 137 ]; then
 fi
 if [ "$smoke_rc" -eq 0 ] && grep -q '^VERDICT: GREEN$' "$smoke_log"; then
   detail="verdict=GREEN $common_detail"
+  # The isolated-copy verdict is the only source of truth for the outcome. A
+  # failed closeout-report write is visible in the detail and on stderr, but it
+  # must not turn a real GREEN into a routine error.
   if ! write_closeout_report GREEN "$detail" "$smoke_log"; then
-    finish error "reason=closeout-write-failed smoke=GREEN $common_detail" 1
+    detail="$detail closeout_report=write-failed"
   fi
   finish ok "$detail" 0
 fi
