@@ -202,6 +202,23 @@ describe("fallback timeout scaling", () => {
     // The gate is harness-independent, so it must not inherit the scale.
     expect(gateTimeoutMs(legEntry)).toBe(5 * 60_000);
   });
+
+  test("the gate budget is timeout_min, with no hidden ceiling above it", () => {
+    // A silent Math.min(timeout_min, 15m) used to sit in gateTimeoutMs. It
+    // killed last-stack-whats-wrong (timeout_min = 45) at 901s, and it made the
+    // merged 1800s lastdb-local-smoke gate budget unfireable behind a 900s cap
+    // that nothing reported. Both routines are represented here.
+    delete process.env.ROUTINES_GATE_TIMEOUT_MS;
+
+    const whatsWrong = baseEntry({ timeoutMin: 45 });
+    expect(gateTimeoutMs(whatsWrong)).toBe(45 * 60_000);
+
+    const smoke = baseEntry({ timeoutMin: 90 });
+    expect(gateTimeoutMs(smoke)).toBe(90 * 60_000);
+    // The gate's own 1800s inner bound must fit inside the outer budget, or it
+    // can never classify its own timeout.
+    expect(gateTimeoutMs(smoke)).toBeGreaterThan(1800 * 1000);
+  });
 });
 
 describe("isHarnessOutaged", () => {

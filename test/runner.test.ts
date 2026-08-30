@@ -562,13 +562,16 @@ describe("runRoutine gate_command", () => {
 
     expect(result.exitCode).toBe(0);
     expect(result.outcome.kind).toBe("noop");
-    expect(result.outcome.detail).toBe("gate-timeout");
+    // The detail names the budget that fired, so a reader can tell this kill
+    // from the gate's own self-classified timeout.
+    expect(result.outcome.detail).toBe("gate-timeout budget_s=1");
     expect(result.harnessPid).toBeNull();
     expect(existsSync(harnessLog)).toBe(false);
     const meta = JSON.parse(readFileSync(join(result.runDir, "meta.json"), "utf8"));
     expect(meta.gateSkippedHarness).toBe(true);
     expect(meta.gateProceeded).not.toBe(true);
     expect(meta.command).toContain("gate_command");
+    expect(meta.gateTimeoutMs).toBe(400);
   });
 
   test("exit 0 with ROUTINE_RESULT ok preserves outcome=ok (real work gate)", async () => {
