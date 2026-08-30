@@ -955,13 +955,23 @@ export function completedExitCode(
 export const GATE_PROCEED_EXIT = 10;
 
 /**
- * Hard ceiling for gate wall clock (minutes of timeout_min can be large).
- * Default 15m is enough for sequential board/brain dashboard rebuilds without
- * letting a wedged gate hold the daemon slot forever.
+ * Gate wall clock. `ROUTINES_GATE_TIMEOUT_MS` is a test override (milliseconds).
+ *
+ * The budget is `timeout_min`, the same declared bound the harness path uses.
+ * A silent 15-minute `Math.min` used to sit here. It bounded nothing the
+ * registry did not already bound, and it was invisible: `routines status`, the
+ * registry and `meta.json` all reported `timeout_min`, so an operator reading
+ * `timeout_min = 90` had no way to learn the real ceiling was 15 minutes.
+ *
+ * That cost two routines. `last-stack-whats-wrong` (`timeout_min = 45`) was
+ * killed at 901s. `lastdb-local-smoke-test` (`timeout_min = 90`) then merged an
+ * 1800s inner gate budget whose stated reasoning cited `timeout_min = 90` as
+ * the outer bound — so the gate could never fire its own timeout, and every
+ * slow run reported an opaque external kill instead of a named cause.
+ *
+ * papercut-routines-gate-timeout-cap-silently-truncates-timeout-min
+ * papercut-merged-smoke-gate-1800s-budget-exceeds-routines-900s-gate-cap
  */
-export const GATE_TIMEOUT_CAP_MS = 15 * 60_000;
-
-/** Gate wall clock. ROUTINES_GATE_TIMEOUT_MS is a test override (milliseconds). */
 export function gateTimeoutMs(entry: RoutineEntry): number {
   const raw = process.env.ROUTINES_GATE_TIMEOUT_MS;
   if (raw && /^\d+$/.test(raw)) {
@@ -970,7 +980,7 @@ export function gateTimeoutMs(entry: RoutineEntry): number {
   // A fallback leg scales `timeoutMin` for a slower harness; the gate is
   // zero-LLM and harness-independent, so it stays on the primary budget.
   const budgetMin = entry.primaryTimeoutMin ?? entry.timeoutMin;
-  return Math.min(Math.max(1, budgetMin) * 60_000, GATE_TIMEOUT_CAP_MS);
+  return Math.max(1, budgetMin) * 60_000;
 }
 
 /**
@@ -1012,8 +1022,8 @@ export async function runPreDispatchGate(
   const cmd = entry.gateCommand;
   if (!cmd) return null;
 
-  // Honor timeout_min fully (capped). The old 120s hard cap aborted real work
-  // gates such as north-star dashboard rebuild (~3 min under load).
+  // Honor timeout_min fully. The old 120s hard cap, and the 15m cap that
+  // replaced it, both aborted real work gates well inside their declared budget.
   const timeoutMs = gateTimeoutMs(entry);
   // A gate can run for minutes. Keep it off the daemon event loop so its wait
   // cannot delay timeout timers for harness children that already run.
@@ -1092,7 +1102,9 @@ export async function runPreDispatchGate(
   if (timedOut) {
     outcome = {
       kind: "noop",
-      detail: "gate-timeout",
+      // Name the budget that fired. Without it the reader cannot tell an
+      // external kill from the gate's own self-classified timeout.
+      detail: `gate-timeout budget_s=${Math.max(1, Math.round(timeoutMs / 1000))}`,
       source: "safe_skip",
     };
   } else if (status === 0) {
@@ -1170,6 +1182,8 @@ export async function runPreDispatchGate(
         cwd: entry.cwd,
         command: invocation.display,
         gateCommand: cmd,
+        // The applied wall clock, so a kill is diagnosable from meta alone.
+        gateTimeoutMs: timeoutMs,
         gateSkippedHarness: timedOut || status === 0,
         gateProceeded: false,
         exitCode: runResult.exitCode,
