@@ -225,17 +225,27 @@ export function collectStatus(now: Date = new Date(), options: StatusOptions = {
       st.lastOutcome === "unknown"
         ? st.lastOutcome
         : null;
-    // While a run is in flight, listRuns may only have "unknown" (we refuse to
-    // classify from memory.md dumps mid-run). Prefer the last finished outcome
-    // so the dashboard does not flash red/unknown over a healthy prior run.
+    // While a run is IN FLIGHT, listRuns can only report "unknown" for it (we
+    // refuse to classify from memory.md dumps mid-run). Prefer the last
+    // finished outcome so the dashboard does not flash unknown over a healthy
+    // prior run.
+    //
+    // A run that has FINISHED owns its own outcome. When it finished without
+    // recording one, "unknown" is the truth and must be reported as such.
+    // Substituting an earlier run's outcome here paired this row's newest
+    // lastRun/lastRunDir/lastExit with an outcome and a detail from a run up
+    // to OUTCOME_WINDOW fires earlier, so a routine that produced no result
+    // read as a healthy ok/noop.
+    const latestInFlight = Boolean(latest) && !latest?.finishedAt;
     const displayRun =
-      latest && latest.outcome !== "unknown"
-        ? latest
-        : (recent.find((r) => r.outcome && r.outcome !== "unknown") ?? latest);
+      latest && latest.outcome === "unknown" && latestInFlight
+        ? (recent.find((r) => r.outcome && r.outcome !== "unknown") ?? latest)
+        : latest;
     const lastOutcome: OutcomeKind | null =
       displayRun?.outcome ?? stateOutcome;
-    const lastOutcomeDetail =
-      displayRun?.outcomeDetail ?? st.lastOutcomeDetail ?? null;
+    const lastOutcomeDetail = displayRun
+      ? displayRun.outcomeDetail
+      : (st.lastOutcomeDetail ?? null);
 
     return {
       id: e.id,
