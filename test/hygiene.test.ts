@@ -51,6 +51,44 @@ describe("truncateMemoryText", () => {
 });
 
 describe("runHygiene", () => {
+  test("reports the daemon state after a successful artifact repair", () => {
+    const home = mkdtempSync(join(tmpdir(), "routines-hygiene-daemon-"));
+    const states = [
+      {
+        label: "com.edgevector.routinesd",
+        loaded: false,
+        pid: null,
+        lastExitStatus: null,
+        detail: "not loaded",
+      },
+      {
+        label: "com.edgevector.routinesd",
+        loaded: true,
+        pid: 42,
+        lastExitStatus: 0,
+        detail: "loaded pid=42",
+      },
+    ];
+    let probes = 0;
+    const result = runHygiene({
+      home,
+      dryRun: false,
+      publishStatus: false,
+      ffInstall: true,
+      daemonProbe: () => states[Math.min(probes++, states.length - 1)]!,
+      ffInstallAction: () => ({
+        attempted: true,
+        ok: true,
+        detail: "routinesd reinstalled",
+        restarted: true,
+      }),
+    });
+    expect(result.daemon.loaded).toBe(true);
+    expect(result.daemon.pid).toBe(42);
+    expect(result.warnings.some((warning) => warning.includes("not loaded"))).toBe(false);
+    expect(probes).toBe(2);
+  });
+
   test("prunes old run dirs beyond keepRunsPerId and keepDays", () => {
     const home = mkdtempSync(join(tmpdir(), "routines-hygiene-"));
     const id = "demo-routine";
