@@ -15,7 +15,8 @@ for probe in \
   kanban-stress.sh \
   north-star-rollup-gate.sh \
   cloud-sync-health-fix-gate.sh \
-  lastdb-local-smoke-gate.sh
+  lastdb-local-smoke-gate.sh \
+  llms-txt-install-smoke-gate.sh
 do
   cp "scripts/$probe" "dist/probes/$probe"
   chmod 755 "dist/probes/$probe"
