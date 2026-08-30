@@ -15,7 +15,7 @@ import type { RunResult } from "./runner.ts";
 import type { RoutineEntry } from "./registry.ts";
 
 /** Resolve the heartbeats log path (filesystem only). */
-export function heartbeatsLogPath(): string {
+function heartbeatsLogPath(): string {
   return (
     process.env.ROUTINES_HEARTBEATS_FILE ||
     process.env.LAST_STACK_HEARTBEATS_FILE ||
@@ -25,7 +25,7 @@ export function heartbeatsLogPath(): string {
 
 /** One heartbeat line, matching the fleet convention:
  * `<ISO> <id> <ok|error> harness=<h> model=<m> exit=<n> dur=<s>s run=<dir>` */
-export function heartbeatLine(entry: RoutineEntry, result: RunResult): string {
+function heartbeatLine(entry: RoutineEntry, result: RunResult): string {
   // Prefer outcome kind for clean harness skips (auth/capacity safe_skip → exit 0
   // but still a noop, not a successful agent turn).
   const state =
