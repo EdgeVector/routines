@@ -122,13 +122,27 @@ export function resolveRunOutcome(id: string, runDir: string, meta: Record<strin
   const incomplete =
     meta.status === "running" ||
     (typeof meta.finishedAt !== "string" && !("exitCode" in meta));
-  return parseOutcome(id, text, {
+  const reparsed = parseOutcome(id, text, {
     exitCode,
     timedOut,
     startedAt,
     incomplete,
     sink: readOutcomeSink(runDir),
   });
+  // A re-parse that still cannot classify the run must not discard an
+  // explanation the runner already wrote. Orphan reconciliation, for one,
+  // stamps outcome "unknown" together with the reason there is no outcome;
+  // dropping that reason leaves a bare "unknown" nobody can act on. Keep the
+  // kind we derived, keep the reason we were given.
+  if (
+    reparsed.kind === "unknown" &&
+    !reparsed.detail &&
+    typeof meta.outcomeDetail === "string" &&
+    meta.outcomeDetail.length > 0
+  ) {
+    return { ...reparsed, detail: meta.outcomeDetail };
+  }
+  return reparsed;
 }
 
 function resolveBenignCodexCacheFallbackOutcome(

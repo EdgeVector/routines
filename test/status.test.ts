@@ -130,6 +130,69 @@ test("status prefers reparsed latest run outcome over persisted unknown state", 
   expect(row.outcomeUnknown).toBe(0);
 });
 
+test("status reports a FINISHED run's unknown instead of an earlier run's outcome", () => {
+  const id = "finished-without-a-result";
+  writeRoutine(id);
+
+  // An earlier fire that recorded a healthy outcome.
+  const earlier = join(home, "runs", id, "2026-08-30T17-03-00-000Z");
+  mkdirSync(earlier, { recursive: true });
+  writeFileSync(
+    join(earlier, "meta.json"),
+    JSON.stringify({
+      startedAt: "2026-08-30T17:03:00.000Z",
+      finishedAt: "2026-08-30T17:13:00.000Z",
+      exitCode: 0,
+      timedOut: false,
+      outcome: "ok",
+      outcomeDetail: "worked=board-reconcile result=closed=3",
+      outcomeSource: "sink",
+    }),
+  );
+
+  // The newest fire FINISHED cleanly but emitted no ROUTINE_RESULT trailer,
+  // so it recorded no outcome. Its stdout carries no parseable result either.
+  const latest = join(home, "runs", id, "2026-08-30T18-32-00-000Z");
+  mkdirSync(latest, { recursive: true });
+  writeFileSync(
+    join(latest, "meta.json"),
+    JSON.stringify({
+      startedAt: "2026-08-30T18:32:00.000Z",
+      finishedAt: "2026-08-30T18:45:00.000Z",
+      exitCode: 0,
+      timedOut: false,
+      outcome: "unknown",
+      outcomeDetail: null,
+      outcomeSource: "none",
+    }),
+  );
+  writeFileSync(join(latest, "stdout.log"), "did some work and then stopped\n");
+
+  mkdirSync(join(home, "state"), { recursive: true });
+  writeFileSync(
+    join(home, "state", `${id}.json`),
+    JSON.stringify({
+      id,
+      lastRun: "2026-08-30T18:45:00.000Z",
+      lastExit: 0,
+      lastRunDir: latest,
+      lastOutcome: "unknown",
+    }),
+  );
+
+  const row = collectStatus(new Date("2026-08-30T19:00:00.000Z")).rows.find(
+    (candidate) => candidate.id === id,
+  )!;
+
+  // The row's lastRun/lastRunDir already point at the newest fire; its outcome
+  // must point at the same fire, not at the healthy one before it.
+  expect(row.lastRunDir).toBe(latest);
+  expect(row.lastOutcome).toBe("unknown");
+  expect(row.lastOutcomeDetail).toBeNull();
+  expect(row.outcomeUnknown).toBe(1);
+  expect(row.outcomeOk).toBe(1);
+});
+
 test("status stays bounded and complete with 36 in-flight routines", () => {
   writeFileSync(situationsBin, "#!/bin/sh\nwhile :; do :; done\n");
 
@@ -519,7 +582,11 @@ test("dead lock is cleared even when an unfinished run dir is newer than the com
   );
 
   expect(row?.running).toBe(false);
-  expect(row?.lastOutcome).toBe("ok");
+  // The newest run dir was reconciled as orphaned, so it is now a FINISHED run
+  // that carries no outcome. It owns the row: reporting the earlier "ok" here
+  // would hide an orphaned run behind the success before it.
+  expect(row?.lastOutcome).toBe("unknown");
+  expect(row?.lastOutcomeDetail).toContain("orphaned");
   expect(existsSync(lockPath)).toBe(false);
 });
 
