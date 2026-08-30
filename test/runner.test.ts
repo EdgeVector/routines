@@ -485,6 +485,58 @@ describe("runRoutine gate_command", () => {
     expect(meta.command).toContain("gate_command");
   });
 
+  test("exit 0 with an error trailer records error, not a gate-skip noop", async () => {
+    // Observer gates end `exit 0` on every path, including the ones that print
+    // ROUTINE_RESULT outcome=error, so the trailer is the only channel a gate
+    // failure has. It used to be rewritten to noop/"gate-skip no_card_claimed".
+    // papercut-routines-gate-exit0-error-trailer-recorded-as-noop
+    const harnessLog = join(home, "error-gate-harness-should-not-run.log");
+    process.env.ROUTINES_CLAUDE_BIN = stub(
+      join(home, "error-gate-should-not-run-harness"),
+      [
+        "#!/bin/sh",
+        `printf 'ran\\n' >> ${JSON.stringify(harnessLog)}`,
+        "exit 0",
+        "",
+      ].join("\n"),
+    );
+    const gate = stub(
+      join(home, "error-trailer-gate"),
+      [
+        "#!/bin/sh",
+        "printf '%s\\n' 'error'",
+        "printf '%s\\n' 'ROUTINE_RESULT outcome=error detail=classes=D+F loom=unavailable rc=3'",
+        "exit 0",
+        "",
+      ].join("\n"),
+    );
+    writeFileSync(
+      join(home, "registry", "gate-error-trailer.toml"),
+      [
+        'harness = "claude"',
+        'model = "test-model"',
+        'rrule = "FREQ=SECONDLY"',
+        'prompt = "should not matter"',
+        'heartbeat_slug = "routine-heartbeats"',
+        "timeout_min = 1",
+        `gate_command = ${JSON.stringify(gate)}`,
+      ].join("\n") + "\n",
+    );
+
+    const result = await runRoutine(loadEntry("gate-error-trailer"), {
+      quiet: true,
+      noFallback: true,
+    });
+
+    expect(result.outcome.kind).toBe("error");
+    expect(result.outcome.detail).toContain("loom=unavailable rc=3");
+    expect(result.outcome.source).not.toBe("safe_skip");
+    expect(existsSync(harnessLog)).toBe(false);
+    const meta = JSON.parse(readFileSync(join(result.runDir, "meta.json"), "utf8"));
+    expect(meta.outcome).toBe("error");
+    expect(meta.outcomeDetail).not.toBe("gate-skip no_card_claimed");
+  });
+
   test("exit 10 proceeds to harness", async () => {
     process.env.ROUTINES_CLAUDE_BIN = stub(
       join(home, "after-gate-harness"),
