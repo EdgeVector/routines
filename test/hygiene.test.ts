@@ -69,6 +69,19 @@ describe("runHygiene", () => {
     else process.env.ROUTINES_PROMPT_DOCTOR_BIN = prevDoctor;
   });
 
+  // The pin above is the whole de-flake, so assert the cause directly rather
+  // than trusting that the file got faster: with the override pointing at an
+  // absent path the probe must report "not installed". If someone drops the
+  // pin, this fails on the machine that has last-stack installed — which is
+  // every machine that runs the fleet — instead of silently costing 1255 ms a
+  // spawn again.
+  test("does not run the host's prompt doctor", () => {
+    const home = mkdtempSync(join(tmpdir(), "routines-hygiene-doctor-pin-"));
+    const result = runHygiene({ home, dryRun: true, publishStatus: false });
+    expect(result.promptDoctor.attempted).toBe(false);
+    expect(result.promptDoctor.detail).toContain("not installed");
+  });
+
   test("reports the daemon state after a successful artifact repair", () => {
     const home = mkdtempSync(join(tmpdir(), "routines-hygiene-daemon-"));
     const states = [
