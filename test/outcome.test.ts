@@ -313,6 +313,47 @@ tokens used
     expect(o.detail).toBe("harness-transient no_card_claimed");
   });
 
+  test("does not read the mandatory Situations payload as its own capacity limit", () => {
+    // CLAUDE.md makes `situations list --json` the FIRST step of every routine.
+    // The active harness-outage-codex Situation quotes the codex error verbatim
+    // inside its own summary, so the trigger string sits in the body of every
+    // well-behaved run. Measured on 16 real claude runs (2026-07-18..2026-08-31),
+    // every one recorded a false "codex-capacity" skip.
+    //
+    // The result frame below uses the REAL key order the harness emits —
+    // is_error first, type and subtype later — which is why this run is not
+    // caught by the stream-json success parser above and reaches this scan.
+    const text = [
+      '{"type":"system","subtype":"init","session_id":"abc"}',
+      '{"type":"user","message":{"content":[{"type":"tool_result","content":' +
+        '"harness-outage-codex: the codex harness is out of service (usage-limit); ' +
+        'evidence: ERROR: You have hit your usage limit. Visit the usage page."}]}}',
+      '{"is_error":false,"num_turns":45,"session_id":"abc","type":"result",' +
+        '"subtype":"success","api_error_status":null}',
+    ].join("\n");
+    const o = parseOutcome("dead-code-reaper", text, { exitCode: 0 });
+    expect(o.source).not.toBe("safe_skip");
+    expect(o.detail).not.toBe("codex-capacity no_card_claimed");
+    // A run that wrote no sink is UNKNOWN, not a benign externally-caused skip
+    // and not a success.
+    expect(o.kind).toBe("unknown");
+  });
+
+  test("still classifies a real capacity limit when the harness reports the error status", () => {
+    // The discriminator is api_error_status, NOT subtype: a genuine rate-limited
+    // run also carries subtype:"success". Measured on last-stack-groom-board
+    // 2026-08-28T07-51-20-277Z, which recorded api_error_status 429.
+    const text = [
+      '{"type":"system","subtype":"init","session_id":"abc"}',
+      "ERROR: Selected model is at capacity. Please try a different model.",
+      '{"is_error":true,"type":"result","subtype":"success","api_error_status":429}',
+    ].join("\n");
+    const o = parseOutcome("last-stack-fkanban-pickup-w3", text, { exitCode: 1 });
+    expect(o.kind).toBe("noop");
+    expect(o.source).toBe("safe_skip");
+    expect(o.detail).toBe("codex-capacity no_card_claimed");
+  });
+
   test("does not mask Codex capacity after visible claim evidence", () => {
     const text = `
 {"claimed":true,"reason":"claimed","card":{"slug":"some-card"}}

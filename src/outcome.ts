@@ -671,11 +671,35 @@ function parseOpenCutoversEmptyPass(
   };
 }
 
+/**
+ * True when the harness itself reported a clean completion.
+ *
+ * The claude stream-json result frame carries `api_error_status`: `null` when
+ * no provider error occurred, and the HTTP status (429, 529, 401, ...) when one
+ * did. `subtype:"success"` is present in BOTH cases and so cannot discriminate;
+ * `api_error_status` can.
+ *
+ * This is the authoritative signal for "did MY harness refuse me", and it must
+ * outrank any substring scan of the run body. A routine that merely PRINTS a
+ * document describing some other harness being refused — `situations list
+ * --json` quotes exactly that inside `harness-outage-codex.summary`, and the
+ * standing rule makes that call the first step of every routine — would
+ * otherwise be recorded as having hit a limit it never hit.
+ */
+function harnessReportedCleanCompletion(text: string): boolean {
+  if (!/"api_error_status"\s*:\s*null/.test(text)) return false;
+  // Any non-null status anywhere means the harness did report a provider error.
+  return !/"api_error_status"\s*:\s*(?!null)\S/.test(text);
+}
+
 function parseHarnessExternalSkip(
   text: string,
   opts: { exitCode?: number | null; timedOut?: boolean },
 ): RunOutcome | null {
   if (opts.timedOut) return null;
+
+  // Trust the harness's own signal over a substring scan of the run body.
+  if (harnessReportedCleanCompletion(text)) return null;
 
   const lower = text.toLowerCase();
   const capacityOrUsage =
