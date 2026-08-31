@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -193,52 +194,82 @@ test("status reports a FINISHED run's unknown instead of an earlier run's outcom
   expect(row.outcomeOk).toBe(1);
 });
 
-test("status stays bounded and complete with 36 in-flight routines", () => {
+/**
+ * The fixture is built with parallel async I/O on purpose.
+ *
+ * 36 routines x ~7 files is ~250 filesystem operations. Each *sync* operation
+ * pays the full queue latency of the volume it lands on: measured 36-70 ms per
+ * 12-byte writeFileSync while the machine was loaded, against 12 ms amortised
+ * when the same writes are issued in parallel. Built serially this setup alone
+ * took ~17 s and the test failed bun's 5 s default before `collectStatus` was
+ * ever called. The wait is I/O queueing, not CPU, so overlapping it is the fix;
+ * the subject under test is still measured synchronously below.
+ */
+test("status stays bounded and complete with 36 in-flight routines", async () => {
   writeFileSync(situationsBin, "#!/bin/sh\nwhile :; do :; done\n");
 
   const stateDir = join(home, "state");
-  mkdirSync(stateDir, { recursive: true });
-  for (let i = 0; i < 36; i += 1) {
-    const id = `in-flight-${String(i).padStart(2, "0")}`;
-    writeRoutine(id);
-    writeLiveLock(id);
-    const completed = join(home, "runs", id, "2026-08-08T03-00-00-000Z");
-    mkdirSync(completed, { recursive: true });
-    writeFileSync(
-      join(completed, "meta.json"),
-      JSON.stringify({
-        startedAt: "2026-08-08T03:00:00.000Z",
-        finishedAt: "2026-08-08T03:05:00.000Z",
-        exitCode: 0,
-        timedOut: false,
-        outcome: "ok",
-        outcomeDetail: "last-finished",
-      }),
-    );
-    const current = join(home, "runs", id, "2026-08-08T04-00-00-000Z");
-    mkdirSync(current, { recursive: true });
-    writeFileSync(
-      join(current, "meta.json"),
-      JSON.stringify({
-        status: "running",
-        startedAt: "2026-08-08T04:00:00.000Z",
-        harnessPid: process.pid,
-        exitCode: null,
-        finishedAt: null,
-      }),
-    );
-    writeFileSync(
-      join(stateDir, `${id}.json`),
-      JSON.stringify({
-        id,
-        lastRun: "2026-08-08T03:05:00.000Z",
-        lastExit: 0,
-        lastRunDir: completed,
-        lastOutcome: "ok",
-        lastOutcomeDetail: "last-finished",
-      }),
-    );
-  }
+  const ids = Array.from({ length: 36 }, (_, i) => `in-flight-${String(i).padStart(2, "0")}`);
+  const completedDir = (id: string) => join(home, "runs", id, "2026-08-08T03-00-00-000Z");
+  const currentDir = (id: string) => join(home, "runs", id, "2026-08-08T04-00-00-000Z");
+
+  await Promise.all([
+    mkdir(stateDir, { recursive: true }),
+    mkdir(join(home, "locks"), { recursive: true }),
+    ...ids.flatMap((id) => [
+      mkdir(completedDir(id), { recursive: true }),
+      mkdir(currentDir(id), { recursive: true }),
+    ]),
+  ]);
+
+  await Promise.all(
+    ids.flatMap((id) => [
+      writeFile(
+        join(home, "registry", `${id}.toml`),
+        [
+          'harness = "codex"',
+          'model = "gpt-5"',
+          'rrule = "FREQ=HOURLY"',
+          'prompt = "hello"',
+          `cwd = "${home}"`,
+          "",
+        ].join("\n"),
+      ),
+      writeFile(join(home, "locks", `${id}.lock`), String(process.pid)),
+      writeFile(
+        join(completedDir(id), "meta.json"),
+        JSON.stringify({
+          startedAt: "2026-08-08T03:00:00.000Z",
+          finishedAt: "2026-08-08T03:05:00.000Z",
+          exitCode: 0,
+          timedOut: false,
+          outcome: "ok",
+          outcomeDetail: "last-finished",
+        }),
+      ),
+      writeFile(
+        join(currentDir(id), "meta.json"),
+        JSON.stringify({
+          status: "running",
+          startedAt: "2026-08-08T04:00:00.000Z",
+          harnessPid: process.pid,
+          exitCode: null,
+          finishedAt: null,
+        }),
+      ),
+      writeFile(
+        join(stateDir, `${id}.json`),
+        JSON.stringify({
+          id,
+          lastRun: "2026-08-08T03:05:00.000Z",
+          lastExit: 0,
+          lastRunDir: completedDir(id),
+          lastOutcome: "ok",
+          lastOutcomeDetail: "last-finished",
+        }),
+      ),
+    ]),
+  );
 
   const started = performance.now();
   const snapshot = collectStatus(new Date("2026-08-08T04:10:00.000Z"), {
