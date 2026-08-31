@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { acquireLock, readLockPid, releaseLock } from "../src/daemon.ts";
 import { loadEntry } from "../src/registry.ts";
 import { appendRunLog, completedExitCode, runRoutine, writeEarlyMeta } from "../src/runner.ts";
+import { parseOutcomeSink } from "../src/outcome.ts";
 
 let home: string;
 let outageSituationLog: string;
@@ -435,6 +436,95 @@ describe("runRoutine heartbeat handling", () => {
     expect(stdout).not.toContain("line-0000");
     const meta = JSON.parse(readFileSync(join(result.runDir, "meta.json"), "utf8"));
     expect(meta.logMaxBytes).toBe(8192);
+  });
+});
+
+describe("gate_command runs persist their own outcome sink", () => {
+  // A gate_command run never loads a prompt — prompt.txt holds only
+  // "(gate_command skipped prompt load)" — so NO prompt-side instruction, at
+  // any position, can make a gate write outcome.txt. Measured 2026-08-21:
+  // last-stack-whats-wrong (24 runs) and last-stack-why-stopped (12 runs)
+  // finished with no sink file, most exit 0 with a valid legacy trailer.
+  // routinesd is the only party on this path, so routinesd writes it.
+  // papercut-routines-outcome-sink-closeout-is-buried-before-routine-body
+  function writeGateRoutine(name: string, gateBody: string[]): void {
+    const gate = stub(join(home, `${name}-gate`), ["#!/bin/sh", ...gateBody, ""].join("\n"));
+    writeFileSync(
+      join(home, "registry", `${name}.toml`),
+      [
+        'harness = "claude"',
+        'model = "test-model"',
+        'rrule = "FREQ=SECONDLY"',
+        'prompt = "should not matter"',
+        'heartbeat_slug = "routine-heartbeats"',
+        "timeout_min = 1",
+        `gate_command = ${JSON.stringify(gate)}`,
+      ].join("\n") + "\n",
+    );
+  }
+
+  test("a silent exit-0 gate still writes outcome.txt and reports a runner sink", async () => {
+    process.env.ROUTINES_CLAUDE_BIN = stub(
+      join(home, "sink-gate-no-harness"),
+      ["#!/bin/sh", "exit 0", ""].join("\n"),
+    );
+    // No trailer, no heartbeat line: previously outcomeSource=safe_skip and the
+    // run left no sink file at all.
+    writeGateRoutine("gate-sink-silent", ["exit 0"]);
+
+    const result = await runRoutine(loadEntry("gate-sink-silent"), {
+      quiet: true,
+      noFallback: true,
+    });
+
+    const sinkPath = join(result.runDir, "outcome.txt");
+    expect(existsSync(sinkPath)).toBe(true);
+    const sinkText = readFileSync(sinkPath, "utf8");
+    // The file names its own author, and parseOutcomeSink skips `#` lines.
+    expect(sinkText).toContain("# written by routinesd");
+    expect(parseOutcomeSink(sinkText)?.kind).toBe("noop");
+    expect(result.outcome.kind).toBe("noop");
+    expect(result.outcome.kind).not.toBe("unknown");
+    // The derived source survives: it says WHY, and the runner writing the
+    // file down must not overwrite that.
+    expect(result.outcome.source).toBe("safe_skip");
+  });
+
+  test("a failing gate persists its error verdict to the sink", async () => {
+    process.env.ROUTINES_CLAUDE_BIN = stub(
+      join(home, "sink-gate-fail-no-harness"),
+      ["#!/bin/sh", "exit 0", ""].join("\n"),
+    );
+    writeGateRoutine("gate-sink-failure", ["exit 3"]);
+
+    const result = await runRoutine(loadEntry("gate-sink-failure"), {
+      quiet: true,
+      noFallback: true,
+    });
+
+    expect(result.outcome.kind).toBe("error");
+    expect(parseOutcomeSink(readFileSync(join(result.runDir, "outcome.txt"), "utf8"))?.kind).toBe(
+      "error",
+    );
+  });
+
+  test("the gate's own sink wins over the runner-persisted one", async () => {
+    process.env.ROUTINES_CLAUDE_BIN = stub(
+      join(home, "sink-gate-own-no-harness"),
+      ["#!/bin/sh", "exit 0", ""].join("\n"),
+    );
+    // A gate that writes its own verdict keeps `sink` — the runner must not
+    // overwrite a routine's deliberate answer with its own derivation.
+    writeGateRoutine("gate-sink-own", [
+      'printf \'%s\\n\' "ok gate-did-real-work" > "$ROUTINES_RUN_DIR/outcome.txt"',
+      "exit 0",
+    ]);
+
+    const result = await runRoutine(loadEntry("gate-sink-own"), { quiet: true, noFallback: true });
+
+    expect(result.outcome.kind).toBe("ok");
+    expect(result.outcome.source).toBe("sink");
+    expect(readFileSync(join(result.runDir, "outcome.txt"), "utf8")).toContain("gate-did-real-work");
   });
 });
 

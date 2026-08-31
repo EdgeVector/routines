@@ -165,6 +165,66 @@ export function buildDispatchEnvelope(
     .join("\n");
 }
 
+/**
+ * Closeout block appended AFTER the resolved routine body.
+ *
+ * The same contract also rides in the envelope, but the envelope is prepended
+ * to an often-long body, so by the time an agent finishes the body the sink
+ * instruction has scrolled out of its working focus. 65 of 570 runs in the
+ * 24 h to 2026-08-17T17:00Z finished `outcome=unknown`, and `unknown` is
+ * invisible on every triage surface: it is neither ok, noop, nor error, so a
+ * successful 19-minute run that exits 0 and writes its heartbeat is
+ * indistinguishable from one that died.
+ *
+ * It also covers the routine whose own prompt asks for no closeout at all
+ * (`coderings-weekly-fold` read `unknown` on 5 of its last 6 fires). Prompt
+ * ORDER cannot fix that one, because there is no order to change — only the
+ * runner reaches a prompt it did not author.
+ *
+ * CONTAMINATION: never write a literal result-shaped trailer here. The trailer
+ * token glued to `outcome=` and a verdict word is exactly what `parseOutcome`
+ * scans the transcript for, and prompt text is echoed by some harnesses, so a
+ * worked example would classify every run that merely READ it. Name the token
+ * and the shape separately, as the envelope does — never glued together. The
+ * lint in scripts/lint-prompt-closeout.sh enforces this.
+ *
+ * papercut-routines-outcome-sink-closeout-is-buried-before-routine-body
+ */
+export function buildOutcomeCloseout(entry: RoutineEntry, runDir?: string): string {
+  const sinkPath = runDir ? join(runDir, "outcome.txt") : "$ROUTINES_RUN_DIR/outcome.txt";
+  return [
+    "",
+    "",
+    "---",
+    "",
+    "## Close out this run (routinesd — required, do this LAST)",
+    "",
+    `You are the scheduled routine \`${entry.id}\`. Whatever the body above told`,
+    "you to do, this run is not finished until its verdict is recorded. Write",
+    "exactly one single-line verdict to the outcome sink:",
+    "",
+    "```bash",
+    `printf '%s\\n' "ok <concise non-secret detail>" > "${sinkPath}"`,
+    "```",
+    "",
+    "Allowed verdicts are `ok`, `noop`, and `error`:",
+    "",
+    "- `ok` — you did the work (include what you did: slugs, counts, PR/CR url).",
+    "- `noop` — you checked and there was nothing to do, or an external blocker",
+    "  stopped you before any work (empty queue, busy node, rate limit).",
+    "- `error` — the run failed in a way a human should see.",
+    "",
+    "This file is authoritative: `routines status --json` reports",
+    '`outcomeSource="sink"` and does not guess the result from transcript text.',
+    "Without it the run records `unknown`, which no triage surface counts as",
+    "success OR failure — the run becomes invisible rather than merely bad.",
+    "",
+    "Write the sink after any heartbeat and before your final stdout line. Keep",
+    "printing the legacy machine trailer too, for older runners.",
+    "",
+  ].join("\n");
+}
+
 /** Full prompt text routinesd dispatches to a harness. */
 export function resolveDispatchPrompt(
   entry: RoutineEntry,
@@ -172,5 +232,9 @@ export function resolveDispatchPrompt(
 ): string {
   const body = resolvePrompt(entry);
   const memoryPath = ensureMemoryPath(entry.id);
-  return buildDispatchEnvelope(entry, memoryPath, { runDir: opts.runDir }) + body;
+  return (
+    buildDispatchEnvelope(entry, memoryPath, { runDir: opts.runDir }) +
+    body +
+    buildOutcomeCloseout(entry, opts.runDir)
+  );
 }
