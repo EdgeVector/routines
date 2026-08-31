@@ -17,8 +17,9 @@ Harness timeout is finite (often 45m). **Do not** burn the full slot on digressi
    backup durability / throttle — then decide observe vs fix.
 3. If remaining time is **under 15 minutes**, do **not** start deploy, safe-upgrade,
    long drain watches, or multi-PR work. Heartbeat `outcome=timeout_partial` (or
-   `observe_budget_low`) with last metrics, print
-   `ROUTINE_RESULT outcome=ok detail=timeout_partial …`, exit 0.
+   `observe_budget_low`) with last metrics, print the machine trailer using the
+   `ROUTINE_RESULT` token followed by `outcome=<kind> detail=timeout_partial …`,
+   exit 0.
 4. **Forbidden** under load: open-ended `sleep`, multi-hour drain SOAK, restart
    loops, or re-reading the whole board. One fix lane per fire.
 5. Prefer `action=observe_no_deploy` when degraded reasons are only soft

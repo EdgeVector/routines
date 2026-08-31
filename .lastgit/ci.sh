@@ -16,6 +16,14 @@ for f in .lastgit/*.sh scripts/*.sh test/*.sh; do
   bash -n "$f"
 done
 
+# 1b. prompt closeout lint — this repo's prompts only. The fleet prompts under
+# ~/.last-stack/routines are not present in a fresh CI clone, and the lint
+# refuses to report success on an empty scan, so name the path explicitly.
+if [ -f scripts/lint-prompt-closeout.sh ] && [ -d prompts ]; then
+  echo "== prompt closeout lint =="
+  bash scripts/lint-prompt-closeout.sh prompts
+fi
+
 # 2. typecheck / build every TS entrypoint
 for f in src/*.ts test/*.ts; do
   echo "bun build $f"

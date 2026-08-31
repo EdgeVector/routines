@@ -9,9 +9,11 @@ import {
   buildRoutineAttributionEnv,
   ensureMemoryPath,
   formatAttributionTrailers,
+  buildOutcomeCloseout,
   resolveDispatchPrompt,
   routineActor,
 } from "../src/prompt.ts";
+import { parseOutcome } from "../src/outcome.ts";
 
 const prevHome = process.env.ROUTINES_HOME;
 let tmp: string | undefined;
@@ -214,5 +216,76 @@ describe("routine attribution env + trailers", () => {
     expect(formatAttributionTrailers({ automationId: "x" })).toBe(
       ["Driven-By: routine", "Automation-Id: x"].join("\n"),
     );
+  });
+});
+
+describe("outcome-sink closeout is appended AFTER the routine body", () => {
+  // The envelope already carries the sink contract, but it is PREPENDED to an
+  // often-long body, so it scrolls out of the agent's working focus before the
+  // body ends: 65 of 570 runs in the 24h to 2026-08-17T17:00Z finished
+  // `outcome=unknown`. Prompt ORDER is the whole fix for that mechanism, and
+  // order is only testable by position.
+  const bodyOnlyEntry = (dir: string, body: string) =>
+    parseEntry(
+      [
+        'harness = "codex"',
+        'model = "m1"',
+        'rrule = "FREQ=WEEKLY"',
+        `prompt = ${JSON.stringify(body)}`,
+      ].join("\n"),
+      join(dir, "coderings-weekly-fold.toml"),
+    );
+
+  test("a prompt that asks for no closeout still gets one, after its body", () => {
+    tmp = mkdtempSync(join(tmpdir(), "routines-mem-"));
+    process.env.ROUTINES_HOME = tmp;
+    process.env.ROUTINES_SKIP_NOTICES = "1";
+    // `coderings-weekly-fold` asks for neither sink nor trailer, and read
+    // `unknown` on 5 of its last 6 fires. Its prompt has no order to change.
+    const entry = bodyOnlyEntry(tmp, "Capture the weekly fold snapshot.");
+    const text = resolveDispatchPrompt(entry);
+
+    expect(text).toContain("Capture the weekly fold snapshot.");
+    expect(text).toContain("Close out this run");
+    // The point of the card: closeout comes AFTER the body, not only before it.
+    expect(text.lastIndexOf("Close out this run")).toBeGreaterThan(
+      text.indexOf("Capture the weekly fold snapshot."),
+    );
+    // It must name the sink concretely enough to act on.
+    expect(text).toContain("outcome.txt");
+    expect(text).toContain("$ROUTINES_RUN_DIR/outcome.txt");
+  });
+
+  test("closeout points at the concrete run dir when one is known", () => {
+    tmp = mkdtempSync(join(tmpdir(), "routines-mem-"));
+    process.env.ROUTINES_HOME = tmp;
+    process.env.ROUTINES_SKIP_NOTICES = "1";
+    const entry = bodyOnlyEntry(tmp, "Body.");
+    const runDir = join(tmp, "runs", "coderings-weekly-fold", "2026-08-31T00-00-00-000Z");
+    const text = resolveDispatchPrompt(entry, { runDir });
+    expect(text).toContain(join(runDir, "outcome.txt"));
+  });
+
+  test("closeout names the routine so a body-less prompt still identifies itself", () => {
+    tmp = mkdtempSync(join(tmpdir(), "routines-mem-"));
+    process.env.ROUTINES_HOME = tmp;
+    const entry = bodyOnlyEntry(tmp, "Body.");
+    expect(buildOutcomeCloseout(entry)).toContain("coderings-weekly-fold");
+  });
+
+  test("closeout text does not classify a run that merely echoes it", () => {
+    tmp = mkdtempSync(join(tmpdir(), "routines-mem-"));
+    process.env.ROUTINES_HOME = tmp;
+    process.env.ROUTINES_SKIP_NOTICES = "1";
+    const entry = bodyOnlyEntry(tmp, "Body.");
+    // Harnesses echo prompt text into the transcript. A worked trailer example
+    // in the prompt would classify every run that read it, which is worse than
+    // the `unknown` this block exists to prevent.
+    const outcome = parseOutcome("coderings-weekly-fold", resolveDispatchPrompt(entry), {
+      exitCode: 0,
+      timedOut: false,
+      sink: null,
+    });
+    expect(outcome.kind).toBe("unknown");
   });
 });

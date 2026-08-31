@@ -50,6 +50,7 @@ import { runsDir } from "./paths.ts";
 import { writeHeartbeat, type HeartbeatOutcome } from "./heartbeat.ts";
 import {
   filterBenignHarnessNoise,
+  OUTCOME_SINK_FILENAME,
   parseOutcome,
   parseOutcomeSink,
   type RunOutcome,
@@ -1175,6 +1176,38 @@ export async function runPreDispatchGate(
         source: "exit",
       };
     }
+  }
+
+  // A gate_command run NEVER loads a prompt — prompt.txt holds only
+  // "(gate_command skipped prompt load)". So no prompt-side instruction, at any
+  // position, can ever make a gate write the outcome sink: measured 2026-08-21,
+  // `last-stack-whats-wrong` (24 runs) and `last-stack-why-stopped` (12 runs)
+  // finished with no outcome.txt at all, most exit 0 with a valid legacy
+  // trailer. The runner is the only party present on this path, so the runner
+  // persists the sink itself.
+  //
+  // Persisting it also makes a gate run survivable: reconcileOrphanedRuns()
+  // recovers a verdict from outcome.txt when routinesd dies mid-run, and
+  // reads `unknown` when the file is absent. Every gate run was in that
+  // second class.
+  //
+  // The derived `source` is deliberately NOT rewritten. It is the triage
+  // signal that says WHY — `exit` distinguishes an external kill from a gate's
+  // own self-classified skip, and collapsing that into one "the runner wrote
+  // it" label is what
+  // papercut-routines-gate-timeout-records-benign-noop-safe-skip was about.
+  // The file names its own author on a comment line instead; parseOutcomeSink
+  // skips `#` lines, so a human sees who wrote it and the parser still reads
+  // the verdict.
+  // papercut-routines-outcome-sink-closeout-is-buried-before-routine-body
+  if (readOutcomeSink(args.runDir) === null) {
+    const detail = outcome.detail ? ` ${outcome.detail}` : "";
+    writeRunFile(
+      join(args.runDir, OUTCOME_SINK_FILENAME),
+      `# written by routinesd: a gate_command run loads no prompt, so nothing\n` +
+        `# instructs the routine to write this file (source=${outcome.source}).\n` +
+        `${outcome.kind}${detail}\n`,
+    );
   }
 
   const exitCode = timedOut || status === 0 ? 0 : completedExitCode(rawExit, timedOut, outcome);
