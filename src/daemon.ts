@@ -526,6 +526,71 @@ function sinkFinishedAt(runDir: string): string | null {
 }
 
 /**
+ * Inverse of the runner's run-stamp: `2026-08-31T10-11-35-047Z` came from an
+ * ISO instant with `[:.]` replaced by `-`, so the stamp itself carries the
+ * dispatch time of a run whose meta.json was never written.
+ */
+function startedAtFromStamp(stamp: string): string | null {
+  const m = /^(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})-(\d{3})Z$/.exec(stamp);
+  if (!m) return null;
+  const iso = `${m[1]}T${m[2]}:${m[3]}:${m[4]}.${m[5]}Z`;
+  return Number.isNaN(Date.parse(iso)) ? null : iso;
+}
+
+/**
+ * Start instant of the routinesd that is running right now, or null when no
+ * live daemon owns the runs tree. A run dispatched before this instant cannot
+ * belong to the live daemon, which is what makes a meta-less run dir safe to
+ * finalize.
+ */
+function liveDaemonStartedAtMs(): number | null {
+  const identity = readDaemonIdentity();
+  if (!identity || !identity.startedAt) return null;
+  if (!pidAlive(identity.pid)) return null;
+  const t = Date.parse(identity.startedAt);
+  return Number.isNaN(t) ? null : t;
+}
+
+/**
+ * A run dir with NO meta.json at all. `runOnce` creates the dir and writes
+ * prompt.txt before it can write meta, and a `gate_command` routine spends its
+ * whole gate in that window, so a daemon restart mid-gate used to leave a
+ * directory that no surface would ever read: the reconcile pass skipped it for
+ * want of a meta, and the routine's `lastRun` silently stayed on the previous
+ * run. Reconstruct just enough for the shared finalize path below.
+ *
+ * Only a dispatch that predates the live daemon qualifies. Without a live
+ * daemon to compare against we cannot prove the run is not in flight, so we
+ * leave it alone rather than finalize a running dispatch.
+ */
+function reconstructMissingMeta(
+  id: string,
+  stamp: string,
+  runDir: string,
+  liveDaemonStartedMs: number | null,
+): Record<string, unknown> | null {
+  if (!existsSync(join(runDir, "prompt.txt"))) return null; // not a dispatched run
+  const startedAt = startedAtFromStamp(stamp);
+  if (startedAt == null) return null;
+  if (liveDaemonStartedMs == null) return null;
+  if (Date.parse(startedAt) >= liveDaemonStartedMs) return null; // the live daemon owns it
+  return {
+    id,
+    trigger: "scheduled",
+    harness: null,
+    model: null,
+    effort: null,
+    cwd: null,
+    command: null,
+    startedAt,
+    harnessPid: null,
+    daemonPid: null,
+    status: "running",
+    metaReconstructed: true,
+  };
+}
+
+/**
  * Scan runsDir for every run dir still marked `status:"running"` (or with no
  * finishedAt and no terminal status) whose harness pid is no longer alive —
  * evidence of a prior routinesd process dying/restarting mid-run without ever
@@ -549,6 +614,7 @@ export function reconcileOrphanedRuns(now: Date = new Date()): OrphanedRunInfo[]
   const base = runsDir();
   if (!existsSync(base)) return [];
   const orphaned: OrphanedRunInfo[] = [];
+  const liveDaemonStartedMs = liveDaemonStartedAtMs();
   let ids: string[];
   try {
     ids = readdirSync(base);
@@ -568,16 +634,27 @@ export function reconcileOrphanedRuns(now: Date = new Date()): OrphanedRunInfo[]
     for (const stamp of stamps) {
       const runDir = join(idDir, stamp);
       const metaPath = join(runDir, "meta.json");
-      if (!existsSync(metaPath)) continue;
       let meta: Record<string, unknown>;
-      try {
-        meta = JSON.parse(readFileSync(metaPath, "utf8")) as Record<string, unknown>;
-      } catch {
-        continue;
+      if (existsSync(metaPath)) {
+        try {
+          meta = JSON.parse(readFileSync(metaPath, "utf8")) as Record<string, unknown>;
+        } catch {
+          continue;
+        }
+      } else {
+        const reconstructed = reconstructMissingMeta(id, stamp, runDir, liveDaemonStartedMs);
+        if (reconstructed == null) continue;
+        meta = reconstructed;
       }
+      const metaReconstructed = meta.metaReconstructed === true;
       if (!isOrphanCandidate(meta)) continue;
       const harnessPid = typeof meta.harnessPid === "number" ? meta.harnessPid : null;
       if (harnessPid != null && pidAlive(harnessPid)) continue; // legitimately still running
+      // No harness pid yet: the run is between run-dir creation and the spawn
+      // (a gate_command run is here for its whole gate). It is an orphan only
+      // once the daemon that dispatched it is gone.
+      const daemonPid = typeof meta.daemonPid === "number" ? meta.daemonPid : null;
+      if (harnessPid == null && daemonPid != null && pidAlive(daemonPid)) continue;
 
       const sink = parseOutcomeSink(readOutcomeSink(runDir));
       const finishedAt =
@@ -587,7 +664,9 @@ export function reconcileOrphanedRuns(now: Date = new Date()): OrphanedRunInfo[]
       const outcome = sink?.kind ?? "unknown";
       const outcomeDetail =
         sink?.detail ??
-        `orphaned: routinesd restarted mid-run (harness pid ${harnessPid ?? "unknown"} gone, no outcome sink)`;
+        (metaReconstructed
+          ? "orphaned: routinesd exited between run-dir creation and the first meta write (no meta.json, no outcome sink)"
+          : `orphaned: routinesd restarted mid-run (harness pid ${harnessPid ?? "unknown"} gone, no outcome sink)`);
       const outcomeSource = sink ? "sink" : "orphan";
 
       meta.status = "orphaned";

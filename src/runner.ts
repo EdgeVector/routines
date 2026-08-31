@@ -607,6 +607,30 @@ async function runOnce(
   // Empty logs so mid-flight `tail -f` works even before first chunk.
   writeRunFile(join(runDir, "stdout.log"), "");
   writeRunFile(join(runDir, "stderr.log"), "");
+  // Claim the run in meta.json before anything slow can run. A gate_command
+  // routine spends its whole gate below this line, and a daemon restart in
+  // that window used to leave a run dir with no meta at all — which the
+  // orphan reconcile skipped, so the dispatch vanished from every status read
+  // and the routine kept the previous run as its `lastRun`. Every later writer
+  // (gate skip, all-routes-fenced, harness spawn, finalize) overwrites this.
+  writeEarlyMeta({
+    runDir,
+    id: entry.id,
+    trigger,
+    harness: entry.harness,
+    model: entry.model,
+    effort: entry.effort,
+    cwd: entry.cwd,
+    command: invocation.display,
+    startedAt: startedAt.toISOString(),
+    harnessPid: null,
+    resolvedBy: entry.resolvedBy,
+    difficulty: entry.difficulty,
+    matrixResolution: entry.matrixResolution,
+    gateCommand: entry.gateCommand ?? null,
+    gateProceeded: false,
+    gateSkippedHarness: false,
+  });
 
   const project = loadProjectConfig();
   const cwd = resolveRoutineCwd(entry.cwd, project);

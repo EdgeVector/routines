@@ -567,6 +567,120 @@ describe("reconcile scans every unfinished run dir", () => {
     expect(orphaned).toHaveLength(1);
     expect(JSON.parse(readFileSync(join(runDir, "meta.json"), "utf8")).status).toBe("orphaned");
   });
+
+  // A gate_command run holds its run dir for the whole gate before the spawn
+  // that writes meta.json. A daemon restart in that window leaves a dispatched
+  // run with prompt.txt, empty logs and no meta at all.
+  function writeMetaLessRun(id: string, stamp: string): string {
+    const runDir = join(home, "runs", id, stamp);
+    mkdirSync(runDir, { recursive: true });
+    writeFileSync(join(runDir, "prompt.txt"), "dispatched prompt\n");
+    writeFileSync(join(runDir, "stdout.log"), "");
+    writeFileSync(join(runDir, "stderr.log"), "");
+    return runDir;
+  }
+
+  test("finalizes a dispatched run that never wrote meta.json", () => {
+    writeDaemonIdentity({
+      pid: process.pid, // a live daemon, started after the run below
+      startedAt: "2026-08-31T10:16:38.442Z",
+      executable: null,
+      stopReason: null,
+      stoppedAt: null,
+    });
+    const runDir = writeMetaLessRun("gated", "2026-08-31T10-11-35-047Z");
+
+    const orphaned = reconcileOrphanedRuns(new Date("2026-08-31T10:18:00.000Z"));
+
+    expect(orphaned).toHaveLength(1);
+    expect(orphaned[0]).toMatchObject({ id: "gated", outcome: "unknown", outcomeSource: "orphan" });
+    expect(orphaned[0]?.outcomeDetail).toContain("no meta.json");
+    const meta = JSON.parse(readFileSync(join(runDir, "meta.json"), "utf8"));
+    expect(meta.status).toBe("orphaned");
+    expect(meta.startedAt).toBe("2026-08-31T10:11:35.047Z");
+    expect(meta.metaReconstructed).toBe(true);
+    // The lost dispatch is now the routine's visible last run.
+    expect(readState("gated").lastRunDir).toBe(runDir);
+  });
+
+  test("recovers the sink of a meta-less run that finished its work", () => {
+    writeDaemonIdentity({
+      pid: process.pid,
+      startedAt: "2026-08-31T10:16:38.442Z",
+      executable: null,
+      stopReason: null,
+      stoppedAt: null,
+    });
+    const runDir = writeMetaLessRun("gated-sink", "2026-08-31T10-11-35-047Z");
+    writeFileSync(join(runDir, "outcome.txt"), "ok did the work\n");
+
+    const orphaned = reconcileOrphanedRuns(new Date("2026-08-31T10:18:00.000Z"));
+
+    expect(orphaned).toHaveLength(1);
+    expect(orphaned[0]).toMatchObject({ id: "gated-sink", outcome: "ok", outcomeSource: "sink" });
+  });
+
+  test("leaves a meta-less run the live daemon dispatched alone", () => {
+    writeDaemonIdentity({
+      pid: process.pid, // live daemon, started BEFORE the run
+      startedAt: "2026-08-31T10:00:00.000Z",
+      executable: null,
+      stopReason: null,
+      stoppedAt: null,
+    });
+    const runDir = writeMetaLessRun("in-gate", "2026-08-31T10-11-35-047Z");
+
+    expect(reconcileOrphanedRuns(new Date("2026-08-31T10:12:00.000Z"))).toEqual([]);
+    expect(existsSync(join(runDir, "meta.json"))).toBe(false);
+  });
+
+  test("leaves a meta-less run alone when no live daemon can be identified", () => {
+    writeDaemonIdentity({
+      pid: 999_999_999, // dead
+      startedAt: "2026-08-31T10:16:38.442Z",
+      executable: null,
+      stopReason: null,
+      stoppedAt: null,
+    });
+    const runDir = writeMetaLessRun("no-daemon", "2026-08-31T10-11-35-047Z");
+
+    expect(reconcileOrphanedRuns(new Date("2026-08-31T10:18:00.000Z"))).toEqual([]);
+    expect(existsSync(join(runDir, "meta.json"))).toBe(false);
+  });
+
+  test("does not finalize a pre-spawn run while its daemon is alive", () => {
+    const runDir = join(home, "runs", "spawning", "2026-08-31T10-11-35-047Z");
+    writeMeta(runDir, {
+      id: "spawning",
+      status: "running",
+      harnessPid: null,
+      daemonPid: process.pid, // this process stands in for the live daemon
+      startedAt: "2026-08-31T10:11:35.047Z",
+      exitCode: null,
+      finishedAt: null,
+    });
+
+    expect(reconcileOrphanedRuns(new Date("2026-08-31T10:18:00.000Z"))).toEqual([]);
+    expect(JSON.parse(readFileSync(join(runDir, "meta.json"), "utf8")).status).toBe("running");
+  });
+
+  test("finalizes a pre-spawn run whose daemon is gone", () => {
+    const runDir = join(home, "runs", "spawn-lost", "2026-08-31T10-11-35-047Z");
+    writeMeta(runDir, {
+      id: "spawn-lost",
+      status: "running",
+      harnessPid: null,
+      daemonPid: 999_999_999,
+      startedAt: "2026-08-31T10:11:35.047Z",
+      exitCode: null,
+      finishedAt: null,
+    });
+
+    const orphaned = reconcileOrphanedRuns(new Date("2026-08-31T10:18:00.000Z"));
+
+    expect(orphaned).toHaveLength(1);
+    expect(JSON.parse(readFileSync(join(runDir, "meta.json"), "utf8")).status).toBe("orphaned");
+  });
 });
 
 describe("tick loop reconciles a harness that dies after boot", () => {
