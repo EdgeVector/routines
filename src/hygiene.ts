@@ -512,9 +512,11 @@ function tryFfInstall(
   let root: string | null = null;
   try {
     if (entry) {
-      const real = execFileSync("python3", ["-c", "import os,sys; print(os.path.realpath(sys.argv[1]))", entry], {
-        encoding: "utf8",
-      }).trim();
+      // realpathSync, not a python3 -c spawn: the interpreter start alone cost
+      // ~0.5-1.2 s on a loaded machine, for one symlink resolution the runtime
+      // already does natively. Same semantics — resolves relative to cwd and
+      // throws on a missing path, which the surrounding catch already ignores.
+      const real = realpathSync(entry);
       // entry is …/src/cli.ts or …/bin/routines → repo root is parent of src|bin
       const dir = real.replace(/\/src\/cli\.ts$/, "").replace(/\/bin\/routines$/, "");
       if (dir && existsSync(join(dir, ".git"))) root = dir;

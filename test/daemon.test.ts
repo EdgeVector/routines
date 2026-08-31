@@ -51,6 +51,12 @@ beforeEach(() => {
   // every other run. test/fallback.test.ts already pins this to 0; daemon tests
   // need the same pin, since they assert scheduling, not burst spreading.
   process.env.ROUTINES_FALLBACK_JITTER_MS = "0";
+  // Every dispatched routine builds a prompt envelope, and the envelope asks
+  // the situations CLI for recent notices — one extra process spawn per
+  // dispatch. Measured at ~190 ms per spawn on a loaded machine, that was
+  // ~400 ms per test of wall time no assertion in this file reads. These tests
+  // assert scheduling, not the notices banner, so take the supported skip.
+  process.env.ROUTINES_SKIP_NOTICES = "1";
   mkdirSync(join(home, "registry"), { recursive: true });
 
   const harnessStub = stub(

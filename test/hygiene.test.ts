@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, existsSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -51,6 +51,24 @@ describe("truncateMemoryText", () => {
 });
 
 describe("runHygiene", () => {
+  // runHygiene probes the prompt doctor. Without an explicit override the probe
+  // resolves `last-stack-routines-prompt-doctor` on the host PATH and runs the
+  // machine's REAL doctor, which scans every installed prompt. Measured on a
+  // loaded machine that spawn costs ~1.25 s, and these five tests were failing
+  // bun's 5 s default at 5007-5053 ms — the whole overrun was one host binary
+  // no assertion here looks at. Point it at an absent path so the probe returns
+  // "skipped" and the tests measure this repo's code only. The doctor's real
+  // behaviour is covered by the "prompt doctor probe" describe below, which
+  // installs its own fixture doctor.
+  const prevDoctor = process.env.ROUTINES_PROMPT_DOCTOR_BIN;
+  beforeEach(() => {
+    process.env.ROUTINES_PROMPT_DOCTOR_BIN = join(tmpdir(), "routines-absent-prompt-doctor");
+  });
+  afterEach(() => {
+    if (prevDoctor === undefined) delete process.env.ROUTINES_PROMPT_DOCTOR_BIN;
+    else process.env.ROUTINES_PROMPT_DOCTOR_BIN = prevDoctor;
+  });
+
   test("reports the daemon state after a successful artifact repair", () => {
     const home = mkdtempSync(join(tmpdir(), "routines-hygiene-daemon-"));
     const states = [
