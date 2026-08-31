@@ -6,6 +6,7 @@ import {
   nameMatchesRoutine,
   parseOutcome,
   parseOutcomeSink,
+  detectAbandonedBackgroundTask,
 } from "../src/outcome.ts";
 
 describe("nameMatchesRoutine", () => {
@@ -770,5 +771,60 @@ describe("parseOutcomeSink", () => {
     expect(o.kind).toBe("noop");
     expect(o.source).toBe("sink");
     expect(o.detail).toBe("no-eligible-cards");
+  });
+});
+
+describe("abandoned background task", () => {
+  // Shape taken verbatim from
+  // ~/.routines/runs/last-stack-disk-reclaim/2026-08-31T02-48-55-437Z: the
+  // dispatch's last stdout event is a background-task notification, the
+  // harness exits 0, and the routine never wrote a verdict.
+  const darkRun = [
+    '{"type":"assistant","message":{"content":[{"type":"text","text":"Scratch reclaim is running in the background. I will wait for the notification before closing out."}]}}',
+    '{"type":"system","subtype":"task_updated","task_id":"bj9ewgzkc","patch":{"status":"killed","end_time":1788144806718}}',
+    '{"type":"system","subtype":"task_notification","task_id":"bj9ewgzkc","status":"stopped","summary":"last-stack-scratch-reclaim --execute"}',
+  ].join("\n");
+
+  test("scores a dispatch that ended owing a turn as an error, not unknown", () => {
+    const o = parseOutcome("last-stack-disk-reclaim", darkRun, {
+      exitCode: 0,
+      timedOut: false,
+    });
+    expect(o.kind).toBe("error");
+    expect(o.source).toBe("abandoned_background_task");
+    expect(o.detail).toContain("background-task-abandoned");
+    expect(o.detail).toContain("bj9ewgzkc");
+  });
+
+  test("an explicit sink still wins over the guard", () => {
+    const o = parseOutcome("last-stack-disk-reclaim", darkRun, {
+      exitCode: 0,
+      timedOut: false,
+      sink: "ok reclaimed_gb=9.7",
+    });
+    expect(o.kind).toBe("ok");
+    expect(o.source).toBe("sink");
+  });
+
+  test("a ROUTINE_RESULT trailer still wins over the guard", () => {
+    const text = darkRun + "\nROUTINE_RESULT outcome=ok actions=1 detail=reclaimed 9.7GiB";
+    const o = parseOutcome("last-stack-disk-reclaim", text, { exitCode: 0, timedOut: false });
+    expect(o.kind).toBe("ok");
+    expect(o.source).toBe("routine_result");
+  });
+
+  test("a run that never backgrounded a task stays unknown", () => {
+    const o = parseOutcome("last-stack-disk-reclaim", "just some prose, no verdict", {
+      exitCode: 0,
+      timedOut: false,
+    });
+    expect(o.kind).toBe("unknown");
+    expect(o.source).toBe("none");
+  });
+
+  test("detector returns the trailing task id and null when absent", () => {
+    expect(detectAbandonedBackgroundTask(darkRun)).toBe("task=bj9ewgzkc");
+    expect(detectAbandonedBackgroundTask("nothing here")).toBeNull();
+    expect(detectAbandonedBackgroundTask("")).toBeNull();
   });
 });

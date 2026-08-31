@@ -20,6 +20,7 @@ type OutcomeSource =
   | "useful_work" // routine-specific concrete work evidence in the transcript
   | "safe_skip" // known successful skip transcript from a bounded maintenance routine
   | "exit" // inferred from non-zero exit / timeout only
+  | "abandoned_background_task" // dispatch ended with a backgrounded task still owed a turn
   | "none";
 
 export interface RunOutcome {
@@ -447,7 +448,47 @@ export function parseOutcome(
     };
   }
 
+  // A scheduled dispatch is one shot: when the agent backgrounds a task and
+  // yields its turn, there is no later turn to receive the completion
+  // notification, so the routine never writes a verdict and the harness still
+  // exits 0. That reached this fallback as `unknown`/`none`, which
+  // `shouldEscalate` deliberately ignores — so the run vanished instead of
+  // being reported. Name the cause so it escalates like any other failure.
+  // papercut-backup-probe-scheduled-run-background-task-stall
+  const abandoned = detectAbandonedBackgroundTask(text);
+  if (abandoned) {
+    return {
+      kind: "error",
+      detail: clip(`background-task-abandoned ${abandoned}`),
+      source: "abandoned_background_task",
+    };
+  }
+
   return { kind: "unknown", detail: null, source: "none" };
+}
+
+/** Background-task lifecycle events emitted by the Claude Code stream. */
+const BACKGROUND_TASK_EVENT_RE =
+  /"subtype"\s*:\s*"(task_notification|task_updated|task_started)"/g;
+const BACKGROUND_TASK_ID_RE = /"task_id"\s*:\s*"([A-Za-z0-9_-]{1,64})"/g;
+
+/**
+ * Detect a dispatch that ended owing a turn to a backgrounded task.
+ *
+ * Only ever consulted once every explicit signal has already been ruled out
+ * (no sink, no ROUTINE_RESULT, no heartbeat, no stream-json success), so a run
+ * whose background task completed and which then reported normally never
+ * reaches here. Returns the trailing task id for the detail line, or null.
+ */
+export function detectAbandonedBackgroundTask(text: string): string | null {
+  if (!text) return null;
+  BACKGROUND_TASK_EVENT_RE.lastIndex = 0;
+  const events = [...text.matchAll(BACKGROUND_TASK_EVENT_RE)];
+  if (events.length === 0) return null;
+  // The run used background tasks and still produced no verdict of any kind.
+  const ids = [...text.matchAll(BACKGROUND_TASK_ID_RE)].map((m) => m[1]!);
+  const last = ids.length > 0 ? ids[ids.length - 1]! : null;
+  return last ? `task=${last}` : "task=unknown";
 }
 
 function parseDiskReclaimUsefulWork(
