@@ -58,6 +58,11 @@ describe("dispatch prompt envelope", () => {
     expect(text).toContain("keep polling that same call until it reaches a");
     expect(text).toContain("A tool's first-yield");
     expect(text).toContain("timeout is not the command's exit status");
+    expect(text).toContain("A scheduled dispatch has exactly ONE turn");
+    expect(text).toContain(
+      "background-task completion notice can never reach you",
+    );
+    expect(text).toContain("Run the command in the foreground and wait");
     expect(text).toContain("Explicit routine outcome (required)");
     expect(text).toContain('$ROUTINES_RUN_DIR/outcome.txt');
     expect(text).toContain('outcomeSource="sink"');
