@@ -177,7 +177,7 @@ function geminiEffort(entry: RoutineEntry): string {
 }
 
 /** Extra dirs agy may need outside the routine cwd (same set as Codex). */
-export function geminiWritableDirs(): string[] {
+function geminiWritableDirs(): string[] {
   return codexWritableDirs();
 }
 
