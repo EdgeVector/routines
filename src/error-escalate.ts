@@ -205,7 +205,7 @@ export function isClassifiedErrorOutcome(lastOutcome: string | null | undefined)
 }
 
 /** Unlink the per-id escalate stamp. Never throws. */
-export function clearEscalateState(routineId: string): boolean {
+function clearEscalateState(routineId: string): boolean {
   const p = statePath(routineId);
   if (!existsSync(p)) return false;
   try {
