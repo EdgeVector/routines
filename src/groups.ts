@@ -77,7 +77,7 @@ export function isGroupId(value: string): boolean {
   return BY_ID.has(value);
 }
 
-export function groupById(id: string): RoutineGroup {
+function groupById(id: string): RoutineGroup {
   return BY_ID.get(id) ?? BY_ID.get("other")!;
 }
 
