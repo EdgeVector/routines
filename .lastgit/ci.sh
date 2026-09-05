@@ -60,7 +60,10 @@ done
 if [ "$found_tests" = 1 ]; then
   # Some daemon/escalation tests exercise real process dispatch and bounded
   # retry loops; the default 5s Bun test timeout is too tight under CI load.
-  bun test --timeout=30000
+  # 60s per test, not the 30s default: on a loaded CI host (load average 40+ with
+  # lastdbd busy) two subprocess-driven tests ran 34s and 38s and timed out on
+  # the first Forge CI run. Same reasoning and value as the lastgit gate.
+  bun test --timeout=60000
 else
   echo "ci: no tests yet (repo skeleton) — gate is syntax + typecheck"
 fi
