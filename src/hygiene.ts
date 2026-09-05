@@ -20,6 +20,12 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 import { daemonLogDir, routinesHome } from "./paths.ts";
+import {
+  isThrottledProcessType,
+  plistPath as routinesdPlistPath,
+  readProcessType,
+  SCHEDULER_PROCESS_TYPE,
+} from "./launchd.ts";
 
 export const HYGIENE_LAUNCHD_LABEL = "com.edgevector.routines-hygiene";
 
@@ -72,6 +78,15 @@ export interface HygieneResult {
     loaded: boolean;
     pid: number | null;
     lastExitStatus: number | null;
+    /**
+     * The QoS band the LIVE plist asks for, or `null` when the plist is
+     * absent, unreadable, or declares no ProcessType.
+     *
+     * `null` means NOT MEASURED. It must never be rendered as "fine".
+     */
+    processType: string | null;
+    /** True only for a value that was read AND recognised as throttled. */
+    throttled: boolean;
     detail: string;
   };
   publish: { attempted: boolean; ok: boolean; detail: string };
@@ -208,8 +223,26 @@ export function truncateMemoryText(text: string, maxLines: number): string | nul
   return header + kept.join("\n") + "\n";
 }
 
+/**
+ * Read the QoS band the live routinesd plist asks for.
+ *
+ * `launchctl list` reports `loaded pid=N` for a daemon that is throttled to a
+ * twentieth of its schedule, which is why nothing surfaced the 2026-09-05
+ * dispatch outage for over four hours. The band is only in the plist, so read
+ * the plist.
+ */
+function probeLiveProcessType(): string | null {
+  try {
+    return readProcessType(readFileSync(routinesdPlistPath(), "utf8"));
+  } catch {
+    return null;
+  }
+}
+
 function probeDaemon(): HygieneResult["daemon"] {
   const label = "com.edgevector.routinesd";
+  const processType = probeLiveProcessType();
+  const throttled = isThrottledProcessType(processType);
   try {
     const out = execFileSync("launchctl", ["list", label], {
       encoding: "utf8",
@@ -225,6 +258,8 @@ function probeDaemon(): HygieneResult["daemon"] {
       loaded: true,
       pid: Number.isFinite(pid) ? pid : null,
       lastExitStatus: Number.isFinite(lastExitStatus) ? lastExitStatus : null,
+      processType,
+      throttled,
       detail: pid ? `loaded pid=${pid}` : `loaded but no pid (LastExitStatus=${lastExitStatus})`,
     };
   } catch (err) {
@@ -233,6 +268,8 @@ function probeDaemon(): HygieneResult["daemon"] {
       loaded: false,
       pid: null,
       lastExitStatus: null,
+      processType,
+      throttled,
       detail: `not loaded: ${(err as Error).message}`,
     };
   }
@@ -777,6 +814,18 @@ export function runHygiene(opts: HygieneOptions = {}): HygieneResult {
   } else if (daemon.pid == null) {
     warnings.push(`routinesd loaded but no live pid (${daemon.detail})`);
   }
+  // Independent of loaded/pid: a throttled daemon is live, answers every
+  // liveness check, and still dispatches at a twentieth of its schedule.
+  if (daemon.throttled) {
+    warnings.push(
+      `routinesd is in the throttled launchd band: ProcessType=${daemon.processType} ` +
+        `in ${routinesdPlistPath()} (expected ${SCHEDULER_PROCESS_TYPE}). Coalesced ` +
+        `timers stop the 15s tick from firing; measured 90-1153s gaps and ~10-24 ` +
+        `dispatches/hour against ~60. Heal: rewrite the plist with ` +
+        `\`routines install-daemon\`, then launchctl bootout + bootstrap ` +
+        `(kickstart does not re-read the plist).`,
+    );
+  }
 
   return {
     home,
@@ -844,7 +893,25 @@ function xmlEscape(s: string): string {
     .replace(/>/g, "&gt;");
 }
 
-/** Render a StartInterval launchd plist that runs `routines hygiene`. */
+/**
+ * Render a StartInterval launchd plist that runs `routines hygiene`.
+ *
+ * This job declares `StartInterval` 3600 and used to declare
+ * `ProcessType Background`. The throttled band coalesces timers, and
+ * `routine-fleet-health` recorded the consequence seven times between
+ * 2026-09-03 and 2026-09-05: the job reads `loaded`, `LastExitStatus=0`,
+ * `interval=3600`, and its `hygiene.out.log` mtime stalls SEVEN TO EIGHT
+ * HOURS. Two of those windows were 04:37Z->11:47Z and 10:52Z->17:52Z, so
+ * system sleep does not explain them. No entry in that record ever proposed a
+ * cause.
+ *
+ * An hourly pruning job firing at a seventh of its declared rate is the same
+ * defect the scheduler had, on the same host, from the same plist key — so it
+ * gets the same value. The causal link is a strong hypothesis backed by that
+ * correlation, not a proof; the fix is free either way.
+ *
+ * See papercut-routines-hygiene-launchd-out-log-stalls-hours.
+ */
 export function renderHygienePlist(opts: {
   program: string;
   runtime?: string;
@@ -883,7 +950,7 @@ ${envXml}
   <key>RunAtLoad</key>
   <true/>
   <key>ProcessType</key>
-  <string>Background</string>
+  <string>${SCHEDULER_PROCESS_TYPE}</string>
   <key>StandardOutPath</key>
   <string>${xmlEscape(join(logDir, "hygiene.out.log"))}</string>
   <key>StandardErrorPath</key>

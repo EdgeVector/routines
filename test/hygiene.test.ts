@@ -15,6 +15,11 @@ import {
   selectRunsToPrune,
   truncateMemoryText,
 } from "../src/hygiene.ts";
+import {
+  isThrottledProcessType,
+  readProcessType,
+  SCHEDULER_PROCESS_TYPE,
+} from "../src/launchd.ts";
 
 describe("selectRunsToPrune", () => {
   test("keeps newest N and anything within day window", () => {
@@ -90,6 +95,8 @@ describe("runHygiene", () => {
         loaded: false,
         pid: null,
         lastExitStatus: null,
+        processType: "Standard",
+        throttled: false,
         detail: "not loaded",
       },
       {
@@ -97,6 +104,8 @@ describe("runHygiene", () => {
         loaded: true,
         pid: 42,
         lastExitStatus: 0,
+        processType: "Standard",
+        throttled: false,
         detail: "loaded pid=42",
       },
     ];
@@ -557,5 +566,68 @@ describe("prompt doctor probe", () => {
     expect(r.promptDoctor.attempted).toBe(false);
     expect(r.promptDoctor.detail).toContain("not installed");
     expect(r.warnings.some((w) => w.includes("prompt drift"))).toBe(false);
+  });
+});
+
+describe("throttled launchd band detection", () => {
+  test("the hygiene plist is not throttled", () => {
+    // StartInterval 3600 with a coalesced timer fired every 7-8 hours;
+    // routine-fleet-health logged that stall seven times and never found it,
+    // because `LastExitStatus=0` and `loaded` both read healthy.
+    const plist = renderHygienePlist({ program: "/x/launcher.sh", direct: true });
+    expect(readProcessType(plist)).toBe(SCHEDULER_PROCESS_TYPE);
+    expect(isThrottledProcessType(readProcessType(plist))).toBe(false);
+  });
+
+  test("a throttled live plist is warned about even though the daemon is up", () => {
+    const home = mkdtempSync(join(tmpdir(), "routines-hygiene-throttled-"));
+    const result = runHygiene({
+      home,
+      dryRun: true,
+      publishStatus: false,
+      daemonProbe: () => ({
+        label: "com.edgevector.routinesd",
+        loaded: true,
+        pid: 58025,
+        lastExitStatus: 0,
+        processType: "Background",
+        throttled: true,
+        detail: "loaded pid=58025",
+      }),
+    });
+
+    expect(result.daemon.throttled).toBe(true);
+    expect(result.daemon.processType).toBe("Background");
+    const warning = result.warnings.find((w) => w.includes("throttled launchd band"));
+    expect(warning).toBeDefined();
+    // The warning must carry the heal, because kickstart does NOT re-read the
+    // plist and an operator who only kickstarts will conclude the fix failed.
+    expect(warning).toContain("bootout");
+    expect(warning).toContain(SCHEDULER_PROCESS_TYPE);
+    // A live pid must not suppress it: that combination IS the failure.
+    expect(result.warnings.some((w) => w.includes("no live pid"))).toBe(false);
+  });
+
+  test("an unreadable band produces no throttle warning and no clean claim", () => {
+    const home = mkdtempSync(join(tmpdir(), "routines-hygiene-unknown-band-"));
+    const result = runHygiene({
+      home,
+      dryRun: true,
+      publishStatus: false,
+      daemonProbe: () => ({
+        label: "com.edgevector.routinesd",
+        loaded: true,
+        pid: 42,
+        lastExitStatus: 0,
+        processType: null,
+        throttled: false,
+        detail: "loaded pid=42",
+      }),
+    });
+
+    expect(result.warnings.some((w) => w.includes("throttled launchd band"))).toBe(false);
+    // `null` is reported verbatim so a reader can tell "not measured" from
+    // "measured and fine".
+    expect(result.daemon.processType).toBeNull();
   });
 });

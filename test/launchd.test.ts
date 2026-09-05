@@ -1,10 +1,14 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  isThrottledProcessType,
   LAUNCHD_LABEL,
   plistOptionsForEntrypoint,
+  readProcessType,
   reloadDaemonPlist,
   renderPlist,
+  SCHEDULER_PROCESS_TYPE,
+  THROTTLED_PROCESS_TYPES,
 } from "../src/launchd.ts";
 
 function programArguments(plist: string): string[] {
@@ -97,5 +101,54 @@ describe("routinesd launchd reload", () => {
     expect(result.message).toContain("bootstrap 1");
     expect(result.message).toContain("bootstrap 2");
     expect(result.message).toContain("load:");
+  });
+});
+
+describe("launchd QoS band", () => {
+  // A scheduler that asks for the throttled band gets coalesced timers, and
+  // every other surface still reports it healthy. On 2026-09-05 that cost the
+  // fleet four hours of dispatch with `launchctl list` reporting a live pid
+  // the whole time. This guard is the reason a generator cannot reintroduce it.
+  const entrypoints = [
+    { execPath: "/opt/bun/bin/bun", entrypoint: "/checkout/src/cli.ts" },
+    {
+      execPath: "/host-track/routines/current/dist/routines",
+      entrypoint: "/$bunfs/root/routines",
+    },
+    {
+      execPath: `/Users/test/.host-track/apps/routines/versions/${"a".repeat(64)}/dist/routines`,
+      entrypoint: "/$bunfs/root/routines",
+    },
+  ];
+
+  for (const opts of entrypoints) {
+    test(`the routinesd plist is not throttled (${opts.entrypoint})`, () => {
+      const plist = renderPlist(plistOptionsForEntrypoint(opts));
+      const band = readProcessType(plist);
+      expect(band).toBe(SCHEDULER_PROCESS_TYPE);
+      expect(isThrottledProcessType(band)).toBe(false);
+    });
+  }
+
+  test("Background is recognised as throttled", () => {
+    expect(THROTTLED_PROCESS_TYPES).toContain("Background");
+    expect(isThrottledProcessType("Background")).toBe(true);
+    expect(isThrottledProcessType(SCHEDULER_PROCESS_TYPE)).toBe(false);
+  });
+
+  test("an unreadable band is not judged clean", () => {
+    // `null` means "I did not measure it". It must not read as "fine", which
+    // is the exact failure the daemon probe had: loaded pid=N on a job that
+    // was firing one tick in twelve minutes.
+    expect(readProcessType("<plist><dict></dict></plist>")).toBeNull();
+    expect(isThrottledProcessType(null)).toBe(false);
+  });
+
+  test("readProcessType reads the value out of a real rendered plist", () => {
+    const plist = renderPlist({ program: "/x/routines", runtime: "/x/bun" });
+    expect(readProcessType(plist)).toBe(SCHEDULER_PROCESS_TYPE);
+    expect(readProcessType(plist.replace(SCHEDULER_PROCESS_TYPE, "Background"))).toBe(
+      "Background",
+    );
   });
 });

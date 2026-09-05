@@ -13,6 +13,62 @@ import { daemonLogDir, routinesHome } from "./paths.ts";
 
 export const LAUNCHD_LABEL = "com.edgevector.routinesd";
 
+/**
+ * The launchd QoS band a timer-driven job must ask for.
+ *
+ * macOS holds a `Background` job in the throttled band: low CPU priority,
+ * low-priority disk I/O, and — the part that matters here — COALESCED TIMERS.
+ * Child processes inherit the band, so every `spawnSync` on the dispatch path
+ * inherits it too.
+ *
+ * Measured on Tom's Mac, 2026-09-05, same host and the same documented
+ * `tickMs = 15_000`:
+ *
+ * | ProcessType | observed tick gaps        | dispatch rate |
+ * |-------------|---------------------------|---------------|
+ * | Background  | 90 s - 1153 s             | ~10-24 / hour |
+ * | Standard    | 15.3 - 18.3 s             | ~60 / hour    |
+ *
+ * Under `Background` a freshly booted daemon logged NOTHING for 9m15s — not
+ * even its own start line — while a `sample` put 3214 of 3214 main-thread
+ * samples in `kevent64`. It was not busy. It was asleep on a 15 s timer that
+ * the system declined to fire. The fleet shipped nothing for over four hours.
+ *
+ * `Standard` is the value that was measured, so `Standard` is what we write.
+ * The papercut prescribed `Adaptive`; that value was never tested on this
+ * host, and a generator that disagrees with the healed live plist is the
+ * drift that caused this in the first place.
+ *
+ * See papercut-routinesd-tick-loop-stalls-as-inflight-grows-fleet-dispatch-stops-silently-20260905.
+ */
+export const SCHEDULER_PROCESS_TYPE = "Standard";
+
+/**
+ * ProcessType values that put a job in the throttled band.
+ *
+ * Apple documents `Background` as "not visible to the user, may be throttled".
+ * A job whose correctness depends on firing ON TIME — a scheduler, a watchdog,
+ * a memory guard — must never ask for it.
+ */
+export const THROTTLED_PROCESS_TYPES: readonly string[] = ["Background"];
+
+/** Read the `ProcessType` value out of a rendered or on-disk plist. */
+export function readProcessType(plistXml: string): string | null {
+  const m = plistXml.match(/<key>ProcessType<\/key>\s*<string>([^<]*)<\/string>/);
+  return m ? m[1]!.trim() : null;
+}
+
+/**
+ * True only for a value we READ and recognised as throttled.
+ *
+ * `null` means the plist had no ProcessType key, or could not be read. That is
+ * "I did not judge", not "it is fine", and callers must not render it as a
+ * clean result.
+ */
+export function isThrottledProcessType(value: string | null): boolean {
+  return value != null && THROTTLED_PROCESS_TYPES.includes(value);
+}
+
 export function plistPath(): string {
   return join(homedir(), "Library", "LaunchAgents", `${LAUNCHD_LABEL}.plist`);
 }
@@ -65,7 +121,7 @@ ${envXml}
   <key>KeepAlive</key>
   <true/>
   <key>ProcessType</key>
-  <string>Background</string>
+  <string>${SCHEDULER_PROCESS_TYPE}</string>
   <key>StandardOutPath</key>
   <string>${xmlEscape(join(logDir, "routinesd.out.log"))}</string>
   <key>StandardErrorPath</key>
