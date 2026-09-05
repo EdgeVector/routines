@@ -45,6 +45,15 @@ fi
 echo "== artifact build =="
 bun run build
 
+# 2d. code identity: the build must keep signing dist/routines with a fixed
+# identifier, or macOS treats every new version as a new app and re-prompts the
+# owner for Desktop/Documents/Downloads access — a dialog that also BLOCKS the
+# running command. Host-agnostic: the test stubs codesign/security.
+if [ -f test/build-artifact-codesign.sh ]; then
+  echo "== build-artifact code identity =="
+  bash test/build-artifact-codesign.sh
+fi
+
 # 3. agent-exec ↔ scheduler dispatch parity proof (isolated: temp
 # ROUTINES_HOME, stubbed situations CLI, no live provider or socket reads)
 if [ -f test/agent-exec-parity.ts ]; then
