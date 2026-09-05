@@ -12,7 +12,7 @@ import { basename, dirname, join } from "node:path";
 
 import { locksDir, registryDir, routinesHome, runsDir, stateDir } from "./paths.ts";
 
-export const KANBAN_ID_RENAMES = [
+const KANBAN_ID_RENAMES = [
   { old: "last-stack-fkanban-pickup", next: "last-stack-kanban-pickup" },
   { old: "last-stack-fkanban-watch", next: "last-stack-kanban-watch" },
   { old: "last-stack-fkanban-validate", next: "last-stack-kanban-validate" },
@@ -24,7 +24,7 @@ export function canonicalRoutineId(id: string): string {
   return OLD_TO_NEW.get(id) ?? id;
 }
 
-export interface KanbanIdMigrationAction {
+interface KanbanIdMigrationAction {
   kind: "move" | "merge" | "archive" | "skip";
   path: string;
   dest?: string;
