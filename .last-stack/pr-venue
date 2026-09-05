@@ -1,7 +1,3 @@
-lastgit
-# Review-artifact venue for EdgeVector/routines: LastGit-native change requests
-# (opt-in per last-stack-pr-venue; only line 1 is parsed).
-# LastGit is homed at lastdb:///routines on the canonical LastDB socket. The
-# repo-level LastGit socket pin should normally be enough; use explicit
-# LASTGIT_SOCKET only for isolated throwaway test nodes. Workflow:
-# fbrain get sop-lastgit-native-forge-workflow
+forgejo
+# Gate of record for EdgeVector/routines: Forgejo (http://localhost:3300), Tom 2026-09-05.
+# The LastGit repo lastdb:///routines is disabled: no CRs, no pushes. Workflow: sop-forge-pr-workflow.
