@@ -192,7 +192,7 @@ export function escalateStatePath(routineId: string): string {
 }
 
 /** True when lastOutcome is a classified recovery (not error/unknown). */
-export function isRecoveredOutcome(kind: string | null | undefined): boolean {
+function isRecoveredOutcome(kind: string | null | undefined): boolean {
   return kind === "ok" || kind === "noop";
 }
 
