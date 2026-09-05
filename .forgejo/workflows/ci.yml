@@ -64,6 +64,9 @@ jobs:
           done
 
       - name: Merge gate (.lastgit/ci.sh)
+        env:
+          NO_COLOR: "1"
+          FORCE_COLOR: "0"
         run: bash .lastgit/ci.sh
 
   publish:
