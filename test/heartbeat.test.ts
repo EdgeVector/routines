@@ -62,6 +62,46 @@ describe("writeHeartbeat", () => {
     expect(body.endsWith("\n")).toBe(true);
   });
 
+  test("a safe_skip is noop, not error, even with a non-zero exit", () => {
+    // The overloaded fallback slot records exit 124 + timedOut on purpose so
+    // classifyHarnessOutage stays null. It never spawned a harness and nothing
+    // failed, so the fleet log must not read it as a routine failure.
+    const dir = mkdtempSync(join(tmpdir(), "routines-heartbeat-"));
+    const logPath = join(dir, "heartbeats.log");
+    process.env.ROUTINES_HEARTBEATS_FILE = logPath;
+
+    const result = makeResult();
+    result.exitCode = 124;
+    result.timedOut = true;
+    result.outcome = {
+      kind: "noop",
+      detail: "fallback-overloaded retry-later",
+      source: "safe_skip",
+    };
+
+    writeHeartbeat(makeEntry(), result);
+
+    const body = readFileSync(logPath, "utf8");
+    expect(body).toContain("unit-routine noop harness=codex");
+    expect(body).not.toContain("unit-routine error");
+    // The exit code itself stays truthful; only the state word changes.
+    expect(body).toContain("exit=124");
+  });
+
+  test("a real non-zero exit is still an error", () => {
+    const dir = mkdtempSync(join(tmpdir(), "routines-heartbeat-"));
+    const logPath = join(dir, "heartbeats.log");
+    process.env.ROUTINES_HEARTBEATS_FILE = logPath;
+
+    const result = makeResult();
+    result.exitCode = 1;
+    result.outcome = { kind: "error", detail: "boom", source: "exit" };
+
+    writeHeartbeat(makeEntry(), result);
+
+    expect(readFileSync(logPath, "utf8")).toContain("unit-routine error harness=codex");
+  });
+
   test("skips when heartbeat_slug is unset", () => {
     const dir = mkdtempSync(join(tmpdir(), "routines-heartbeat-"));
     process.env.ROUTINES_HEARTBEATS_FILE = join(dir, "heartbeats.log");

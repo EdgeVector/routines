@@ -26,14 +26,20 @@ function heartbeatsLogPath(): string {
 /** One heartbeat line, matching the fleet convention:
  * `<ISO> <id> <ok|error> harness=<h> model=<m> exit=<n> dur=<s>s run=<dir>` */
 function heartbeatLine(entry: RoutineEntry, result: RunResult): string {
-  // Prefer outcome kind for clean harness skips (auth/capacity safe_skip → exit 0
-  // but still a noop, not a successful agent turn).
+  // A `safe_skip` is an ASSERTED-safe skip: the routine never ran its work, and
+  // nothing failed. Some safe skips carry a non-zero exit on purpose — the
+  // overloaded fallback slot records exit 124 + timedOut so classifyHarnessOutage
+  // stays null (retry-later). Keying the state off the exit code alone printed
+  // those as `error`, so a designed backpressure skip reached every triage
+  // surface as a routine failure. Read the outcome source first.
   const state =
-    result.exitCode === 0
-      ? result.outcome.kind === "noop"
-        ? "noop"
-        : "ok"
-      : "error";
+    result.outcome.source === "safe_skip"
+      ? "noop"
+      : result.exitCode === 0
+        ? result.outcome.kind === "noop"
+          ? "noop"
+          : "ok"
+        : "error";
   const dur = (result.durationMs / 1000).toFixed(1);
   let line =
     `${result.finishedAt} ${entry.id} ${state} ` +
