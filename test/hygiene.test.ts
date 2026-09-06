@@ -12,6 +12,7 @@ import {
   renderHygieneLauncher,
   renderHygienePlist,
   runHygiene,
+  MIN_KEEP_RUNS,
   selectRunsToPrune,
   truncateMemoryText,
 } from "../src/hygiene.ts";
@@ -22,20 +23,69 @@ import {
 } from "../src/launchd.ts";
 
 describe("selectRunsToPrune", () => {
-  test("keeps newest N and anything within day window", () => {
-    const now = Date.parse("2026-07-16T18:00:00.000Z");
-    const dirs = [
-      "/r/old1",
-      "/r/old2",
-      "/r/mid",
-      "/r/new1",
-      "/r/new2",
-    ];
-    // Mock via real fs is heavy; unit the pure policy with timestamps injected
-    // by wrapping: we test through runHygiene with temp dirs below.
-    expect(dirs.length).toBe(5);
-    // Keep signature smoke: empty input
-    expect(selectRunsToPrune([], { keepRunsPerId: 2, keepDays: 7, nowMs: now })).toEqual([]);
+  const NOW = Date.parse("2026-07-16T18:00:00.000Z");
+  const DAY = 86_400_000;
+
+  /** Build one routine's run dirs; `ageDays[i]` is how old that finished run is. */
+  function makeRuns(ageDays: number[]): { dir: string; runs: string[] } {
+    const dir = mkdtempSync(join(tmpdir(), "routines-prune-"));
+    const runs: string[] = [];
+    for (const age of ageDays) {
+      const finishedAt = new Date(NOW - age * DAY).toISOString();
+      const d = join(dir, finishedAt.replace(/[:.]/g, "-"));
+      mkdirSync(d, { recursive: true });
+      writeFileSync(
+        join(d, "meta.json"),
+        JSON.stringify({ id: "demo", finishedAt, exitCode: 0, outcome: "ok" }),
+      );
+      runs.push(d);
+    }
+    return { dir, runs };
+  }
+
+  // The defect this file did not previously cover: every fixture had FEWER runs
+  // inside the day window than the cap, so the cap never had to bind and the
+  // union policy looked correct. A routine firing every 15 minutes holds ~670
+  // runs inside a 7-day window. Give the window more runs than the cap.
+  test("the day window cannot keep more runs than keepRunsPerId", () => {
+    // 30 runs, all finished within the last 15 hours — all inside the window.
+    const { runs } = makeRuns(Array.from({ length: 30 }, (_, i) => (i + 1) / 48));
+    const doomed = selectRunsToPrune(runs, { keepRunsPerId: 20, keepDays: 7, nowMs: NOW });
+
+    expect(doomed.length).toBe(10);
+    // The survivors are the newest 20, and every pruned run is older than them.
+    const kept = runs.filter((r) => !doomed.includes(r));
+    expect(kept.length).toBe(20);
+    for (const r of runs.slice(0, 20)) expect(kept).toContain(r);
+    for (const r of runs.slice(20)) expect(doomed).toContain(r);
+  });
+
+  // MIN_KEEP_RUNS is a floor under the age policy, not under the count cap.
+  test("keeps MIN_KEEP_RUNS when every run is older than keepDays", () => {
+    const { runs } = makeRuns([30, 31, 32, 33, 34]);
+    const doomed = selectRunsToPrune(runs, { keepRunsPerId: 20, keepDays: 7, nowMs: NOW });
+
+    // Assert the literal, not MIN_KEEP_RUNS: an assertion written against the
+    // constant it is testing moves with it and cannot fail when the floor drops.
+    expect(MIN_KEEP_RUNS).toBe(3);
+    expect(runs.length - doomed.length).toBe(3);
+    for (const r of runs.slice(0, 3)) expect(doomed).not.toContain(r);
+  });
+
+  // Both knobs bind. Inside the cap the day window still deletes.
+  test("prunes past the day window even when the routine is under the cap", () => {
+    // 6 runs, 4 of them older than 7 days, cap of 20 never reached.
+    const { runs } = makeRuns([1, 2, 9, 10, 11, 12]);
+    const doomed = selectRunsToPrune(runs, { keepRunsPerId: 20, keepDays: 7, nowMs: NOW });
+
+    // newest 2 are inside the window; index 2 survives on the MIN_KEEP floor.
+    expect(doomed.length).toBe(3);
+    for (const r of runs.slice(0, 3)) expect(doomed).not.toContain(r);
+    for (const r of runs.slice(3)) expect(doomed).toContain(r);
+  });
+
+  test("empty input prunes nothing", () => {
+    expect(selectRunsToPrune([], { keepRunsPerId: 2, keepDays: 7, nowMs: NOW })).toEqual([]);
   });
 });
 

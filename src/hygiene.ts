@@ -185,6 +185,15 @@ function isRunningMeta(runDir: string): boolean {
   }
 }
 
+/**
+ * The newest few run dirs survive any age policy.
+ *
+ * `keepDays` is an age bound, so on its own it deletes every run of a routine
+ * that has been idle longer than the window. Orphan reconciliation, `routines
+ * logs` and `routines status` all read the newest run dir, so leave a floor.
+ */
+export const MIN_KEEP_RUNS = 3;
+
 /** Select run dirs to delete for one routine id. */
 export function selectRunsToPrune(
   runDirs: string[],
@@ -196,13 +205,24 @@ export function selectRunsToPrune(
     .map((d) => ({ d, t: runStampMtimeMs(d) }))
     .sort((a, b) => b.t - a.t);
 
+  // `keepRunsPerId` is a CEILING. It used to be only a floor: the policy was
+  // "keep the newest N, ALSO keep anything within keepDays", and that union has
+  // no upper bound. A routine that fires every 15 minutes puts ~670 runs inside
+  // a 7-day window, so the count never bound and the tree grew without limit.
+  // On 2026-09-05 it reached 4,374 run dirs and 14 GB, and one scheduler
+  // dispatch pass over them took 18 minutes with nothing in flight — the fleet
+  // stopped shipping while the daemon looked healthy. `routines hygiene` ran
+  // hourly throughout and pruned 19 of 4,377. See papercut
+  // routinesd-dispatch-pass-reads-every-historical-run-metajson-4374-files-14gb-20260905.
+  const capped = scored.slice(0, Math.max(0, opts.keepRunsPerId));
+
+  // Inside the cap the day window still prunes: a run older than keepDays goes
+  // even when the routine holds fewer than N runs. Both knobs now bound, and
+  // neither can widen what the other allows.
   const keep = new Set<string>();
-  // Always keep the newest N.
-  for (const row of scored.slice(0, opts.keepRunsPerId)) keep.add(row.d);
-  // Plus anything within the day window.
-  for (const row of scored) {
-    if (row.t >= cutoff) keep.add(row.d);
-  }
+  capped.forEach((row, i) => {
+    if (i < MIN_KEEP_RUNS || row.t >= cutoff) keep.add(row.d);
+  });
   return scored.filter((row) => !keep.has(row.d)).map((row) => row.d);
 }
 
