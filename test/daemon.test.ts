@@ -376,7 +376,9 @@ describe("daemon evaluateOnce", () => {
       JSON.stringify(
         {
           kind: "capacity",
-          lastSeenAt: "2026-07-18T00:48:41.017Z",
+          // A live fence needs a live sighting: the fence is bounded by
+          // lastSeenAt + DEFAULT_TTL_MS as well as by expiresAt.
+          lastSeenAt: new Date().toISOString(),
           situationSlug: "harness-outage-claude",
           expiresAt: "2999-01-01T00:00:00.000Z",
         },
@@ -412,7 +414,7 @@ describe("daemon evaluateOnce", () => {
         JSON.stringify(
           {
             kind: "usage-limit",
-            lastSeenAt: "2026-08-29T04:00:00.000Z",
+            lastSeenAt: new Date().toISOString(),
             situationSlug: `harness-outage-${harness}`,
             expiresAt: "2999-01-01T00:00:00.000Z",
           },

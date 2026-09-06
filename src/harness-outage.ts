@@ -374,9 +374,37 @@ function writeOutageState(harness: string, st: OutageState): void {
 }
 
 /**
- * True when this harness was recently recorded as out of service and the
- * expiry has not lapsed. Used by the fallback chain to skip a dead primary
- * on the next fire without rewriting registry TOML.
+ * True when this harness was recently recorded as out of service and neither
+ * bound on the fence has lapsed.
+ *
+ * TWO bounds, and both must hold. `expiresAt` may only SHORTEN a fence:
+ *
+ *   1. `expiresAt` (the provider's own "try again at …" hint when parseable,
+ *      else lastSeenAt + DEFAULT_TTL_MS) has not passed, AND
+ *   2. the outage was actually SEEN within DEFAULT_TTL_MS.
+ *
+ * Bound 2 used to sit in an `else` reached only by legacy state with no
+ * `expiresAt` — so on every state file this daemon writes it never ran, and a
+ * provider hint pinned the fence for as long as it said from ONE sighting. A
+ * fenced harness is never dispatched to, so nothing could re-probe it and
+ * nothing could correct the record; it only ran its clock out. Measured
+ * 2026-09-06: codex read outaged with `lastSeenAt` 2026-09-02T12:13Z and
+ * `expiresAt` 2026-09-07T02:28Z — 5d14h of fence from a single sighting, with
+ * no `harness-outage-codex` Situation left on the ledger. All four
+ * `last-stack-fkanban-pickup` shipping lanes, `last-stack-milestone-driver`
+ * and `last-stack-pipeline-health` safe-skipped every pass.
+ *
+ * Capping here rather than at the write site is deliberate: the Situation's
+ * `expires_at` stays the provider's verbatim hint, which is what an operator
+ * reads and what `handleHarnessOutage`'s tests assert. Only the fence — the
+ * thing that decides whether a routine fires — is bounded.
+ *
+ * The cost of the cap is one dispatch per harness per TTL when the provider is
+ * genuinely still out; that attempt re-arms the fence with a fresh
+ * `lastSeenAt`, and the 12h `lastNotifiedAt` cooldown stops it re-paging. That
+ * is the re-probe
+ * `papercut-routines-provider-reset-hint-fences-a-harness-for-days-unprobed`
+ * asks for, and it costs no scheduler.
  */
 export function isHarnessOutaged(harness: string, nowMs: number = Date.now()): boolean {
   const st = readOutageState(harness);
@@ -384,12 +412,11 @@ export function isHarnessOutaged(harness: string, nowMs: number = Date.now()): b
   if (st.expiresAt) {
     const exp = Date.parse(st.expiresAt);
     if (!Number.isNaN(exp) && nowMs >= exp) return false;
-  } else {
-    // Legacy state without expiresAt: treat as outaged for the default TTL
-    // from lastSeenAt so we do not stick forever.
-    const seen = Date.parse(st.lastSeenAt);
-    if (!Number.isNaN(seen) && nowMs - seen >= DEFAULT_TTL_MS) return false;
   }
+  // Unconditional: a fence outlives its evidence by at most DEFAULT_TTL_MS,
+  // whatever expiry the provider hinted at.
+  const seen = Date.parse(st.lastSeenAt);
+  if (!Number.isNaN(seen) && nowMs - seen >= DEFAULT_TTL_MS) return false;
   return true;
 }
 
