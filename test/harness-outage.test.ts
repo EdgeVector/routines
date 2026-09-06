@@ -8,8 +8,10 @@ import { escalateRoutineError } from "../src/error-escalate.ts";
 import {
   classifyHarnessOutage,
   handleHarnessOutage,
+  isHarnessOutaged,
   outageSituationSlug,
   parseResetHint,
+  reconcileOutageFences,
 } from "../src/harness-outage.ts";
 import type { RoutineEntry } from "../src/registry.ts";
 import type { RunResult } from "../src/runner.ts";
@@ -531,5 +533,79 @@ describe("handleHarnessOutage via escalateRoutineError", () => {
       "last-stack-fkanban-pickup-w5",
       "last-stack-fkanban-pickup-w6",
     ]);
+  });
+});
+
+describe("reconcileOutageFences", () => {
+  const HOUR = 60 * 60 * 1000;
+  const nowMs = Date.parse("2026-09-06T07:00:00.000Z");
+
+  function writeFence(
+    harness: string,
+    over: Partial<{ slug: string; lastSeenAt: string; lastSituationAt: string; expiresAt: string }> = {},
+  ): string {
+    const dir = join(home, "harness-outage");
+    mkdirSync(dir, { recursive: true });
+    const p = join(dir, `${harness}.json`);
+    writeFileSync(
+      p,
+      JSON.stringify({
+        kind: "usage-limit",
+        lastSeenAt: over.lastSeenAt ?? new Date(nowMs - HOUR).toISOString(),
+        lastSituationAt: over.lastSituationAt ?? new Date(nowMs - HOUR).toISOString(),
+        situationSlug: over.slug ?? outageSituationSlug(harness),
+        expiresAt: over.expiresAt ?? new Date(nowMs + 5 * HOUR).toISOString(),
+      }) + "\n",
+    );
+    return p;
+  }
+
+  // The measured 2026-09-06T07:0xZ divergence: the ledger carried
+  // harness-outage-grok and harness-outage-claude and NO harness-outage-codex,
+  // while the codex file fenced dispatch. Resolving a Situation must clear the
+  // fence it named; the other two must survive untouched.
+  test("clears a fence whose Situation is gone and keeps the ones still active", () => {
+    const codex = writeFence("codex");
+    const grok = writeFence("grok");
+    const claude = writeFence("claude");
+    expect(isHarnessOutaged("codex", nowMs)).toBe(true);
+
+    const out = reconcileOutageFences(
+      [outageSituationSlug("grok"), outageSituationSlug("claude"), "unrelated-situation"],
+      { nowMs, quiet: true },
+    );
+
+    expect(out.cleared).toEqual(["codex"]);
+    expect(existsSync(codex)).toBe(false);
+    expect(existsSync(grok)).toBe(true);
+    expect(existsSync(claude)).toBe(true);
+    expect(isHarnessOutaged("codex", nowMs)).toBe(false);
+    expect(isHarnessOutaged("grok", nowMs)).toBe(true);
+  });
+
+  // Fails CLOSED: a fresh outage writes the state file and upserts the
+  // Situation in one call, so a slug missing from a ledger read taken seconds
+  // later is far more likely a failed upsert than a resolved outage.
+  test("keeps a fence inside the Situation grace window", () => {
+    writeFence("codex", { lastSituationAt: new Date(nowMs - 60_000).toISOString() });
+    const out = reconcileOutageFences([], { nowMs, quiet: true });
+    expect(out.cleared).toEqual([]);
+    expect(out.kept).toEqual([{ harness: "codex", reason: "within-situation-grace" }]);
+    expect(isHarnessOutaged("codex", nowMs)).toBe(true);
+  });
+
+  test("keeps a fence whose state file records no situationSlug", () => {
+    mkdirSync(join(home, "harness-outage"), { recursive: true });
+    writeFileSync(
+      join(home, "harness-outage", "codex.json"),
+      JSON.stringify({ kind: "usage-limit", lastSeenAt: new Date(nowMs - HOUR).toISOString() }) + "\n",
+    );
+    const out = reconcileOutageFences([], { nowMs, quiet: true });
+    expect(out.cleared).toEqual([]);
+    expect(out.kept).toEqual([{ harness: "codex", reason: "no-situation-slug" }]);
+  });
+
+  test("is a no-op when no fence state exists", () => {
+    expect(reconcileOutageFences([], { nowMs, quiet: true })).toEqual({ cleared: [], kept: [] });
   });
 });

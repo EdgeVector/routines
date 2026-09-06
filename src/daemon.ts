@@ -42,6 +42,7 @@ import {
 } from "./situations.ts";
 import { loadAll, type RoutineEntry } from "./registry.ts";
 import { harnessFromOutageSituation, routeAgent } from "./route-engine.ts";
+import { reconcileOutageFences } from "./harness-outage.ts";
 import { daemonIdentityPath, daemonLogDir, locksDir, runsDir } from "./paths.ts";
 import { nextAfter } from "./rrule.ts";
 import { patchState, readState } from "./state.ts";
@@ -163,6 +164,7 @@ export interface DaemonEvent {
     | "warmup"
     | "registry-error"
     | "situations-degraded"
+    | "harness-fence-cleared"
     | "reconcile-orphans"
     | "reap-unspawned"
     | "coalesce-backlog"
@@ -1185,6 +1187,26 @@ export function dispatchDue(opts: DispatchPassOptions = {}): Promise<RunResult>[
   if (!check.ok) {
     log({ ts: now.toISOString(), kind: "situations-degraded", detail: check.error });
   }
+
+  // The two fence stores are reconciled HERE, on the pass that already holds a
+  // trusted ledger read, and only when that read succeeded. `isHarnessOutaged`
+  // reads a local file; `fencedHarnesses` reads the ledger; before this they
+  // could say opposite things with nothing able to notice. Resolving a
+  // Situation now clears the local fence too, at most one grace window later.
+  // papercut-routines-harness-fence-reads-a-local-file-the-situations-ledger-cannot-clear-20260906
+  if (check.ok) {
+    for (const harness of reconcileOutageFences(check.situations.map((s) => s.slug), {
+      nowMs: now.getTime(),
+      quiet: true,
+    }).cleared) {
+      log({
+        ts: now.toISOString(),
+        kind: "harness-fence-cleared",
+        detail: `${harness}: no active harness-outage Situation`,
+      });
+    }
+  }
+
   const entries = registryEntries.map((entry) => routeForAvailability(entry, check.situations));
 
   const running: Promise<RunResult>[] = [];

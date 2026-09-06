@@ -21,7 +21,15 @@
 // and if the harness is still down the first failure re-fences it.
 
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 
 import { buildRouteChain, type RouteStep } from "./fallback.ts";
@@ -418,6 +426,99 @@ export function isHarnessOutaged(harness: string, nowMs: number = Date.now()): b
   const seen = Date.parse(st.lastSeenAt);
   if (!Number.isNaN(seen) && nowMs - seen >= DEFAULT_TTL_MS) return false;
   return true;
+}
+
+/**
+ * Grace before a state file may be cleared for having no Situation. A fresh
+ * outage writes the state file and upserts the Situation in the same call; if
+ * that upsert failed we must not read the gap as "cleared" and un-fence a dead
+ * harness. `handleHarnessOutage` re-upserts every DEFAULT_SITUATION_REFRESH_MS
+ * while failures continue, so a slug still missing after that window is gone.
+ */
+const OUTAGE_SITUATION_GRACE_MS = DEFAULT_SITUATION_REFRESH_MS;
+
+export interface OutageFenceReconcileResult {
+  /** Harnesses whose local fence was dropped because its Situation is gone. */
+  cleared: string[];
+  /** Harnesses left fenced, with the reason they were not cleared. */
+  kept: { harness: string; reason: string }[];
+}
+
+/**
+ * Reconcile the local fence store against the Situations ledger.
+ *
+ * routinesd decided "is this harness fenced?" in two places that read two
+ * different stores and never compared them: `fencedHarnesses(situations)` reads
+ * the ledger, and `isHarnessOutaged` reads
+ * `~/.routines/harness-outage/<harness>.json`. On 2026-09-06T07:0xZ they said
+ * opposite things — the ledger carried no `harness-outage-codex` at all while
+ * the file fenced codex, so six routines returned `all-routes-fenced` 25 times
+ * in 90 minutes (all four `last-stack-fkanban-pickup` shipping lanes among
+ * them) while `situations list` reported the harness healthy. Resolving the
+ * Situation is the documented way to clear an outage and a human had done
+ * exactly that on 2026-09-01; it cleared nothing.
+ *
+ * The join is free: the state file already records the `situationSlug` it was
+ * written with, and nothing read it back. This is the read-back.
+ *
+ * It fails CLOSED in every uncertain case — an unreadable file, a file with no
+ * slug, a ledger read the caller could not trust, or a state file inside the
+ * grace window all keep the fence. Clearing a fence wrongly dispatches work to
+ * a dead harness; keeping one wrongly costs at most DEFAULT_TTL_MS, which
+ * `isHarnessOutaged` already bounds.
+ *
+ * papercut-routines-harness-fence-reads-a-local-file-the-situations-ledger-cannot-clear-20260906
+ */
+export function reconcileOutageFences(
+  activeSituationSlugs: Iterable<string>,
+  opts: { nowMs?: number; quiet?: boolean } = {},
+): OutageFenceReconcileResult {
+  const nowMs = opts.nowMs ?? Date.now();
+  const active = new Set(activeSituationSlugs);
+  const dir = outageStateDir();
+  const result: OutageFenceReconcileResult = { cleared: [], kept: [] };
+  if (!existsSync(dir)) return result;
+
+  let files: string[];
+  try {
+    files = readdirSync(dir).filter((f) => f.endsWith(".json"));
+  } catch {
+    return result;
+  }
+
+  for (const file of files.sort()) {
+    const harness = file.slice(0, -".json".length);
+    const st = readOutageState(harness);
+    if (!st) {
+      result.kept.push({ harness, reason: "state-unreadable" });
+      continue;
+    }
+    if (!st.situationSlug) {
+      result.kept.push({ harness, reason: "no-situation-slug" });
+      continue;
+    }
+    if (active.has(st.situationSlug)) {
+      result.kept.push({ harness, reason: "situation-active" });
+      continue;
+    }
+    const wrote = Date.parse(st.lastSituationAt ?? st.lastSeenAt);
+    if (!Number.isNaN(wrote) && nowMs - wrote < OUTAGE_SITUATION_GRACE_MS) {
+      result.kept.push({ harness, reason: "within-situation-grace" });
+      continue;
+    }
+    try {
+      rmSync(outageStatePath(harness));
+    } catch {
+      result.kept.push({ harness, reason: "remove-failed" });
+      continue;
+    }
+    logLine(
+      opts.quiet,
+      `cleared fence for ${harness}: Situation ${st.situationSlug} is not active`,
+    );
+    result.cleared.push(harness);
+  }
+  return result;
 }
 
 function logLine(quiet: boolean | undefined, msg: string): void {
