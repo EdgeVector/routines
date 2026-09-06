@@ -44,6 +44,8 @@ interface LatestRunDir {
   startedAt: string | null;
   finishedAt: string | null;
   status: string | null;
+  waitingForHarness: string | null;
+  waitingSince: string | null;
 }
 
 function latestRunIsCompleted(latest: RunSummary | undefined): boolean {
@@ -109,6 +111,9 @@ function readLatestRunDir(id: string): LatestRunDir | null {
     startedAt: typeof meta.startedAt === "string" ? meta.startedAt : null,
     finishedAt: typeof meta.finishedAt === "string" ? meta.finishedAt : null,
     status: typeof meta.status === "string" ? meta.status : null,
+    waitingForHarness:
+      typeof meta.waitingForHarness === "string" ? meta.waitingForHarness : null,
+    waitingSince: typeof meta.waitingSince === "string" ? meta.waitingSince : null,
   };
 }
 
@@ -116,7 +121,10 @@ function activeRunDir(id: string): LatestRunDir | null {
   const latest = readLatestRunDir(id);
   if (!latest) return null;
   if (latest.finishedAt) return null;
-  if (latest.status && latest.status !== "running") return null;
+  // "waiting" is a live fallback-slot wait — still an active dispatch.
+  if (latest.status && latest.status !== "running" && latest.status !== "waiting") {
+    return null;
+  }
   return latest;
 }
 
@@ -153,6 +161,11 @@ export interface StatusRow {
   currentRun: string | null;
   currentRunDir: string | null;
   currentStartedAt: string | null;
+  /**
+   * When the newest active run is a fallback-slot wait: human-readable
+   * `waiting for <harness> slot since <ts>`. Null otherwise.
+   */
+  waitDetail: string | null;
   /** false, or the slug of the active Situation whose scope_routines matches. */
   fenced: string | boolean;
   /** Display group id (board | brain | dogfood | …). */
@@ -268,6 +281,10 @@ export function collectStatus(now: Date = new Date(), options: StatusOptions = {
       currentRun: currentRun?.stamp ?? null,
       currentRunDir: currentRun?.runDir ?? null,
       currentStartedAt: currentRun?.startedAt ?? null,
+      waitDetail:
+        currentRun?.status === "waiting" && currentRun.waitingForHarness
+          ? `waiting for ${currentRun.waitingForHarness} slot since ${currentRun.waitingSince ?? currentRun.startedAt ?? "unknown"}`
+          : null,
       fenced: fence.fenced ? (fence.situationSlug ?? true) : false,
       groupId: group.id,
       groupLabel: group.label,
