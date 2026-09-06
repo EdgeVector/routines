@@ -25,6 +25,11 @@ import {
 import { join } from "node:path";
 
 import { buildInvocation, type HarnessInvocation } from "./adapters.ts";
+import {
+  formatClaudeAuthSource,
+  resolveClaudeAuthEnv,
+  type ClaudeAuthSource,
+} from "./claude-auth.ts";
 import { releaseLockIfOwned, setLockOwnerPid } from "./daemon.ts";
 import { stripUnresolvedSentryLocators } from "./observability.ts";
 import {
@@ -81,6 +86,11 @@ export interface RunResult {
   outcome: RunOutcome;
   /** Live harness process id while running / last known after exit. */
   harnessPid: number | null;
+  /**
+   * Where the claude child got its credential (claude legs only). Lets the
+   * outage classifier tell "login keychain locked" from "token expired".
+   */
+  claudeAuthSource?: ClaudeAuthSource;
 }
 
 // Timestamp safe for a directory name (no colons): 2026-07-12T21-05-00-123Z.
@@ -141,6 +151,7 @@ export function writeEarlyMeta(args: {
   gateSkippedHarness?: boolean;
   waitingForHarness?: string | null;
   waitingSince?: string | null;
+  claudeAuthSource?: ClaudeAuthSource | null;
 }): void {
   writeRunFile(
     join(args.runDir, "meta.json"),
@@ -162,6 +173,7 @@ export function writeEarlyMeta(args: {
         matrixResolution: args.matrixResolution ?? null,
         exitCode: null,
         finishedAt: null,
+        ...(args.claudeAuthSource ? { claudeAuthSource: args.claudeAuthSource } : {}),
         ...(args.waitingForHarness
           ? {
               waitingForHarness: args.waitingForHarness,
@@ -748,11 +760,28 @@ async function runOnce(
   const project = loadProjectConfig();
   const cwd = resolveRoutineCwd(entry.cwd, project);
   const configuredEnv = { ...process.env, ...envFromProjectConfig(project) };
+  // Claude legs: hand the child a credential that does not go through the
+  // macOS login keychain (CLAUDE_CODE_OAUTH_TOKEN from LastSecrets). See
+  // claude-auth.ts for the order; ANTHROPIC_API_KEY is deliberately never set
+  // here (subscription-only rule, local-env.sh unsets it).
+  const claudeAuth =
+    entry.harness === "claude" ? await resolveClaudeAuthEnv(configuredEnv) : null;
+  const claudeAuthSource = claudeAuth?.source;
+  if (claudeAuth && !opts.quiet) {
+    try {
+      process.stderr.write(
+        `[routines] ${entry.id}: ${formatClaudeAuthSource(claudeAuth)} locator=${claudeAuth.locator || "off"}\n`,
+      );
+    } catch {
+      /* ignore */
+    }
+  }
   const childEnv = enrichWorktreeCleanupLivenessEnv(
     entry.id,
     stripUnresolvedSentryLocators(
       enrichGateEnv(entry, {
         ...configuredEnv,
+        ...(claudeAuth?.env ?? {}),
         ...discoveredRoutineSocketEnv(configuredEnv),
         ...buildRoutineAttributionEnv(entry.id, runDir),
       }),
@@ -825,6 +854,7 @@ async function runOnce(
       gateCommand: gateCommandUsed,
       gateProceeded,
       gateSkippedHarness: false,
+      claudeAuthSource,
     });
 
     let timedOut = false;
@@ -970,6 +1000,7 @@ async function runOnce(
         heartbeat: { attempted: false, ok: true },
         outcome,
         harnessPid,
+        ...(claudeAuthSource ? { claudeAuthSource } : {}),
       };
 
       result.heartbeat = writeHeartbeat(entry, result);
@@ -1004,6 +1035,7 @@ async function runOnce(
             outcome: result.outcome.kind,
             outcomeDetail: result.outcome.detail,
             outcomeSource: result.outcome.source,
+            ...(claudeAuthSource ? { claudeAuthSource } : {}),
             stdoutTail: tail(stdout, 2000),
             stderrTail: tail(filteredStderr, 2000),
             logWriteFailed,

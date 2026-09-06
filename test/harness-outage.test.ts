@@ -609,3 +609,116 @@ describe("reconcileOutageFences", () => {
     expect(reconcileOutageFences([], { nowMs, quiet: true })).toEqual({ cleared: [], kept: [] });
   });
 });
+
+describe("credential-unreadable (login keychain locked)", () => {
+  /** Real Claude Code stream-json 401 (2026-09-06 sentry-triage claude leg, keychain rc=51). */
+  const CLAUDE_KEYCHAIN_LOCKED_401 =
+    '{"type":"system","subtype":"api_retry","attempt":1,"max_retries":10,"retry_delay_ms":544,"error_status":401,"error":"authentication_failed","session_id":"91a2d014-db7d-48c5-8254-10d44d47ab65","uuid":"6af96840-b3d6-4498-9342-3799c917397d"}';
+
+  function claudeResult(line: string, source: "env" | "lastsecrets" | "keychain-default" | undefined) {
+    const r = result(line);
+    if (source) r.claudeAuthSource = source;
+    return r;
+  }
+
+  test("claude 401 with keychain-default source and a refused keychain read", () => {
+    const out = classifyHarnessOutage(
+      claudeResult(CLAUDE_KEYCHAIN_LOCKED_401, "keychain-default"),
+      { keychainReadRefused: () => true },
+    );
+    expect(out?.kind).toBe("credential-unreadable");
+    expect(out?.evidence).toContain("authentication_failed");
+  });
+
+  test("same 401 with the keychain readable stays auth (a real expired token)", () => {
+    const out = classifyHarnessOutage(
+      claudeResult(CLAUDE_KEYCHAIN_LOCKED_401, "keychain-default"),
+      { keychainReadRefused: () => false },
+    );
+    expect(out?.kind).toBe("auth");
+  });
+
+  test("same 401 with a LastSecrets-sourced token stays auth even if the keychain is locked", () => {
+    // The child never needed the keychain, so a lockout cannot explain the 401.
+    const out = classifyHarnessOutage(
+      claudeResult(CLAUDE_KEYCHAIN_LOCKED_401, "lastsecrets"),
+      { keychainReadRefused: () => true },
+    );
+    expect(out?.kind).toBe("auth");
+  });
+
+  test("a result without a claude auth source (codex leg) is never credential-unreadable", () => {
+    const out = classifyHarnessOutage(claudeResult("error: authentication_failed", undefined), {
+      keychainReadRefused: () => true,
+    });
+    expect(out?.kind).toBe("auth");
+  });
+
+  test("credits exhaustion stays usage-limit, never auth, even with the keychain locked", () => {
+    const r = claudeResult(
+      `${CLAUDE_WEEKLY_LIMIT_ASSISTANT}\n${CLAUDE_WEEKLY_LIMIT_RESULT}`,
+      "keychain-default",
+    );
+    const out = classifyHarnessOutage(r, {
+      nowMs: Date.parse("2026-08-28T09:00:00Z"),
+      keychainReadRefused: () => true,
+    });
+    expect(out?.kind).toBe("usage-limit");
+  });
+
+  test("handle keeps the fence and the page, but the remedy names the locator", () => {
+    const situations = stubBin("situations-stub");
+    const ra = stubBin("ra-stub");
+    writeRegistryEntry("last-stack-pipeline-health", "claude");
+    const nowMs = Date.parse("2026-09-06T15:29:00Z");
+    const r = claudeResult(CLAUDE_KEYCHAIN_LOCKED_401, "keychain-default");
+    const outage = classifyHarnessOutage(r, { nowMs, keychainReadRefused: () => true })!;
+    expect(outage.kind).toBe("credential-unreadable");
+
+    const res = handleHarnessOutage(entry("last-stack-pipeline-health", "claude"), r, outage, {
+      nowMs,
+      situationsBin: situations.bin,
+      raBin: ra.bin,
+      quiet: true,
+    });
+    expect(res.escalated).toBe(true);
+
+    const verdict = JSON.parse(readFileSync(join(r.runDir, "triage-result.json"), "utf8"));
+    expect(verdict.result).toBe("needs-human");
+    expect(verdict.rootCause).toBe("harness-outage:credential-unreadable");
+
+    const sit = JSON.parse(readFileSync(situations.stdinFile, "utf8"));
+    expect(sit.slug).toBe(outageSituationSlug("claude"));
+    expect(sit.blocked_actions).toEqual(["dispatch-claude-agents"]);
+    expect(sit.scope_routines).toEqual(["last-stack-pipeline-health"]);
+    expect(sit.summary).toContain("credential-unreadable");
+    expect(sit.summary).toContain("lastsecrets://claude-code-oauth-token");
+    expect(sit.summary).toContain("login keychain locked");
+    expect(sit.preflight_message).toContain("lastsecrets://claude-code-oauth-token");
+    expect(sit.preflight_message).not.toContain("restore credits/auth");
+
+    const raArgs = readFileSync(ra.argsFile, "utf8");
+    expect(raArgs).toContain("Needs human: claude harness credential-unreadable");
+    expect(raArgs).toContain("lastsecrets://claude-code-oauth-token");
+    expect(raArgs).not.toContain("/login");
+  });
+
+  test("plain auth outage text is unchanged (still says restore credits/auth)", () => {
+    const situations = stubBin("situations-stub");
+    const ra = stubBin("ra-stub");
+    writeRegistryEntry("last-stack-pipeline-health", "claude");
+    const nowMs = Date.parse("2026-09-06T15:29:00Z");
+    const r = claudeResult(CLAUDE_KEYCHAIN_LOCKED_401, "lastsecrets");
+    const outage = classifyHarnessOutage(r, { nowMs, keychainReadRefused: () => true })!;
+    expect(outage.kind).toBe("auth");
+    handleHarnessOutage(entry("last-stack-pipeline-health", "claude"), r, outage, {
+      nowMs,
+      situationsBin: situations.bin,
+      raBin: ra.bin,
+      quiet: true,
+    });
+    const sit = JSON.parse(readFileSync(situations.stdinFile, "utf8"));
+    expect(sit.preflight_message).toContain("restore credits/auth");
+    expect(sit.summary).not.toContain("Remedy:");
+  });
+});

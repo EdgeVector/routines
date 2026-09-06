@@ -385,6 +385,30 @@ and LastGit-to-GitHub mirror sync keeps `origin/main` aligned after CR merges.
 Mirror sync proof: LastGit CRs are expected to appear on the GitHub mirror within
 the configured sync interval (validated 2026-07-12T23:11:25Z).
 
+## Claude credential without the login keychain
+
+Claude Code on macOS keeps its OAuth credential in the keychain item
+`Claude Code-credentials`. When the login keychain refuses reads (`security
+find-generic-password -w` exits 51), every claude leg dies with a 401
+`authentication_failed` that looks like an expired token. routinesd therefore
+resolves a credential for claude legs itself, first non-empty wins:
+
+1. `CLAUDE_CODE_OAUTH_TOKEN` already in the daemon env (`claude_auth_source=env`)
+2. `lastsecrets get claude-code-oauth-token` — override the locator with
+   `ROUTINES_CLAUDE_OAUTH_LOCATOR`, or set it to `off` (`claude_auth_source=lastsecrets`)
+3. nothing: the child uses Claude Code's own store (`claude_auth_source=keychain-default`)
+
+Mint the token once with `claude setup-token` and store it as
+`lastsecrets://claude-code-oauth-token`. It bills the Claude subscription, not
+the Console API meter; `ANTHROPIC_API_KEY` is never set by routinesd. The
+source label lands in `meta.json` (`claudeAuthSource`) and the daemon log; the
+value is never logged.
+
+A claude 401 while the source was `keychain-default` and the keychain read is
+refused classifies as harness outage kind `credential-unreadable`: the fence and
+the Telegram page still fire, but the remedy names the locator instead of
+`claude /login`.
+
 ## Test
 
 ```sh

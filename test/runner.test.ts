@@ -842,3 +842,118 @@ describe("enrichGateEnv", () => {
     expect(env.LAST_STACK_NORTH_STAR_DASHBOARD_CMD_TIMEOUT).toBe("45");
   });
 });
+
+describe("child env Claude credential", () => {
+  function envDumpHarness(dump: string): string {
+    return stub(
+      join(home, "claude-env-dump-harness"),
+      ["#!/bin/sh", `env > ${JSON.stringify(dump)}`, "exit 0", ""].join("\n"),
+    );
+  }
+
+  test("claude leg receives CLAUDE_CODE_OAUTH_TOKEN from the LastSecrets locator", async () => {
+    const dump = join(home, "claude-child-env.dump");
+    delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+    process.env.ROUTINES_CLAUDE_BIN = envDumpHarness(dump);
+    process.env.ROUTINES_LASTSECRETS_BIN = stub(
+      join(home, "stub-lastsecrets"),
+      [
+        "#!/bin/sh",
+        'test "$1" = get || exit 11',
+        'test "$2" = claude-code-oauth-token || exit 12',
+        'printf "%s\\n" "tok-from-lastsecrets"',
+        "",
+      ].join("\n"),
+    );
+    writeRoutine("claude-auth-lastsecrets");
+
+    const result = await runRoutine(loadEntry("claude-auth-lastsecrets"), {
+      quiet: true,
+      noFallback: true,
+    });
+    expect(result.timedOut).toBe(false);
+    expect(result.claudeAuthSource).toBe("lastsecrets");
+    const dumped = readFileSync(dump, "utf8");
+    expect(dumped).toMatch(/^CLAUDE_CODE_OAUTH_TOKEN=tok-from-lastsecrets$/m);
+    expect(dumped).not.toMatch(/^ANTHROPIC_API_KEY=/m);
+    const meta = JSON.parse(readFileSync(join(result.runDir, "meta.json"), "utf8"));
+    expect(meta.claudeAuthSource).toBe("lastsecrets");
+    // The value must not leak into any run file besides the child's own env.
+    for (const name of ["meta.json", "stdout.log", "stderr.log"]) {
+      expect(readFileSync(join(result.runDir, name), "utf8")).not.toContain("tok-from-lastsecrets");
+    }
+  });
+
+  test("an absent locator leaves today's behavior: no token, keychain-default", async () => {
+    const dump = join(home, "claude-child-env-absent.dump");
+    delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+    process.env.ROUTINES_CLAUDE_BIN = envDumpHarness(dump);
+    process.env.ROUTINES_LASTSECRETS_BIN = stub(
+      join(home, "stub-lastsecrets-missing"),
+      '#!/bin/sh\necho "secret not found" >&2\nexit 1\n',
+    );
+    writeRoutine("claude-auth-absent");
+
+    const result = await runRoutine(loadEntry("claude-auth-absent"), {
+      quiet: true,
+      noFallback: true,
+    });
+    expect(result.claudeAuthSource).toBe("keychain-default");
+    const dumped = readFileSync(dump, "utf8");
+    expect(dumped).not.toMatch(/^CLAUDE_CODE_OAUTH_TOKEN=/m);
+    const meta = JSON.parse(readFileSync(join(result.runDir, "meta.json"), "utf8"));
+    expect(meta.claudeAuthSource).toBe("keychain-default");
+  });
+
+  test("a daemon-env token wins over the locator", async () => {
+    const dump = join(home, "claude-child-env-env.dump");
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = "tok-from-daemon-env";
+    process.env.ROUTINES_CLAUDE_BIN = envDumpHarness(dump);
+    process.env.ROUTINES_LASTSECRETS_BIN = stub(
+      join(home, "stub-lastsecrets-unused"),
+      '#!/bin/sh\nprintf "%s\\n" tok-from-lastsecrets\n',
+    );
+    writeRoutine("claude-auth-env");
+
+    const result = await runRoutine(loadEntry("claude-auth-env"), {
+      quiet: true,
+      noFallback: true,
+    });
+    expect(result.claudeAuthSource).toBe("env");
+    const dumped = readFileSync(dump, "utf8");
+    expect(dumped).toMatch(/^CLAUDE_CODE_OAUTH_TOKEN=tok-from-daemon-env$/m);
+    expect(dumped).not.toContain("tok-from-lastsecrets");
+  });
+
+  test("codex legs are untouched", async () => {
+    const dump = join(home, "codex-child-env.dump");
+    delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+    process.env.ROUTINES_CODEX_BIN = stub(
+      join(home, "codex-env-dump-harness"),
+      ["#!/bin/sh", "cat >/dev/null", `env > ${JSON.stringify(dump)}`, "exit 0", ""].join("\n"),
+    );
+    process.env.ROUTINES_LASTSECRETS_BIN = stub(
+      join(home, "stub-lastsecrets-codex"),
+      '#!/bin/sh\nprintf "%s\\n" tok-from-lastsecrets\n',
+    );
+    writeFileSync(
+      join(home, "registry", "codex-auth-untouched.toml"),
+      [
+        'harness = "codex"',
+        'model = "test-model"',
+        'rrule = "FREQ=SECONDLY"',
+        'prompt = "hello"',
+        'heartbeat_slug = "routine-heartbeats"',
+        "timeout_min = 0.05",
+      ].join("\n") + "\n",
+    );
+
+    const result = await runRoutine(loadEntry("codex-auth-untouched"), {
+      quiet: true,
+      noFallback: true,
+    });
+    expect(result.claudeAuthSource).toBeUndefined();
+    const dumped = readFileSync(dump, "utf8");
+    expect(dumped).not.toMatch(/^CLAUDE_CODE_OAUTH_TOKEN=/m);
+  });
+});
