@@ -107,6 +107,17 @@ Environment:
   ROUTINES_CODEX_BIN          codex binary override when explicitly allowed
   ROUTINES_GROK_BIN           grok binary override when explicitly allowed
   ROUTINES_GEMINI_BIN         agy binary override when explicitly allowed
+  CLAUDE_CODE_OAUTH_TOKEN     passed through to claude legs when set (from
+                              \`claude setup-token\`; subscription, not API meter)
+  ROUTINES_CLAUDE_OAUTH_LOCATOR
+                              LastSecrets locator read for claude legs when
+                              CLAUDE_CODE_OAUTH_TOKEN is unset (default
+                              lastsecrets://claude-code-oauth-token; "off" disables)
+  ROUTINES_LASTSECRETS_BIN    lastsecrets binary override when explicitly allowed
+                              (with overrides allowed and this unset, the store
+                              is not consulted)
+  ROUTINES_SECURITY_BIN       macOS security(1) override for the keychain
+                              lockout probe when explicitly allowed (unset ⇒ no probe)
   ROUTINES_FSITUATIONS_BIN    fsituations binary (default: fsituations)
   ROUTINES_FBRAIN_BIN         fbrain binary for heartbeats (default: fbrain)
   ROUTINES_FLEET_LEGACY_READ_UNTIL

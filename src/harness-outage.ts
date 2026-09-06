@@ -32,12 +32,26 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 
+import { claudeKeychainReadRefused, DEFAULT_CLAUDE_OAUTH_LOCATOR } from "./claude-auth.ts";
 import { buildRouteChain, type RouteStep } from "./fallback.ts";
 import { loadAll, type RoutineEntry } from "./registry.ts";
 import { routinesHome } from "./paths.ts";
 import type { RunResult } from "./runner.ts";
 
-export type HarnessOutageKind = "usage-limit" | "capacity" | "auth" | "transient";
+/**
+ * `credential-unreadable`: the harness answered 401 because the login keychain
+ * refused to hand out its stored credential (macOS `security` exit 51), not
+ * because the token expired. Still a dead harness for the fleet — the fence
+ * and the page stay (decision-2026-07-17-harness-outage-needs-human-not-p0-cards)
+ * — but the remedy is "store lastsecrets://claude-code-oauth-token", not
+ * "run claude /login".
+ */
+export type HarnessOutageKind =
+  | "usage-limit"
+  | "capacity"
+  | "auth"
+  | "credential-unreadable"
+  | "transient";
 
 export interface HarnessOutage {
   kind: HarnessOutageKind;
@@ -69,6 +83,12 @@ export interface HarnessOutageOptions {
    * state, but routines must keep firing via the fallback path.
    */
   fenceRoutines?: boolean;
+  /**
+   * Override the keychain lockout probe (tests). Production runs
+   * `security find-generic-password -s "Claude Code-credentials" -w` with
+   * stdout discarded and checks only for exit 51.
+   */
+  keychainReadRefused?: () => boolean;
 }
 
 const STATE_DIR_NAME = "harness-outage";
@@ -345,13 +365,43 @@ export function classifyHarnessOutage(
   const evidence = usage ?? capacity ?? auth ?? transient;
   if (!evidence) return null;
 
+  // A claude 401 while the child had to rely on Claude Code's own keychain
+  // store, and that keychain refuses reads, is a lockout — not an expired
+  // token. Usage-limit and capacity were already matched first above, so a
+  // weekly-limit 429 can never land here (2026-08-20: credits exhaustion was
+  // once misread as an OAuth refresh request).
+  const credentialUnreadable =
+    Boolean(auth) &&
+    result.claudeAuthSource === "keychain-default" &&
+    claudeKeychainReadRefused({ keychainReadRefused: opts.keychainReadRefused });
+
   const { hint, iso } = parseResetHint(corpus, nowMs);
   return {
-    kind: usage ? "usage-limit" : capacity ? "capacity" : auth ? "auth" : "transient",
+    kind: usage
+      ? "usage-limit"
+      : capacity
+        ? "capacity"
+        : credentialUnreadable
+          ? "credential-unreadable"
+          : auth
+            ? "auth"
+            : "transient",
     evidence,
     resetHint: hint,
     resetAt: iso,
   };
+}
+
+/** Operator-facing remedy for a kind, used in the Situation and the page. */
+export function outageRemedy(harness: string, kind: HarnessOutageKind): string {
+  if (kind === "credential-unreadable") {
+    return (
+      `login keychain locked; ${harness} has no readable credential. ` +
+      `Store ${DEFAULT_CLAUDE_OAUTH_LOCATOR} (claude setup-token) so routinesd ` +
+      `can pass CLAUDE_CODE_OAUTH_TOKEN without the keychain.`
+    );
+  }
+  return "wait for the reset or a human to restore credits/auth";
 }
 
 export function outageSituationSlug(harness: string): string {
@@ -586,12 +636,15 @@ function upsertSituation(
   const slug = outageSituationSlug(entry.harness);
   const reset = outage.resetAt ?? outage.resetHint;
   const fenced = scopeRoutines.length > 0;
+  const unreadable = outage.kind === "credential-unreadable";
+  const remedy = outageRemedy(entry.harness, outage.kind);
   const record = {
     slug,
     title: `Harness outage: ${entry.harness} ${outage.kind}`,
     summary:
       `The ${entry.harness} harness is out of service (${outage.kind}); ` +
       `evidence from routine ${entry.id}: "${outage.evidence}". ` +
+      (unreadable ? `Remedy: ${remedy} ` : "") +
       (fenced
         ? `${scopeRoutines.length} routine(s) fenced until this clears`
         : "fallback chain active — routines keep firing on alternate harnesses") +
@@ -606,7 +659,7 @@ function upsertSituation(
     preflight_message:
       `The ${entry.harness} harness is out of service (${outage.kind}). ` +
       (fenced
-        ? `Do not spawn ${entry.harness} agents or retry-loop; wait for the reset or a human to restore credits/auth.`
+        ? `Do not spawn ${entry.harness} agents or retry-loop; ${remedy}.`
         : `Skip ${entry.harness}; routinesd will use the configured fallback chain until this expires.`),
     owner: "routinesd",
     expires_at: expiresAt,
@@ -638,6 +691,9 @@ function notifyTelegram(
   const msg =
     `Needs human: ${entry.harness} harness ${outage.kind} — ` +
     `"${outage.evidence.slice(0, 160)}". ` +
+    (outage.kind === "credential-unreadable"
+      ? `Remedy: ${outageRemedy(entry.harness, outage.kind)} `
+      : "") +
     `${fencedCount} routine(s) fenced via situation ${outageSituationSlug(entry.harness)}; ` +
     `no P0 cards filed. Reset: ${reset}.`;
   const res = spawnSync(bin, ["notify", "--priority", "high", msg], {
