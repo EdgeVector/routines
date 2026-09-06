@@ -1,16 +1,30 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
   escalateRoutineError,
   escalateStatePath,
+  isAtomContentTooLarge,
   isClassifiedErrorOutcome,
   retractEscalateStateIfRecovered,
+  ROUTINE_PAPERCUT_ARCHIVE_MAX_CHARS,
+  ROUTINE_PAPERCUT_HIGH_WATER_CHARS,
+  ROUTINE_PAPERCUT_SLUG,
+  rollRoutinePapercutLedger,
   shouldAutoEscalateScheduledRun,
   shouldEscalate,
+  splitLedgerBodyForArchive,
 } from "../src/error-escalate.ts";
 import type { RoutineEntry } from "../src/registry.ts";
 import type { RunResult } from "../src/runner.ts";
@@ -373,6 +387,7 @@ exit 2
 
     expect(out.detail).toContain("papercut-recorded");
     expect(readFileSync(brainCalls, "utf8").trim().split("\n")).toEqual([
+      "get",
       "append",
       "put",
     ]);
@@ -563,6 +578,276 @@ exit 1
     });
     expect(b.escalated).toBe(true);
     expect(b.agent ?? "").toContain("cooldown");
+  });
+
+  test("rolls the ledger on atom_content_too_large then retries append once", () => {
+    const stubDir = join(home, "bin");
+    mkdirSync(stubDir, { recursive: true });
+    const kanbanStub = join(stubDir, "kanban-stub");
+    const brainStub = join(stubDir, "brain-stub");
+    const stateFile = join(stubDir, "state");
+    const putsDir = join(stubDir, "puts");
+    const getJson = join(stubDir, "get.json");
+    mkdirSync(putsDir, { recursive: true });
+    writeFileSync(stateFile, "0\n");
+    writeFileSync(kanbanStub, "#!/usr/bin/env bash\nexit 1\n");
+    const liveBody =
+      "# preamble\n\n## 2026-07-22T00:29:00.000Z — a\n\n- x\n\n## 2026-09-04T09:47:11.710Z — b\n\n- y\n";
+    writeFileSync(
+      getJson,
+      JSON.stringify({
+        slug: "papercut-routine-non-p0-failures",
+        title: "live",
+        body: liveBody,
+      }),
+    );
+    writeFileSync(
+      brainStub,
+      `#!/usr/bin/env bun
+import { readFileSync, writeFileSync } from "node:fs";
+const stateFile = ${JSON.stringify(stateFile)};
+const getJson = ${JSON.stringify(getJson)};
+const putsDir = ${JSON.stringify(putsDir)};
+const cmd = process.argv[2] ?? "";
+const state = Number(readFileSync(stateFile, "utf8").trim() || "0");
+async function readStdin(): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const c of process.stdin) chunks.push(Buffer.from(c));
+  return Buffer.concat(chunks).toString("utf8");
+}
+if (cmd === "get") {
+  if (state >= 1) {
+    console.log(JSON.stringify({
+      slug: "papercut-routine-non-p0-failures",
+      body: "# pointer\\n",
+      title: "live",
+    }));
+  } else {
+    console.log(readFileSync(getJson, "utf8"));
+  }
+  process.exit(0);
+}
+if (cmd === "append") {
+  if (state === 0) {
+    console.error("error: Node /api/mutation returned HTTP 413: atom content too large: 524539 bytes exceeds hard limit of 524288 bytes");
+    console.log(JSON.stringify({ error: "atom_content_too_large" }));
+    process.exit(1);
+  }
+  console.log("appended after roll");
+  process.exit(0);
+}
+if (cmd === "put") {
+  const body = await readStdin();
+  const m = body.match(/^slug:\\s*(\\S+)/m);
+  if (!m) {
+    console.error("no-slug");
+    process.exit(3);
+  }
+  writeFileSync(putsDir + "/" + m[1], body);
+  writeFileSync(stateFile, String(state + 1) + "\\n");
+  console.log("put " + m[1]);
+  process.exit(0);
+}
+console.error("unexpected " + cmd);
+process.exit(2);
+`,
+    );
+    spawnSyncchmod(kanbanStub);
+    spawnSyncchmod(brainStub);
+
+    const r = result({ exitCode: 1 });
+    const out = escalateRoutineError(
+      { ...entry(), errorPriority: undefined },
+      r,
+      {
+        kanbanBin: kanbanStub,
+        brainBin: brainStub,
+        dispatchAgent: false,
+        quiet: true,
+        cardRetryDelayMs: 1,
+      },
+    );
+
+    expect(out.detail).toContain("papercut-recorded");
+    expect(out.detail).toContain("after ledger roll");
+    const breadcrumb = JSON.parse(
+      readFileSync(join(r.runDir, "error-escalated.json"), "utf8"),
+    );
+    expect(breadcrumb.brainOk).toBe(true);
+    const putFiles = readdirSync(putsDir).filter((n) =>
+      n.startsWith("papercut-routine-non-p0-failures"),
+    );
+    expect(putFiles.some((n) => n.includes("archive"))).toBe(true);
+    expect(putFiles).toContain("papercut-routine-non-p0-failures");
+    const livePut = readFileSync(join(putsDir, "papercut-routine-non-p0-failures"), "utf8");
+    expect(livePut).toContain("Rotated");
+    expect(livePut).toContain("[[papercut-routine-non-p0-failures-archive-");
+  });
+
+  test("announces papercut-failed on the run outcome when roll cannot recover", () => {
+    const stubDir = join(home, "bin");
+    mkdirSync(stubDir, { recursive: true });
+    const kanbanStub = join(stubDir, "kanban-stub");
+    const brainStub = join(stubDir, "brain-stub");
+    const hb = join(stubDir, "heartbeats.log");
+    writeFileSync(kanbanStub, "#!/usr/bin/env bash\nexit 1\n");
+    writeFileSync(
+      brainStub,
+      `#!/usr/bin/env bash
+if [ "\${1:-}" = "get" ]; then
+  echo '{"slug":"papercut-routine-non-p0-failures","body":"small","title":"live"}'
+  exit 0
+fi
+if [ "\${1:-}" = "append" ]; then
+  echo 'HTTP 413: atom content too large' >&2
+  exit 1
+fi
+if [ "\${1:-}" = "put" ]; then
+  echo 'put refused' >&2
+  exit 1
+fi
+exit 2
+`,
+    );
+    spawnSyncchmod(kanbanStub);
+    spawnSyncchmod(brainStub);
+    process.env.ROUTINES_HEARTBEATS_FILE = hb;
+
+    const r = result({ exitCode: 1 });
+    const out = escalateRoutineError(
+      { ...entry(), errorPriority: undefined },
+      r,
+      {
+        kanbanBin: kanbanStub,
+        brainBin: brainStub,
+        dispatchAgent: false,
+        quiet: true,
+        cardRetryDelayMs: 1,
+      },
+    );
+
+    expect(out.detail).toContain("papercut-failed");
+    const breadcrumb = JSON.parse(
+      readFileSync(join(r.runDir, "error-escalated.json"), "utf8"),
+    );
+    expect(breadcrumb.brainOk).toBe(false);
+    const sink = readFileSync(join(r.runDir, "outcome.txt"), "utf8");
+    expect(sink).toContain("escalate=papercut-failed");
+    const stdout = readFileSync(join(r.runDir, "stdout.log"), "utf8");
+    expect(stdout).toContain("ROUTINE_RESULT outcome=error");
+    expect(stdout).toContain("escalate=papercut-failed");
+    expect(readFileSync(hb, "utf8")).toContain("escalate=papercut-failed");
+  });
+});
+
+describe("splitLedgerBodyForArchive", () => {
+  test("keeps a small body as one segment", () => {
+    const body = "## 2026-07-22T00:29:00.000Z — a\n\n- x\n";
+    const segs = splitLedgerBodyForArchive(body, 10_000);
+    expect(segs).toHaveLength(1);
+    expect(segs[0]!.entryCount).toBe(1);
+    expect(segs[0]!.fromIso).toBe("2026-07-22T00:29:00.000Z");
+  });
+
+  test("splits a body over the single-atom archive limit into multiple segments", () => {
+    const entries: string[] = [];
+    for (let i = 0; i < 20; i += 1) {
+      const day = String(i + 1).padStart(2, "0");
+      entries.push(
+        `## 2026-08-${day}T12:00:00.000Z — routine-${i}\n\n${"x".repeat(30_000)}\n\n`,
+      );
+    }
+    const body = `# preamble\n\n${entries.join("")}`;
+    expect(body.length).toBeGreaterThan(ROUTINE_PAPERCUT_ARCHIVE_MAX_CHARS);
+    const segs = splitLedgerBodyForArchive(body, ROUTINE_PAPERCUT_ARCHIVE_MAX_CHARS);
+    expect(segs.length).toBeGreaterThan(1);
+    expect(segs.reduce((n, s) => n + s.entryCount, 0)).toBe(20);
+    for (const seg of segs) {
+      expect(seg.body.length).toBeLessThanOrEqual(ROUTINE_PAPERCUT_ARCHIVE_MAX_CHARS + 50_000);
+    }
+  });
+});
+
+describe("isAtomContentTooLarge", () => {
+  test("matches the typed 413 body routinesd sees in the wild", () => {
+    expect(
+      isAtomContentTooLarge({
+        status: 1,
+        signal: null,
+        output: [],
+        pid: 0,
+        stdout: "",
+        stderr:
+          "error: Node /api/mutation returned HTTP 413: atom content too large: 524539 bytes exceeds hard limit of 524288 bytes",
+        error: undefined,
+      } as ReturnType<typeof spawnSync>),
+    ).toBe(true);
+    expect(
+      isAtomContentTooLarge({
+        status: 1,
+        signal: null,
+        output: [],
+        pid: 0,
+        stdout: "",
+        stderr: "record not found",
+        error: undefined,
+      } as ReturnType<typeof spawnSync>),
+    ).toBe(false);
+  });
+});
+
+describe("rollRoutinePapercutLedger", () => {
+  test("writes multiple archives when the body exceeds one atom", () => {
+    const stubDir = join(home, "bin");
+    mkdirSync(stubDir, { recursive: true });
+    const brainStub = join(stubDir, "brain-stub");
+    const putsDir = join(stubDir, "puts");
+    mkdirSync(putsDir, { recursive: true });
+    const entries: string[] = [];
+    for (let i = 0; i < 12; i += 1) {
+      const day = String(i + 1).padStart(2, "0");
+      entries.push(
+        `## 2026-07-${day}T00:00:00.000Z — r${i}\n\n${"y".repeat(50_000)}\n\n`,
+      );
+    }
+    const big = `# head\n\n${entries.join("")}`;
+    expect(big.length).toBeGreaterThan(ROUTINE_PAPERCUT_HIGH_WATER_CHARS);
+
+    // Bun stub avoids bash pipefail+SIGPIPE on large stdin.
+    writeFileSync(
+      brainStub,
+      `#!/usr/bin/env bun
+const putsDir = ${JSON.stringify(putsDir)};
+const cmd = process.argv[2] ?? "";
+if (cmd !== "put") {
+  console.error("unexpected " + cmd);
+  process.exit(2);
+}
+const chunks: Buffer[] = [];
+for await (const c of process.stdin) chunks.push(Buffer.from(c));
+const body = Buffer.concat(chunks).toString("utf8");
+const m = body.match(/^slug:\\s*(\\S+)/m);
+if (!m) {
+  console.error("no-slug");
+  process.exit(3);
+}
+await Bun.write(putsDir + "/" + m[1], body);
+console.log("ok");
+`,
+    );
+    spawnSyncchmod(brainStub);
+
+    const rolled = rollRoutinePapercutLedger(brainStub, {
+      quiet: true,
+      bodyOverride: big,
+      nowMs: Date.parse("2026-09-06T00:12:00.000Z"),
+    });
+    expect(rolled.ok).toBe(true);
+    expect(rolled.archives.length).toBeGreaterThan(1);
+    expect(existsSync(join(putsDir, ROUTINE_PAPERCUT_SLUG))).toBe(true);
+    for (const slug of rolled.archives) {
+      expect(existsSync(join(putsDir, slug))).toBe(true);
+    }
   });
 });
 

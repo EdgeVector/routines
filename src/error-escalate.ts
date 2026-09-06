@@ -22,6 +22,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  appendFileSync,
   existsSync,
   mkdirSync,
   openSync,
@@ -30,7 +31,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 import { harnessBinary } from "./adapters.ts";
 import {
@@ -51,7 +52,15 @@ const CARD_FILE_ATTEMPTS = 3;
 const CARD_RETRY_DELAY_MS = 250;
 const DEFAULT_ERROR_PRIORITY: ErrorPriority = "P3";
 const ERROR_ESCALATE_CREATOR = "routine:routinesd-error-escalate";
-const ROUTINE_PAPERCUT_SLUG = "papercut-routine-non-p0-failures";
+export const ROUTINE_PAPERCUT_SLUG = "papercut-routine-non-p0-failures";
+/**
+ * LastDB atoms hard-cap at 524_288 bytes. Frontmatter + metadata add about
+ * 13.5 KB, so a body near 510 KB is already at the edge. Roll the live ledger
+ * before that edge (high-water) and again on a 413 backstop.
+ */
+export const ROUTINE_PAPERCUT_HIGH_WATER_CHARS = 480_000;
+/** Max chars per archive body so a put stays under the atom hard limit. */
+export const ROUTINE_PAPERCUT_ARCHIVE_MAX_CHARS = 480_000;
 /** Card upsert always; agent spawn is rate-limited. */
 const STATE_DIR_NAME = "error-escalate";
 
@@ -498,6 +507,392 @@ function isMissingBrainRecord(res: ReturnType<typeof spawnSync>): boolean {
   );
 }
 
+/** True when brain refused the write because the atom hit LASTDB_MAX_ATOM_CONTENT. */
+export function isAtomContentTooLarge(res: ReturnType<typeof spawnSync>): boolean {
+  const text = `${res.stderr || ""}\n${res.stdout || ""}`;
+  return /atom_content_too_large|atom content too large|HTTP 413/i.test(text);
+}
+
+function heartbeatsLogPath(): string {
+  return (
+    process.env.ROUTINES_HEARTBEATS_FILE ||
+    process.env.LAST_STACK_HEARTBEATS_FILE ||
+    join(homedir(), ".last-stack", "logs", "routine-heartbeats.log")
+  );
+}
+
+/**
+ * Make a failed non-P0 papercut escalation visible on the run's outcome sink,
+ * stdout trailer, meta, and fleet heartbeat. A quiet brainOk:false is how the
+ * 38-hour recording outage stayed invisible.
+ */
+function announcePapercutEscalationFailure(
+  entry: RoutineEntry,
+  result: RunResult,
+  detail: string,
+): void {
+  const compact = detail.replace(/\s+/g, " ").trim().slice(0, 280);
+  const escalateToken = `escalate=papercut-failed ${compact}`;
+  const iso = new Date().toISOString();
+
+  try {
+    const sinkPath = join(result.runDir, "outcome.txt");
+    let prior = "";
+    try {
+      prior = readFileSync(sinkPath, "utf8");
+    } catch {
+      /* create fresh */
+    }
+    const lines = prior
+      .split(/\r?\n/)
+      .map((l) => l.trimEnd())
+      .filter((l) => l.length > 0);
+    const verdictIdx = lines.findIndex((l) => /^(ok|noop|error)\b/i.test(l) && !l.startsWith("#"));
+    if (verdictIdx >= 0) {
+      const line = lines[verdictIdx]!;
+      if (!/\bescalate=papercut-failed\b/.test(line)) {
+        lines[verdictIdx] = `${line} ${escalateToken}`;
+      }
+    } else {
+      lines.push(`error ${escalateToken}`);
+    }
+    writeFileSync(sinkPath, `${lines.join("\n")}\n`);
+  } catch {
+    /* ignore */
+  }
+
+  try {
+    appendFileSync(
+      join(result.runDir, "stdout.log"),
+      `\nROUTINE_RESULT outcome=error detail=${escalateToken}\n`,
+    );
+  } catch {
+    /* ignore */
+  }
+
+  try {
+    const metaPath = join(result.runDir, "meta.json");
+    if (existsSync(metaPath)) {
+      const meta = JSON.parse(readFileSync(metaPath, "utf8")) as Record<string, unknown>;
+      const prevDetail = typeof meta.outcomeDetail === "string" ? meta.outcomeDetail : "";
+      meta.outcomeDetail = prevDetail
+        ? `${prevDetail} ${escalateToken}`
+        : escalateToken;
+      meta.escalatePapercutFailed = true;
+      writeFileSync(metaPath, `${JSON.stringify(meta, null, 2)}\n`);
+    }
+  } catch {
+    /* ignore */
+  }
+
+  try {
+    const path = heartbeatsLogPath();
+    mkdirSync(dirname(path), { recursive: true });
+    appendFileSync(
+      path,
+      `${iso} ${entry.id} error escalate=papercut-failed detail=${compact} run=${result.runDir}\n`,
+    );
+  } catch {
+    /* ignore */
+  }
+}
+
+interface BrainRecordJson {
+  slug?: string;
+  title?: string;
+  body?: string;
+  type?: string;
+  tags?: string[];
+  error?: string;
+}
+
+function brainGetReference(
+  brain: string,
+  slug: string,
+): { ok: true; record: BrainRecordJson } | { ok: false; detail: string; missing: boolean } {
+  const res = spawnSync(brain, ["get", slug, "--type", "reference", "--json"], {
+    encoding: "utf8",
+    timeout: 60_000,
+    env: process.env,
+  });
+  if (res.error || res.status !== 0) {
+    return {
+      ok: false,
+      missing: isMissingBrainRecord(res),
+      detail: brainFailureDetail(res),
+    };
+  }
+  try {
+    const record = JSON.parse((res.stdout || "").trim() || "{}") as BrainRecordJson;
+    if (record.error) {
+      return {
+        ok: false,
+        missing: /not found|no (?:such )?record/i.test(String(record.error)),
+        detail: `brain get json error: ${record.error}`,
+      };
+    }
+    return { ok: true, record };
+  } catch (err) {
+    return {
+      ok: false,
+      missing: false,
+      detail: `brain get parse: ${(err as Error).message}`,
+    };
+  }
+}
+
+function brainPutReference(
+  brain: string,
+  slug: string,
+  title: string,
+  body: string,
+  opts: { allowShrink?: boolean; tags?: string[] } = {},
+): { ok: boolean; detail: string } {
+  const tags = opts.tags ?? ["papercut", "routines", "automation"];
+  const tagLine = `tags: [${tags.join(", ")}]`;
+  const input = `---
+type: reference
+slug: ${slug}
+title: ${title}
+${tagLine}
+---
+
+${body.trimEnd()}
+`;
+  const args = ["put", "--type", "reference"];
+  if (opts.allowShrink) args.push("--allow-shrink");
+  const res = spawnSync(brain, args, {
+    input,
+    encoding: "utf8",
+    timeout: 120_000,
+    env: process.env,
+  });
+  if (!res.error && res.status === 0) {
+    return { ok: true, detail: (res.stdout || "").trim() || "put ok" };
+  }
+  return { ok: false, detail: brainFailureDetail(res) };
+}
+
+/** Entry headings look like `## 2026-09-04T09:47:11.710Z — last-stack-worktree-cleanup`. */
+const ENTRY_HEADING_RE = /^##\s+(\d{4}-\d{2}-\d{2}T[^\s]+)\s+—\s+.+/m;
+
+export interface LedgerSplitSegment {
+  body: string;
+  fromIso: string | null;
+  toIso: string | null;
+  entryCount: number;
+}
+
+/**
+ * Split a ledger body into archive-sized segments on entry boundaries.
+ * The preamble (everything before the first entry heading) rides with the
+ * first segment so history stays intact; later segments get a short header.
+ */
+export function splitLedgerBodyForArchive(
+  body: string,
+  maxChars: number = ROUTINE_PAPERCUT_ARCHIVE_MAX_CHARS,
+): LedgerSplitSegment[] {
+  const text = body.replace(/\r\n/g, "\n");
+  if (text.length <= maxChars) {
+    const stamps = [...text.matchAll(/^##\s+(\d{4}-\d{2}-\d{2}T[^\s]+)\s+—/gm)].map((m) => m[1]!);
+    return [
+      {
+        body: text,
+        fromIso: stamps[0] ?? null,
+        toIso: stamps[stamps.length - 1] ?? null,
+        entryCount: stamps.length,
+      },
+    ];
+  }
+
+  const parts = text.split(/(?=^##\s+\d{4}-\d{2}-\d{2}T)/m);
+  const preambleParts: string[] = [];
+  const entries: string[] = [];
+  for (const part of parts) {
+    if (!part) continue;
+    if (ENTRY_HEADING_RE.test(part)) entries.push(part);
+    else preambleParts.push(part);
+  }
+  const preamble = preambleParts.join("").trimEnd();
+
+  const segments: LedgerSplitSegment[] = [];
+  let currentEntries: string[] = [];
+  let currentLen = 0;
+  const headerBudget = 400;
+
+  const flush = () => {
+    if (currentEntries.length === 0 && segments.length > 0) return;
+    const stamps = currentEntries
+      .map((e) => e.match(/^##\s+(\d{4}-\d{2}-\d{2}T[^\s]+)\s+—/)?.[1] ?? null)
+      .filter((s): s is string => Boolean(s));
+    const fromIso = stamps[0] ?? null;
+    const toIso = stamps[stamps.length - 1] ?? null;
+    const isFirst = segments.length === 0;
+    const header = isFirst
+      ? preamble
+        ? `${preamble}\n\n`
+        : ""
+      : `# Routine papercut inbox — archive segment\n\nFrozen history of [[${ROUTINE_PAPERCUT_SLUG}]].\n\n`;
+    const body = `${header}${currentEntries.join("")}`.trimEnd() + "\n";
+    segments.push({
+      body,
+      fromIso,
+      toIso,
+      entryCount: currentEntries.length,
+    });
+    currentEntries = [];
+    currentLen = 0;
+  };
+
+  for (const entry of entries) {
+    const addLen = entry.length;
+    const base = segments.length === 0 ? preamble.length + 2 : headerBudget;
+    if (currentEntries.length > 0 && base + currentLen + addLen > maxChars) {
+      flush();
+    }
+    // A single entry larger than maxChars still ships alone — better one
+    // oversized put attempt than silent drop.
+    currentEntries.push(entry);
+    currentLen += addLen;
+  }
+  flush();
+  return segments.length > 0
+    ? segments
+    : [
+        {
+          body: text,
+          fromIso: null,
+          toIso: null,
+          entryCount: 0,
+        },
+      ];
+}
+
+function compactDay(iso: string | null): string {
+  if (!iso) return "unknown";
+  const m = iso.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return m ? `${m[1]}${m[2]}${m[3]}` : "unknown";
+}
+
+function buildLivePointerBody(
+  archives: Array<{ slug: string; fromIso: string | null; toIso: string | null; entryCount: number }>,
+  rolledAtIso: string,
+): string {
+  const lines = archives.map((a, i) => {
+    const range =
+      a.fromIso && a.toIso
+        ? `${a.fromIso.slice(0, 10)} to ${a.toIso.slice(0, 10)}`
+        : "range unknown";
+    return `- [[${a.slug}]] — ${a.entryCount} entries, ${range} (segment ${i + 1} of ${archives.length})`;
+  });
+  return `# Routine papercut inbox — consolidated non-P0 failures
+
+Status: OPEN
+
+Append-only evidence from routinesd. Stable signatures intentionally omit the
+routine id so equivalent symptoms across routines can be clustered into one
+systemic fix by Brain grooming.
+
+## Rotated ${rolledAtIso} — automatic roll by routinesd error-escalate
+
+The live atom approached or hit LASTDB_MAX_ATOM_CONTENT_BYTES (524288). The
+prior body was frozen into the archive segment(s) below; this live record was
+restarted so new non-P0 failures can append again.
+
+Frozen history:
+
+${lines.join("\n")}
+
+Cause and durable fix:
+[[papercut-routine-non-p0-failures-atom-content-too-large-413]].
+`;
+}
+
+/**
+ * Archive the live ledger body (possibly into multiple records), replace the
+ * live slug with a pointer body, and return the archive slugs written.
+ */
+export function rollRoutinePapercutLedger(
+  brain: string,
+  opts: { quiet?: boolean; nowMs?: number; bodyOverride?: string } = {},
+): { ok: boolean; detail: string; archives: string[] } {
+  let body: string;
+  if (opts.bodyOverride !== undefined) {
+    body = opts.bodyOverride;
+  } else {
+    const got = brainGetReference(brain, ROUTINE_PAPERCUT_SLUG);
+    if (!got.ok) {
+      return { ok: false, detail: `roll get failed: ${got.detail}`, archives: [] };
+    }
+    body = got.record.body ?? "";
+  }
+  if (!body.trim()) {
+    return { ok: true, detail: "roll skipped: empty body", archives: [] };
+  }
+
+  const segments = splitLedgerBodyForArchive(body);
+  const rolledAtIso = new Date(opts.nowMs ?? Date.now()).toISOString();
+  const archives: Array<{
+    slug: string;
+    fromIso: string | null;
+    toIso: string | null;
+    entryCount: number;
+  }> = [];
+
+  for (let i = 0; i < segments.length; i += 1) {
+    const seg = segments[i]!;
+    const from = compactDay(seg.fromIso);
+    const to = compactDay(seg.toIso);
+    const slug =
+      segments.length === 1
+        ? `${ROUTINE_PAPERCUT_SLUG}-archive-${from}-${to}`
+        : `${ROUTINE_PAPERCUT_SLUG}-archive-${i + 1}-${from}-${to}`;
+    const title =
+      segments.length === 1
+        ? `Routine papercut inbox — archive (${from} to ${to})`
+        : `Routine papercut inbox — archive ${i + 1} of ${segments.length} (${from} to ${to})`;
+    const put = brainPutReference(brain, slug, title, seg.body, {
+      tags: ["papercut", "routines", "automation", "archive"],
+    });
+    if (!put.ok) {
+      return {
+        ok: false,
+        detail: `roll archive put failed (${slug}): ${put.detail}`,
+        archives: archives.map((a) => a.slug),
+      };
+    }
+    logLine(opts.quiet, `rolled ledger archive ${slug} entries=${seg.entryCount}`);
+    archives.push({
+      slug,
+      fromIso: seg.fromIso,
+      toIso: seg.toIso,
+      entryCount: seg.entryCount,
+    });
+  }
+
+  const pointer = buildLivePointerBody(archives, rolledAtIso);
+  const livePut = brainPutReference(
+    brain,
+    ROUTINE_PAPERCUT_SLUG,
+    "Routine papercut inbox — consolidated non-P0 failures",
+    pointer,
+    { allowShrink: true, tags: ["papercut", "routines", "automation"] },
+  );
+  if (!livePut.ok) {
+    return {
+      ok: false,
+      detail: `roll live put failed: ${livePut.detail}`,
+      archives: archives.map((a) => a.slug),
+    };
+  }
+
+  return {
+    ok: true,
+    detail: `rolled into ${archives.map((a) => a.slug).join(",")}`,
+    archives: archives.map((a) => a.slug),
+  };
+}
+
 function appendRoutineFailurePapercut(
   entry: RoutineEntry,
   result: RunResult,
@@ -523,7 +918,31 @@ systemic fix by Brain grooming.
 
 ${entryBody}`;
 
+  // Proactive high-water roll: do not wait for the 413 if the live body is
+  // already near the atom cap.
+  const existing = brainGetReference(brain, ROUTINE_PAPERCUT_SLUG);
+  if (existing.ok) {
+    const liveChars = (existing.record.body ?? "").length;
+    if (liveChars >= ROUTINE_PAPERCUT_HIGH_WATER_CHARS) {
+      logLine(
+        opts.quiet,
+        `brain papercut high-water ${liveChars}>=${ROUTINE_PAPERCUT_HIGH_WATER_CHARS}; rolling before append`,
+      );
+      const rolled = rollRoutinePapercutLedger(brain, {
+        quiet: opts.quiet,
+        nowMs: opts.nowMs,
+        bodyOverride: existing.record.body,
+      });
+      if (!rolled.ok) {
+        const detail = `high-water roll failed: ${rolled.detail}`;
+        announcePapercutEscalationFailure(entry, result, detail);
+        return { ok: false, slug: ROUTINE_PAPERCUT_SLUG, detail };
+      }
+    }
+  }
+
   let lastFailure = "unknown failure";
+  let rolledOn413 = false;
   for (let attempt = 1; attempt <= CARD_FILE_ATTEMPTS; attempt += 1) {
     const append = spawnSync(
       brain,
@@ -537,6 +956,34 @@ ${entryBody}`;
         slug: ROUTINE_PAPERCUT_SLUG,
         detail: attempt === 1 ? detail : `${detail} after ${attempt} attempts`,
       };
+    }
+
+    if (isAtomContentTooLarge(append) && !rolledOn413) {
+      rolledOn413 = true;
+      logLine(opts.quiet, "brain papercut atom_content_too_large; rolling ledger then retrying once");
+      const rolled = rollRoutinePapercutLedger(brain, {
+        quiet: opts.quiet,
+        nowMs: opts.nowMs,
+      });
+      if (!rolled.ok) {
+        lastFailure = `413 roll failed: ${rolled.detail}; append was: ${brainFailureDetail(append)}`;
+        break;
+      }
+      const retry = spawnSync(
+        brain,
+        ["append", ROUTINE_PAPERCUT_SLUG, "--type", "reference"],
+        { input: entryBody, encoding: "utf8", timeout: 60_000, env: process.env },
+      );
+      if (!retry.error && retry.status === 0) {
+        const detail = (retry.stdout || "").trim() || "papercut appended";
+        return {
+          ok: true,
+          slug: ROUTINE_PAPERCUT_SLUG,
+          detail: `${detail} after ledger roll (${rolled.archives.join(",")})`,
+        };
+      }
+      lastFailure = `append after roll failed: ${brainFailureDetail(retry)}`;
+      break;
     }
 
     if (isMissingBrainRecord(append)) {
@@ -569,10 +1016,12 @@ ${entryBody}`;
     }
   }
 
+  const failDetail = `brain append failed after ${CARD_FILE_ATTEMPTS} attempts; last: ${lastFailure}`;
+  announcePapercutEscalationFailure(entry, result, failDetail);
   return {
     ok: false,
     slug: ROUTINE_PAPERCUT_SLUG,
-    detail: `brain append failed after ${CARD_FILE_ATTEMPTS} attempts; last: ${lastFailure}`,
+    detail: failDetail,
   };
 }
 
@@ -829,7 +1278,7 @@ export function escalateRoutineError(
       return {
         escalated: true,
         detail: papercut.ok
-          ? `papercut-recorded: ${papercut.slug}`
+          ? `papercut-recorded: ${papercut.slug} — ${papercut.detail}`
           : `papercut-failed: ${papercut.detail}`,
       };
     }
