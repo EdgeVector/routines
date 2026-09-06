@@ -159,6 +159,7 @@ export interface DaemonEvent {
     | "registry-error"
     | "situations-degraded"
     | "reconcile-orphans"
+    | "reap-unspawned"
     | "coalesce-backlog"
     | "start"
     | "stop";
@@ -172,6 +173,180 @@ function defaultLog(event: DaemonEvent): void {
 
 /** Default minimum gap between two routine kickoffs. */
 export const DEFAULT_STAGGER_MS = 60_000;
+
+/**
+ * How long a dispatch may sit in `inFlight` having produced nothing at all.
+ *
+ * `runRoutine` creates its run directory as its first substantial act, well
+ * before the optional zero-LLM gate and before the harness spawn. So a
+ * dispatch that has neither a run directory nor a harness pid after this long
+ * did not start slowly — it never got off the ground, and its slot and lock
+ * are leaked for as long as the daemon lives.
+ *
+ * Ten minutes is far longer than any pre-run-directory work (registry read,
+ * prompt resolution, project config) and shorter than the tightest routine
+ * cadence that matters, so a leaked lane loses at most one fire.
+ */
+export const DEFAULT_SPAWN_DEADLINE_MS = 600_000;
+
+export function spawnDeadlineMs(): number {
+  const raw = process.env.ROUTINES_SPAWN_DEADLINE_MS;
+  if (raw == null || raw === "") return DEFAULT_SPAWN_DEADLINE_MS;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_SPAWN_DEADLINE_MS;
+}
+
+/**
+ * Per-dispatch bookkeeping, keyed by the `inFlight` set it belongs to.
+ *
+ * Kept beside the set rather than inside it because `inFlight` is a plain
+ * `Set<string>` shared with callers and tests. A WeakMap ties this state to
+ * exactly one dispatch lifetime — the daemon loop's persistent set, or the
+ * throwaway set a standalone pass creates — with no API change and no leak.
+ */
+interface DispatchSlot {
+  /** Epoch ms of the kickoff. */
+  startedAt: number;
+  /**
+   * Monotonic per-dispatch id. A dispatch reaped for never spawning may still
+   * settle later; comparing this tells that late `finally` that its slot is no
+   * longer its own, so it never deletes a successor's slot or lock.
+   */
+  token: number;
+  /**
+   * mtime of `runs/<id>/` at kickoff, or null when the directory did not exist.
+   * The parent's mtime changes when a run directory is created inside it, so
+   * one `stat` per in-flight id answers "did this dispatch ever start a run?"
+   * without walking the run tree.
+   */
+  runsMtimeMs: number | null;
+}
+
+const dispatchSlots = new WeakMap<Set<string>, Map<string, DispatchSlot>>();
+let dispatchSeq = 0;
+
+/**
+ * Open a dispatch slot and return its token.
+ *
+ * Called by `tryDispatch` at kickoff. `startedAtMs` exists so a caller can
+ * state the kickoff instant explicitly rather than reaching into the clock.
+ */
+export function recordDispatchSlot(
+  inFlight: Set<string>,
+  id: string,
+  startedAtMs: number = Date.now(),
+): number {
+  const token = ++dispatchSeq;
+  slotsFor(inFlight).set(id, {
+    startedAt: startedAtMs,
+    token,
+    runsMtimeMs: runsDirMtimeMs(id),
+  });
+  return token;
+}
+
+function slotsFor(inFlight: Set<string>): Map<string, DispatchSlot> {
+  let m = dispatchSlots.get(inFlight);
+  if (!m) {
+    m = new Map<string, DispatchSlot>();
+    dispatchSlots.set(inFlight, m);
+  }
+  return m;
+}
+
+/**
+ * Does the slot for `id` still belong to the dispatch that took `token`?
+ *
+ * False once the reaper has freed the slot — and, critically, false when a
+ * later kickoff of the same routine has taken it. A reaped dispatch can still
+ * settle afterwards, and its cleanup must not delete a successor's slot or
+ * lock: both carry the same routine id and the same owning daemon pid, so the
+ * token is the only thing that tells them apart.
+ */
+export function slotStillOwnedBy(inFlight: Set<string>, id: string, token: number): boolean {
+  return dispatchSlots.get(inFlight)?.get(id)?.token === token;
+}
+
+/** mtime of the routine's run-directory parent, or null when absent. */
+function runsDirMtimeMs(id: string): number | null {
+  try {
+    return statSync(join(runsDir(), id)).mtimeMs;
+  } catch {
+    return null;
+  }
+}
+
+/** Has a run directory appeared for this id since the dispatch started? */
+function runDirAppeared(slot: DispatchSlot, id: string): boolean {
+  const now = runsDirMtimeMs(id);
+  if (now == null) return false;
+  if (slot.runsMtimeMs == null) return true;
+  return now !== slot.runsMtimeMs;
+}
+
+/** Count of in-flight ids whose lock names no live harness process. */
+export function unspawnedCount(inFlight: Set<string>): number {
+  let n = 0;
+  for (const id of inFlight) {
+    const pid = readLockInfo(id)?.harnessPid ?? null;
+    if (pid == null || !pidAlive(pid)) n += 1;
+  }
+  return n;
+}
+
+/**
+ * Free dispatch slots whose run never started.
+ *
+ * `tryDispatch` adds the id to `inFlight` and takes the lock before
+ * `runRoutine` resolves, and only the `.finally()` gives them back. A
+ * `runRoutine` that never settles therefore holds both forever: every later
+ * tick logs `skip-single-flight` and the routine never fires again while the
+ * daemon lives. On 2026-09-05 fifteen lanes were held this way, including both
+ * hard pickup lanes, and nothing reported it.
+ *
+ * A slot is only reaped on three independent facts, so a slow dispatch is
+ * never mistaken for a dead one:
+ *   1. it is past the spawn deadline,
+ *   2. its lock names no harness pid — no harness was ever spawned,
+ *   3. no run directory appeared for it since the kickoff.
+ * A gate_command routine can spend many minutes before spawning a harness, but
+ * it always has a run directory by then, so (3) excludes it.
+ */
+export function reapUnspawnedDispatches(
+  inFlight: Set<string>,
+  log: (e: DaemonEvent) => void,
+  nowMs: number = Date.now(),
+): string[] {
+  const slots = slotsFor(inFlight);
+  const deadline = spawnDeadlineMs();
+  const reaped: string[] = [];
+  for (const id of [...inFlight]) {
+    const slot = slots.get(id);
+    // No bookkeeping means this daemon did not start it — leave it alone.
+    if (!slot) continue;
+    const ageMs = nowMs - slot.startedAt;
+    if (ageMs < deadline) continue;
+    if (readLockInfo(id)?.harnessPid != null) continue;
+    if (runDirAppeared(slot, id)) continue;
+
+    inFlight.delete(id);
+    slots.delete(id);
+    // Scoped by ownership: the lock is only removed while it is still this
+    // process's un-spawned lock. Another daemon's lock is left untouched.
+    const released = releaseLockIfOwned(id, process.pid);
+    reaped.push(id);
+    log({
+      ts: new Date(nowMs).toISOString(),
+      kind: "reap-unspawned",
+      id,
+      detail:
+        `dispatch never started: no harness pid and no run directory after ` +
+        `${Math.round(ageMs / 1000)}s (deadline ${Math.round(deadline / 1000)}s); ` +
+        `slot freed, lock ${released ? "released" : "not ours"}`,
+    });
+  }
+  return reaped;
+}
 
 /**
  * Resolve the kickoff stagger: explicit option, else ROUTINES_STAGGER_MS, else
@@ -903,6 +1078,9 @@ function tryDispatch(entry: RoutineEntry, occ: Date, deps: DispatchDeps): void {
 
   patchState(entry.id, { lastFire: occ.toISOString() });
   inFlight.add(entry.id);
+  // Bookkeeping for the un-spawned reaper: when this kickoff happened, and what
+  // the run-directory parent looked like before it could create anything.
+  const token = recordDispatchSlot(inFlight, entry.id);
   lastDispatch.at = Date.now();
   log({
     ts: now.toISOString(),
@@ -933,7 +1111,21 @@ function tryDispatch(entry: RoutineEntry, occ: Date, deps: DispatchDeps): void {
       throw err;
     })
     .finally(() => {
+      const slots = slotsFor(inFlight);
+      if (!slotStillOwnedBy(inFlight, entry.id, token)) {
+        // This dispatch was reaped for never spawning, and the slot may already
+        // belong to a later kickoff of the same routine. Never delete a
+        // successor's slot, and only release a lock provably held by our own
+        // harness — `process.pid` would match a successor's fresh lock too.
+        const ownHarness = finishedResult?.harnessPid ?? null;
+        if (ownHarness != null) releaseLockIfOwned(entry.id, ownHarness);
+        if (deps.onSlotFree) {
+          queueMicrotask(() => deps.onSlotFree?.());
+        }
+        return;
+      }
       inFlight.delete(entry.id);
+      slots.delete(entry.id);
       releaseLockIfOwned(entry.id, finishedResult?.harnessPid ?? process.pid);
       // Defer refill so we never re-enter the admit loop mid-dispatch scan.
       if (deps.onSlotFree) {
@@ -998,12 +1190,21 @@ export function dispatchDue(opts: DispatchPassOptions = {}): Promise<RunResult>[
     onSlotFree: opts.onSlotFree,
   };
 
+  // Give back slots whose dispatch never started, BEFORE admitting work, so a
+  // reaped lane can fire again in this same pass rather than waiting a tick.
+  reapUnspawnedDispatches(inFlight, log);
+
   if (emitTick) {
     emitReconcile(log);
+    // `unspawned` is the leak made visible before it is fatal: in-flight ids
+    // with no live harness behind them. Healthy steady state is a small number
+    // that keeps changing; a number that only climbs is the failure.
     log({
       ts: now.toISOString(),
       kind: "tick",
-      detail: `${entries.length} routines in_flight=${inFlight.size} stagger=${formatStagger(staggerMs)}`,
+      detail:
+        `${entries.length} routines in_flight=${inFlight.size} ` +
+        `unspawned=${unspawnedCount(inFlight)} stagger=${formatStagger(staggerMs)}`,
     });
   }
 
