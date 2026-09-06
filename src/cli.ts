@@ -127,8 +127,9 @@ Hygiene:
   --ff-install                if CLI checkout is a clean git tree behind
                               lastgit/main, fast-forward only (never on dirty trees)
   --no-restart                with --ff-install, skip routinesd kickstart
-  --keep-runs N               keep last N run dirs per id (default 20)
-  --keep-days N               also keep runs finished within N days (default 7)
+  --keep-runs N               per-id CEILING on run dirs kept (default 20)
+  --keep-days N               within that ceiling, drop runs older than N days
+                              (default 7); never widens what --keep-runs allows
   --memory-lines N            truncate memory.md to last N lines (default 100)
   --escalate-days N           drop error-escalate/*.json older than N days (default 14)`;
 
