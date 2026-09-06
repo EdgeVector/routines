@@ -11,6 +11,8 @@ import {
   evaluateOnce,
   formatStagger,
   normalizeStaggerMs,
+  STALL_TICK_FACTOR,
+  stallDetail,
   startDaemon,
 } from "../src/daemon.ts";
 import { loadEntry } from "../src/registry.ts";
@@ -748,5 +750,83 @@ describe("daemon free-slot pool", () => {
     const dispatched = released.filter((e) => e.kind === "dispatch").map((e) => e.id);
     expect(dispatched.length).toBe(1);
     expect(["dz-a", "dz-b", "dz-c"]).toContain(dispatched[0]!);
+  });
+});
+
+describe("stallDetail", () => {
+  // The outage this guards produced tick gaps of 2 to 49 minutes against
+  // tickMs=15_000 and no warning line at all.
+  test("reports a pass that ran long against the tick budget", () => {
+    const d = stallDetail(49 * 60_000, 15_000);
+    expect(d).not.toBeNull();
+    expect(d!).toContain("2940.0s");
+    expect(d!).toContain("tick=15000ms");
+  });
+
+  test("says nothing about a healthy tick", () => {
+    expect(stallDetail(15_600, 15_000)).toBeNull();
+  });
+
+  // The threshold is a real boundary, not a rounding artefact: one ms under
+  // the budget is silent, exactly the budget reports.
+  test("is silent just under the budget and speaks at it", () => {
+    const budget = 15_000 * STALL_TICK_FACTOR;
+    expect(stallDetail(budget - 1, 15_000)).toBeNull();
+    expect(stallDetail(budget, 15_000)).not.toBeNull();
+  });
+
+  test("never divides by a zero or negative budget", () => {
+    expect(stallDetail(60_000, 0)).toBeNull();
+    expect(stallDetail(60_000, -1)).toBeNull();
+    expect(stallDetail(60_000, 15_000, 0)).toBeNull();
+    expect(stallDetail(Number.NaN, 15_000)).toBeNull();
+    expect(stallDetail(60_000, Number.NaN)).toBeNull();
+  });
+});
+
+describe("daemon stall line", () => {
+  test("a late pass emits a stall event before its tick line", () => {
+    const events: DaemonEvent[] = [];
+    const log = (e: DaemonEvent) => events.push(e);
+    // A shared holder is what makes the gap visible across passes. Backdate it
+    // past the budget rather than waiting: the failure is measured in minutes.
+    const lastTick = { at: Date.now() - 20 * 60_000 };
+
+    dispatchDue({ log, lastTick, tickMs: 15_000, emitTick: true });
+
+    const kinds = events.map((e) => e.kind);
+    expect(kinds).toContain("stall");
+    expect(kinds).toContain("tick");
+    expect(kinds.indexOf("stall")).toBeLessThan(kinds.indexOf("tick"));
+    expect(events.find((e) => e.kind === "stall")!.detail).toContain("tick=15000ms");
+  });
+
+  test("a healthy pass emits no stall event", () => {
+    const events: DaemonEvent[] = [];
+    const lastTick = { at: Date.now() - 15_200 };
+    dispatchDue({ log: (e) => events.push(e), lastTick, tickMs: 15_000, emitTick: true });
+    expect(events.map((e) => e.kind)).not.toContain("stall");
+  });
+
+  // An internal refill passes emitTick=false. It must not move the clock, or
+  // the next real tick measures the refill's gap and reports a stall that never
+  // happened.
+  test("an internal refill neither reports nor moves the tick clock", () => {
+    const events: DaemonEvent[] = [];
+    const stale = Date.now() - 20 * 60_000;
+    const lastTick = { at: stale };
+
+    dispatchDue({ log: (e) => events.push(e), lastTick, tickMs: 15_000, emitTick: false });
+
+    expect(events.map((e) => e.kind)).not.toContain("stall");
+    expect(lastTick.at).toBe(stale);
+  });
+
+  test("the first pass of a fresh daemon cannot report a stall", () => {
+    const events: DaemonEvent[] = [];
+    const lastTick: { at: number | null } = { at: null };
+    dispatchDue({ log: (e) => events.push(e), lastTick, tickMs: 15_000, emitTick: true });
+    expect(events.map((e) => e.kind)).not.toContain("stall");
+    expect(lastTick.at).not.toBeNull();
   });
 });

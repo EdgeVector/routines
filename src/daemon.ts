@@ -154,6 +154,7 @@ export interface DaemonEvent {
   ts: string;
   kind:
     | "tick"
+    | "stall"
     | "dispatch"
     | "complete"
     | "skip-fence"
@@ -1180,6 +1181,37 @@ function tryDispatch(entry: RoutineEntry, occ: Date, deps: DispatchDeps): void {
   deps.running.push(p);
 }
 
+/**
+ * A tick is late by this multiple of `tickMs` before the daemon says so.
+ *
+ * The 2026-09-05 dispatch outage ran for 78 minutes with tick gaps from 2 to 49
+ * minutes against `tickMs=15_000`, and produced no warning of any kind: the
+ * daemon stayed alive, `launchctl list` reported it loaded, and the only signal
+ * was a heartbeat log going quiet, which reads as "nothing due". Every one of
+ * those passes wrote a timestamped `tick` line, so the daemon already HELD the
+ * evidence and never judged it.
+ */
+export const STALL_TICK_FACTOR = 4;
+
+/**
+ * Describe a late tick, or null when the gap is within budget.
+ *
+ * Pure so the threshold is testable without a daemon: the failure this guards
+ * is measured in minutes, and no test should wait for one.
+ */
+export function stallDetail(
+  gapMs: number,
+  tickMs: number,
+  factor: number = STALL_TICK_FACTOR,
+): string | null {
+  if (!Number.isFinite(gapMs) || !Number.isFinite(tickMs)) return null;
+  if (tickMs <= 0 || factor <= 0) return null;
+  const budgetMs = tickMs * factor;
+  if (gapMs < budgetMs) return null;
+  const secs = (gapMs / 1000).toFixed(1);
+  return `previous pass took ${secs}s against tick=${tickMs}ms (>=${factor}x budget)`;
+}
+
 export interface DispatchPassOptions extends DaemonOptions {
   /** Shared in-flight set (daemon loop). Fresh set per call if omitted. */
   inFlight?: Set<string>;
@@ -1190,6 +1222,11 @@ export interface DispatchPassOptions extends DaemonOptions {
   lastDispatch?: { at: number | null };
   /** Free-slot pool callback when any started run completes. */
   onSlotFree?: () => void;
+  /**
+   * Shared last-tick clock (daemon loop), used to notice a stalled pass. Fresh
+   * holder per call if omitted, which means a standalone pass never reports one.
+   */
+  lastTick?: { at: number | null };
   /** When false, do not emit a tick log line (internal refills). Default true. */
   emitTick?: boolean;
 }
@@ -1207,6 +1244,7 @@ export function dispatchDue(opts: DispatchPassOptions = {}): Promise<RunResult>[
   const now = new Date();
   const inFlight = opts.inFlight ?? new Set<string>();
   const lastDispatch = opts.lastDispatch ?? { at: null };
+  const lastTick = opts.lastTick ?? { at: null };
   const emitTick = opts.emitTick !== false;
 
   const { entries: registryEntries, errors } = loadAll();
@@ -1265,6 +1303,15 @@ export function dispatchDue(opts: DispatchPassOptions = {}): Promise<RunResult>[
 
   if (emitTick) {
     emitReconcile(log);
+    // Judge the gap before writing this pass's tick line. Only real ticks
+    // update the clock; internal refills pass emitTick=false and would
+    // otherwise report a stall that never happened.
+    const prevTickMs = lastTick.at;
+    lastTick.at = now.getTime();
+    if (prevTickMs != null) {
+      const stalled = stallDetail(now.getTime() - prevTickMs, opts.tickMs ?? 15_000);
+      if (stalled) log({ ts: now.toISOString(), kind: "stall", detail: stalled });
+    }
     // `unspawned` is the leak made visible before it is fatal: in-flight ids
     // with no live harness behind them. Healthy steady state is a small number
     // that keeps changing; a number that only climbs is the failure.
@@ -1409,6 +1456,8 @@ export function startDaemon(opts: DaemonOptions = {}): DaemonHandle {
   const inFlight = new Set<string>();
   /** Persistent across ticks — when the last kickoff happened. */
   const lastDispatch: { at: number | null } = { at: null };
+  /** Persistent across ticks — when the last pass ran, so a stall is visible. */
+  const lastTick: { at: number | null } = { at: null };
 
   // Serialize admit passes; queue another if a slot frees mid-scan.
   let admitting = false;
@@ -1431,6 +1480,8 @@ export function startDaemon(opts: DaemonOptions = {}): DaemonHandle {
           log,
           inFlight,
           lastDispatch,
+          lastTick,
+          tickMs,
           emitTick: true,
           onSlotFree: () => {
             if (!stopped) admitDue();
