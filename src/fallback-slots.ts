@@ -135,23 +135,58 @@ export type FallbackSlotWait =
   | { token: FallbackSlotToken }
   | { overloaded: true };
 
+/** Default: log a long wait once after one minute. */
+export const DEFAULT_FALLBACK_WAIT_LOG_AFTER_MS = 60_000;
+
+export type FallbackSlotWaitInfo = {
+  harness: string;
+  waitedMs: number;
+  queueDepth: number;
+};
+
 /**
  * Jitter, then wait until a slot is free or `deadlineMs` elapses.
  * Overloaded is retry-later — never harness-outage evidence.
+ *
+ * When the wait passes `waitLogAfterMs` (default 60s), `onWait` fires once
+ * with the harness and live queue depth so operators can see a stuck lane.
  */
 export async function waitForFallbackSlot(
   harness: string,
   owner: { pid: number; id: string },
-  opts: { deadlineMs: number; jitterMs?: number } = { deadlineMs: 30_000 },
+  opts: {
+    deadlineMs: number;
+    jitterMs?: number;
+    waitLogAfterMs?: number;
+    onWait?: (info: FallbackSlotWaitInfo) => void;
+  } = { deadlineMs: 30_000 },
 ): Promise<FallbackSlotWait> {
   const jitter = opts.jitterMs ?? fallbackJitterMs();
   if (jitter > 0) await sleepMs(jitter);
   const start = Date.now();
   const deadline = Math.max(0, opts.deadlineMs);
+  const waitLogAfter = Math.max(
+    0,
+    opts.waitLogAfterMs ?? DEFAULT_FALLBACK_WAIT_LOG_AFTER_MS,
+  );
+  let loggedWait = false;
   for (;;) {
     const token = acquireFallbackSlot(harness, owner);
     if (token) return { token };
-    if (Date.now() - start >= deadline) return { overloaded: true };
+    const waitedMs = Date.now() - start;
+    if (!loggedWait && waitedMs >= waitLogAfter) {
+      loggedWait = true;
+      try {
+        opts.onWait?.({
+          harness,
+          waitedMs,
+          queueDepth: countLiveFallbackSlots(harness),
+        });
+      } catch {
+        /* never break the wait */
+      }
+    }
+    if (waitedMs >= deadline) return { overloaded: true };
     await sleepMs(SLOT_POLL_MS);
   }
 }

@@ -132,13 +132,15 @@ export function writeEarlyMeta(args: {
   command: string;
   startedAt: string;
   harnessPid: number | null;
-  status?: "running" | "spawn_failed";
+  status?: "running" | "waiting" | "spawn_failed";
   resolvedBy?: "matrix" | "pin";
   difficulty?: string;
   matrixResolution?: RoutineEntry["matrixResolution"];
   gateCommand?: string | null;
   gateProceeded?: boolean;
   gateSkippedHarness?: boolean;
+  waitingForHarness?: string | null;
+  waitingSince?: string | null;
 }): void {
   writeRunFile(
     join(args.runDir, "meta.json"),
@@ -160,6 +162,12 @@ export function writeEarlyMeta(args: {
         matrixResolution: args.matrixResolution ?? null,
         exitCode: null,
         finishedAt: null,
+        ...(args.waitingForHarness
+          ? {
+              waitingForHarness: args.waitingForHarness,
+              waitingSince: args.waitingSince ?? args.startedAt,
+            }
+          : {}),
         ...(args.gateCommand
           ? {
               gateCommand: args.gateCommand,
@@ -172,6 +180,52 @@ export function writeEarlyMeta(args: {
       2,
     ) + "\n",
   );
+}
+
+/**
+ * Create the run directory BEFORE a fallback-slot wait.
+ *
+ * `reapUnspawnedDispatches` treats "no run directory since kickoff" as proof
+ * the dispatch is dead. A legitimate wait has no harness pid and used to have
+ * no run directory either, so the reaper discarded live waits after 600s.
+ * Materializing this waiting stamp first makes `runDirAppeared` true and lets
+ * `routines status` show the lane as waiting.
+ */
+export function createWaitingRunDir(
+  entry: RoutineEntry,
+  opts: RunOptions,
+  waitingForHarness: string,
+  startedAt: Date = new Date(),
+): { runDir: string; startedAt: Date } {
+  const trigger = opts.trigger ?? "scheduled";
+  const runDir = join(runsDir(), entry.id, runStamp(startedAt));
+  mkdirSync(runDir, { recursive: true });
+  mkdirSync(join(runDir, "scratch"), { recursive: true });
+  writeRunFile(join(runDir, "stdout.log"), "");
+  writeRunFile(join(runDir, "stderr.log"), "");
+  writeRunFile(
+    join(runDir, "prompt.txt"),
+    `(waiting for ${waitingForHarness} fallback slot)\n`,
+  );
+  writeEarlyMeta({
+    runDir,
+    id: entry.id,
+    trigger,
+    harness: entry.harness,
+    model: entry.model,
+    effort: entry.effort,
+    cwd: entry.cwd,
+    command: `fallback-slot: waiting for ${waitingForHarness}`,
+    startedAt: startedAt.toISOString(),
+    harnessPid: null,
+    status: "waiting",
+    resolvedBy: entry.resolvedBy,
+    difficulty: entry.difficulty,
+    matrixResolution: entry.matrixResolution,
+    waitingForHarness,
+    waitingSince: startedAt.toISOString(),
+  });
+  return { runDir, startedAt };
 }
 
 /**
@@ -266,19 +320,69 @@ export async function runRoutine(entry: RoutineEntry, opts: RunOptions = {}): Pr
     const runEntry = entryForRoute(entry, step);
     const isFallbackLeg = step.harness !== entry.harness;
     let slotToken: string | null = null;
+    let waitingDir: { runDir: string; startedAt: Date } | null = null;
     if (isFallbackLeg) {
+      // Create the run directory BEFORE the wait so the unspawned reaper and
+      // `routines status` can see a live dispatch that is only waiting on a
+      // fallback slot (no harness pid yet).
+      waitingDir = createWaitingRunDir(runEntry, opts, step.harness);
       const wait = await waitForFallbackSlot(
         step.harness,
         { pid: process.pid, id: entry.id },
-        { deadlineMs: Math.max(1, timeoutMinForRoute(entry, step) * 60_000) },
+        {
+          deadlineMs: Math.max(1, timeoutMinForRoute(entry, step) * 60_000),
+          onWait: (info) => {
+            try {
+              process.stderr.write(
+                JSON.stringify({
+                  ts: new Date().toISOString(),
+                  kind: "wait-fallback-slot",
+                  id: entry.id,
+                  detail:
+                    `waiting for ${info.harness} slot since ${waitingDir!.startedAt.toISOString()} ` +
+                    `(waited ${Math.round(info.waitedMs / 1000)}s, queueDepth=${info.queueDepth})`,
+                }) + "\n",
+              );
+            } catch {
+              /* never break the wait */
+            }
+            try {
+              writeEarlyMeta({
+                runDir: waitingDir!.runDir,
+                id: runEntry.id,
+                trigger: opts.trigger ?? "scheduled",
+                harness: runEntry.harness,
+                model: runEntry.model,
+                effort: runEntry.effort,
+                cwd: runEntry.cwd,
+                command: `fallback-slot: waiting for ${info.harness}`,
+                startedAt: waitingDir!.startedAt.toISOString(),
+                harnessPid: null,
+                status: "waiting",
+                resolvedBy: runEntry.resolvedBy,
+                difficulty: runEntry.difficulty,
+                matrixResolution: runEntry.matrixResolution,
+                waitingForHarness: info.harness,
+                waitingSince: waitingDir!.startedAt.toISOString(),
+              });
+            } catch {
+              /* never break the wait */
+            }
+          },
+        },
       );
       if ("overloaded" in wait) {
-        last = await recordOverloadedFallback(runEntry, opts, {
-          primaryHarness: entry.harness,
-          primaryModel: entry.model,
-          routeIndex: attempts.length,
-          routeCount: routes.length,
-        });
+        last = await recordOverloadedFallback(
+          runEntry,
+          opts,
+          {
+            primaryHarness: entry.harness,
+            primaryModel: entry.model,
+            routeIndex: attempts.length,
+            routeCount: routes.length,
+          },
+          waitingDir,
+        );
         attempts.push({
           harness: step.harness,
           model: step.model,
@@ -297,12 +401,17 @@ export async function runRoutine(entry: RoutineEntry, opts: RunOptions = {}): Pr
     }
 
     try {
-      last = await runOnce(runEntry, opts, {
-        primaryHarness: entry.harness,
-        primaryModel: entry.model,
-        routeIndex: attempts.length,
-        routeCount: routes.length,
-      });
+      last = await runOnce(
+        runEntry,
+        opts,
+        {
+          primaryHarness: entry.harness,
+          primaryModel: entry.model,
+          routeIndex: attempts.length,
+          routeCount: routes.length,
+        },
+        waitingDir ?? undefined,
+      );
     } finally {
       releaseFallbackSlot(slotToken);
     }
@@ -510,10 +619,11 @@ async function recordOverloadedFallback(
   entry: RoutineEntry,
   opts: RunOptions,
   routeMeta: RunOnceMeta,
+  existing?: { runDir: string; startedAt: Date },
 ): Promise<RunResult> {
   const trigger = opts.trigger ?? "scheduled";
-  const startedAt = new Date();
-  const runDir = join(runsDir(), entry.id, runStamp(startedAt));
+  const startedAt = existing?.startedAt ?? new Date();
+  const runDir = existing?.runDir ?? join(runsDir(), entry.id, runStamp(startedAt));
   mkdirSync(runDir, { recursive: true });
   mkdirSync(join(runDir, "scratch"), { recursive: true });
   writeRunFile(join(runDir, "stdout.log"), "");
@@ -594,10 +704,11 @@ async function runOnce(
   entry: RoutineEntry,
   opts: RunOptions,
   routeMeta?: RunOnceMeta,
+  existing?: { runDir: string; startedAt: Date },
 ): Promise<RunResult> {
   const trigger = opts.trigger ?? "scheduled";
-  const startedAt = new Date();
-  const runDir = join(runsDir(), entry.id, runStamp(startedAt));
+  const startedAt = existing?.startedAt ?? new Date();
+  const runDir = existing?.runDir ?? join(runsDir(), entry.id, runStamp(startedAt));
   mkdirSync(runDir, { recursive: true });
   mkdirSync(join(runDir, "scratch"), { recursive: true });
   // Prompt after runDir so the envelope can name Run directory / Run-Id trailers.
@@ -613,6 +724,7 @@ async function runOnce(
   // orphan reconcile skipped, so the dispatch vanished from every status read
   // and the routine kept the previous run as its `lastRun`. Every later writer
   // (gate skip, all-routes-fenced, harness spawn, finalize) overwrites this.
+  // Also clears a prior status=waiting stamp from createWaitingRunDir.
   writeEarlyMeta({
     runDir,
     id: entry.id,
@@ -624,6 +736,7 @@ async function runOnce(
     command: invocation.display,
     startedAt: startedAt.toISOString(),
     harnessPid: null,
+    status: "running",
     resolvedBy: entry.resolvedBy,
     difficulty: entry.difficulty,
     matrixResolution: entry.matrixResolution,

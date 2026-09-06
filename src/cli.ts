@@ -276,7 +276,12 @@ function cmdStatus(rest: string[]): number {
       console.log(`\n## ${r.groupLabel}`);
       prevGroup = r.groupId;
     }
-    const flags = [r.running ? "RUNNING" : "", r.fenced ? `FENCED:${r.fenced}` : ""].filter(Boolean).join(" ");
+    const flags = [
+      r.waitDetail ? "WAITING" : r.running ? "RUNNING" : "",
+      r.fenced ? `FENCED:${r.fenced}` : "",
+    ]
+      .filter(Boolean)
+      .join(" ");
     const outcome = r.lastOutcome ?? "-";
     const rate =
       r.noopRate == null
@@ -290,6 +295,9 @@ function cmdStatus(rest: string[]): number {
       `${r.id}  [${r.status}] ${r.harness}/${r.model}${routeSuffix}\n` +
         `    next: ${r.nextFire ?? "-"}  last: ${r.lastRun ?? "-"} exit=${r.lastExit ?? "-"} outcome=${outcome}  ${rate} ${flags}`,
     );
+    if (r.waitDetail) {
+      console.log(`    ${r.waitDetail}`);
+    }
     if (r.currentRunDir) {
       console.log(`    current: ${r.currentStartedAt ?? "-"} pid=${r.harnessPid ?? "-"} dir=${r.currentRunDir}`);
     }

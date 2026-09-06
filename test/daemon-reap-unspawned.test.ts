@@ -5,7 +5,9 @@ import { join } from "node:path";
 
 import {
   acquireLock,
+  dispatchTaskAlive,
   isLocked,
+  markDispatchTaskSettled,
   reapUnspawnedDispatches,
   recordDispatchSlot,
   slotStillOwnedBy,
@@ -30,10 +32,15 @@ beforeEach(() => {
 });
 
 /** Kick off `id` at `ageMs` in the past, exactly as tryDispatch does. */
-function dispatch(inFlight: Set<string>, id: string, ageMs: number): void {
+function dispatch(inFlight: Set<string>, id: string, ageMs: number): number {
   expect(acquireLock(id)).toBe(true);
   inFlight.add(id);
-  recordDispatchSlot(inFlight, id, Date.now() - ageMs);
+  return recordDispatchSlot(inFlight, id, Date.now() - ageMs);
+}
+
+/** Simulate a settled-but-leaked slot (promise finished, cleanup missed). */
+function settle(inFlight: Set<string>, id: string, token: number): void {
+  markDispatchTaskSettled(inFlight, id, token);
 }
 
 function collect(): { log: (e: DaemonEvent) => void; events: DaemonEvent[] } {
@@ -44,7 +51,8 @@ function collect(): { log: (e: DaemonEvent) => void; events: DaemonEvent[] } {
 describe("reapUnspawnedDispatches", () => {
   test("frees the slot and the lock of a dispatch that never started", () => {
     const inFlight = new Set<string>();
-    dispatch(inFlight, "r1", OLD_MS);
+    const token = dispatch(inFlight, "r1", OLD_MS);
+    settle(inFlight, "r1", token);
     const { log, events } = collect();
 
     expect(reapUnspawnedDispatches(inFlight, log)).toEqual(["r1"]);
@@ -58,7 +66,8 @@ describe("reapUnspawnedDispatches", () => {
 
   test("leaves a dispatch that is still inside the spawn deadline", () => {
     const inFlight = new Set<string>();
-    dispatch(inFlight, "r2", DEADLINE_MS - 60_000);
+    const token = dispatch(inFlight, "r2", DEADLINE_MS - 60_000);
+    settle(inFlight, "r2", token);
     const { log, events } = collect();
 
     expect(reapUnspawnedDispatches(inFlight, log)).toEqual([]);
@@ -69,7 +78,8 @@ describe("reapUnspawnedDispatches", () => {
 
   test("leaves an old dispatch whose harness did spawn", () => {
     const inFlight = new Set<string>();
-    dispatch(inFlight, "r3", OLD_MS);
+    const token = dispatch(inFlight, "r3", OLD_MS);
+    settle(inFlight, "r3", token);
     // A real harness child recorded its pid on the lock.
     setLockOwnerPid("r3", process.pid);
     const { log } = collect();
@@ -85,7 +95,8 @@ describe("reapUnspawnedDispatches", () => {
   // the same routine dispatch twice.
   test("leaves an old dispatch with no harness pid once a run directory exists", () => {
     const inFlight = new Set<string>();
-    dispatch(inFlight, "r4", OLD_MS);
+    const token = dispatch(inFlight, "r4", OLD_MS);
+    settle(inFlight, "r4", token);
     mkdirSync(join(home, "runs", "r4", "20260906T000000Z"), { recursive: true });
     const { log } = collect();
 
@@ -98,7 +109,8 @@ describe("reapUnspawnedDispatches", () => {
     const inFlight = new Set<string>();
     // Prior runs of this routine exist; only a NEW one proves this dispatch ran.
     mkdirSync(join(home, "runs", "r5", "20260905T000000Z"), { recursive: true });
-    dispatch(inFlight, "r5", OLD_MS);
+    const token = dispatch(inFlight, "r5", OLD_MS);
+    settle(inFlight, "r5", token);
     const { log } = collect();
 
     expect(reapUnspawnedDispatches(inFlight, log)).toEqual(["r5"]);
@@ -116,7 +128,8 @@ describe("reapUnspawnedDispatches", () => {
 
   test("does not remove a lock owned by another process", () => {
     const inFlight = new Set<string>();
-    dispatch(inFlight, "r7", OLD_MS);
+    const token = dispatch(inFlight, "r7", OLD_MS);
+    settle(inFlight, "r7", token);
     // Another live daemon owns the lock now.
     writeFileSync(
       join(home, "locks", "r7.lock"),
@@ -129,6 +142,34 @@ describe("reapUnspawnedDispatches", () => {
     expect(inFlight.has("r7")).toBe(false);
     expect(isLocked("r7")).toBe(true);
     expect(events.find((e) => e.kind === "reap-unspawned")?.detail).toContain("not ours");
+  });
+
+  // The fallback-slot wait: past the spawn deadline, no harness pid, and (if
+  // createWaitingRunDir were skipped) no run directory — but the dispatch
+  // promise is still alive. The reaper must leave it alone.
+  test("leaves a live dispatch task even with no run directory past the deadline", () => {
+    const inFlight = new Set<string>();
+    dispatch(inFlight, "r8", OLD_MS);
+    expect(dispatchTaskAlive(inFlight, "r8")).toBe(true);
+    const { log, events } = collect();
+
+    expect(reapUnspawnedDispatches(inFlight, log)).toEqual([]);
+    expect(inFlight.has("r8")).toBe(true);
+    expect(isLocked("r8")).toBe(true);
+    expect(events).toEqual([]);
+  });
+
+  // Waiting run directory alone also protects a settled-but-slow cleanup, the
+  // same way a gate_command run directory does.
+  test("leaves a settled dispatch once a waiting run directory exists", () => {
+    const inFlight = new Set<string>();
+    const token = dispatch(inFlight, "r9", OLD_MS);
+    mkdirSync(join(home, "runs", "r9", "20260906T010000Z"), { recursive: true });
+    settle(inFlight, "r9", token);
+    const { log } = collect();
+
+    expect(reapUnspawnedDispatches(inFlight, log)).toEqual([]);
+    expect(inFlight.has("r9")).toBe(true);
   });
 });
 
@@ -163,6 +204,7 @@ describe("slotStillOwnedBy — the late-settle guard", () => {
     expect(acquireLock("x")).toBe(true);
     inFlight.add("x");
     const token = recordDispatchSlot(inFlight, "x", Date.now() - OLD_MS);
+    markDispatchTaskSettled(inFlight, "x", token);
     reapUnspawnedDispatches(inFlight, () => {});
     expect(slotStillOwnedBy(inFlight, "x", token)).toBe(false);
   });
@@ -174,6 +216,7 @@ describe("slotStillOwnedBy — the late-settle guard", () => {
     expect(acquireLock("x")).toBe(true);
     inFlight.add("x");
     const stale = recordDispatchSlot(inFlight, "x", Date.now() - OLD_MS);
+    markDispatchTaskSettled(inFlight, "x", stale);
     reapUnspawnedDispatches(inFlight, () => {});
 
     // Same routine dispatched again after the reap.

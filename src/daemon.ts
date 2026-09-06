@@ -165,6 +165,7 @@ export interface DaemonEvent {
     | "situations-degraded"
     | "reconcile-orphans"
     | "reap-unspawned"
+    | "wait-fallback-slot"
     | "coalesce-backlog"
     | "start"
     | "stop";
@@ -225,6 +226,13 @@ interface DispatchSlot {
    * without walking the run tree.
    */
   runsMtimeMs: number | null;
+  /**
+   * True while the `runRoutine` promise for this kickoff has not settled.
+   * A fallback-slot wait is a live dispatch with no harness pid and (before
+   * the waiting-run-dir fix) no run directory — the reaper must not treat it
+   * as dead while this flag is set.
+   */
+  taskAlive: boolean;
 }
 
 const dispatchSlots = new WeakMap<Set<string>, Map<string, DispatchSlot>>();
@@ -246,8 +254,29 @@ export function recordDispatchSlot(
     startedAt: startedAtMs,
     token,
     runsMtimeMs: runsDirMtimeMs(id),
+    taskAlive: true,
   });
   return token;
+}
+
+/**
+ * Mark the dispatch promise settled. Call from `tryDispatch`'s `.finally`
+ * before the ownership check so a concurrent reaper never frees a slot whose
+ * task just finished but has not yet deleted itself.
+ */
+export function markDispatchTaskSettled(
+  inFlight: Set<string>,
+  id: string,
+  token: number,
+): void {
+  const slot = dispatchSlots.get(inFlight)?.get(id);
+  if (!slot || slot.token !== token) return;
+  slot.taskAlive = false;
+}
+
+/** True while this kickoff's `runRoutine` promise has not settled. */
+export function dispatchTaskAlive(inFlight: Set<string>, id: string): boolean {
+  return dispatchSlots.get(inFlight)?.get(id)?.taskAlive === true;
 }
 
 function slotsFor(inFlight: Set<string>): Map<string, DispatchSlot> {
@@ -309,13 +338,16 @@ export function unspawnedCount(inFlight: Set<string>): number {
  * daemon lives. On 2026-09-05 fifteen lanes were held this way, including both
  * hard pickup lanes, and nothing reported it.
  *
- * A slot is only reaped on three independent facts, so a slow dispatch is
+ * A slot is only reaped on four independent facts, so a slow dispatch is
  * never mistaken for a dead one:
  *   1. it is past the spawn deadline,
- *   2. its lock names no harness pid — no harness was ever spawned,
- *   3. no run directory appeared for it since the kickoff.
- * A gate_command routine can spend many minutes before spawning a harness, but
- * it always has a run directory by then, so (3) excludes it.
+ *   2. its `runRoutine` promise has settled (`taskAlive` is false),
+ *   3. its lock names no harness pid — no harness was ever spawned,
+ *   4. no run directory appeared for it since the kickoff.
+ * A fallback-slot wait keeps (2) true for its whole wait, and creates a
+ * waiting run directory before the wait so (4) also excludes it. A
+ * gate_command routine can spend many minutes before spawning a harness, but
+ * it always has a run directory by then, so (4) excludes it.
  */
 export function reapUnspawnedDispatches(
   inFlight: Set<string>,
@@ -331,13 +363,15 @@ export function reapUnspawnedDispatches(
     if (!slot) continue;
     const ageMs = nowMs - slot.startedAt;
     if (ageMs < deadline) continue;
+    // Live dispatch task (including a fallback-slot wait): never reap.
+    if (slot.taskAlive) continue;
     if (readLockInfo(id)?.harnessPid != null) continue;
     if (runDirAppeared(slot, id)) continue;
 
     inFlight.delete(id);
     slots.delete(id);
-    // Scoped by ownership: the lock is only removed while it is still this
-    // process's un-spawned lock. Another daemon's lock is left untouched.
+    // Only release when the dispatch task is proven gone (taskAlive was false
+    // above). Scoped by ownership: another daemon's lock is left untouched.
     const released = releaseLockIfOwned(id, process.pid);
     reaped.push(id);
     log({
@@ -1116,6 +1150,10 @@ function tryDispatch(entry: RoutineEntry, occ: Date, deps: DispatchDeps): void {
       throw err;
     })
     .finally(() => {
+      // Settle before the ownership check so a concurrent reaper can see that
+      // this kickoff is no longer a live wait — but only free the slot when we
+      // still own it.
+      markDispatchTaskSettled(inFlight, entry.id, token);
       const slots = slotsFor(inFlight);
       if (!slotStillOwnedBy(inFlight, entry.id, token)) {
         // This dispatch was reaped for never spawning, and the slot may already
