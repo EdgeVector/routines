@@ -35,11 +35,22 @@ chmod 755 "dist/routines"
 if [ "$(uname -s)" = "Darwin" ] && command -v codesign >/dev/null 2>&1; then
   codesign_identity="${ROUTINES_CODESIGN_IDENTITY:-Developer ID Application}"
   if security find-identity -v -p codesigning 2>/dev/null | grep -q "$codesign_identity"; then
-    codesign --force --identifier com.edgevector.routines \
-      --sign "$codesign_identity" "dist/routines"
-    codesign --verify --strict "dist/routines"
-    "./dist/routines" --version >/dev/null
-    echo "build-artifact: signed dist/routines as com.edgevector.routines ($codesign_identity)"
+    # Identity present is not enough: a locked login keychain returns
+    # errSecInternalComponent (rc=51) from codesign and used to fail the whole
+    # gate. Signing stays best-effort unless ROUTINES_REQUIRE_CODESIGN=1.
+    if codesign --force --identifier com.edgevector.routines \
+      --sign "$codesign_identity" "dist/routines" \
+      && codesign --verify --strict "dist/routines" \
+      && "./dist/routines" --version >/dev/null; then
+      echo "build-artifact: signed dist/routines as com.edgevector.routines ($codesign_identity)"
+    else
+      echo "build-artifact: codesign failed (keychain locked or identity unusable);" \
+        "shipping ad-hoc — unlock the login keychain or set ROUTINES_REQUIRE_CODESIGN=1" >&2
+      if [ "${ROUTINES_REQUIRE_CODESIGN:-0}" = "1" ]; then
+        echo "build-artifact: ROUTINES_REQUIRE_CODESIGN=1 and codesign failed" >&2
+        exit 1
+      fi
+    fi
   else
     echo "build-artifact: no codesigning identity matching '$codesign_identity';" \
       "shipping ad-hoc — macOS will re-prompt for file access after each install" >&2
