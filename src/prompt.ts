@@ -14,7 +14,7 @@ import { dirname, join } from "node:path";
 
 import { memoryPathFor } from "./paths.ts";
 import { resolvePrompt, type RoutineEntry } from "./registry.ts";
-import { loadRecentNotices } from "./situations.ts";
+import { loadRecentNoticesCached } from "./situations.ts";
 
 /** Ensure the memory file's parent dir exists; return the absolute path. */
 export function ensureMemoryPath(id: string): string {
@@ -93,7 +93,10 @@ export function buildDispatchEnvelope(
     opts.noticesBanner ??
     (process.env.ROUTINES_SKIP_NOTICES === "1"
       ? "## Situations notices (FYI, non-blocking)\n\n(skipped: ROUTINES_SKIP_NOTICES=1)\n\n"
-      : loadRecentNotices().banner);
+      // Cached: this runs on the daemon's single JS thread for every dispatch,
+      // and a blocking spawnSync of a LastDB-reading binary here stalls the
+      // tick loop exactly like the fence read did.
+      : loadRecentNoticesCached().banner);
 
   const runParts = (opts.runDir ?? "").replace(/\\/g, "/").split("/").filter(Boolean);
   const runId = runParts[runParts.length - 1] || undefined;

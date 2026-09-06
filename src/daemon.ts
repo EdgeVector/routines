@@ -34,7 +34,12 @@ import {
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-import { fenceFor, loadActiveSituations, type ActiveSituation } from "./situations.ts";
+import {
+  enableSituationsCache,
+  fenceFor,
+  loadActiveSituationsCached,
+  type ActiveSituation,
+} from "./situations.ts";
 import { loadAll, type RoutineEntry } from "./registry.ts";
 import { harnessFromOutageSituation, routeAgent } from "./route-engine.ts";
 import { daemonIdentityPath, daemonLogDir, locksDir, runsDir } from "./paths.ts";
@@ -1172,7 +1177,11 @@ export function dispatchDue(opts: DispatchPassOptions = {}): Promise<RunResult>[
   // Warm project config cache (configurations app) so runners inherit PATH / workspace.
   loadProjectConfig();
 
-  const check = loadActiveSituations();
+  // Cached + background-refreshed. A blocking spawnSync here made node latency
+  // set the scheduler's period directly: one measured tick took 14m54s against
+  // tickMs=15_000 on an idle daemon. papercut-routinesd-tick-loop-stalls-as-
+  // inflight-grows-fleet-dispatch-stops-silently-20260905.
+  const check = loadActiveSituationsCached();
   if (!check.ok) {
     log({ ts: now.toISOString(), kind: "situations-degraded", detail: check.error });
   }
@@ -1286,8 +1295,17 @@ export function dispatchDue(opts: DispatchPassOptions = {}): Promise<RunResult>[
 
 /** One evaluation pass. Waits for every run started in this pass (tests / --once). */
 export async function evaluateOnce(opts: DaemonOptions = {}): Promise<RunResult[]> {
-  const started = dispatchDue(opts);
-  return Promise.all(started);
+  // A single pass has nothing to amortise a cached posture over, and its whole
+  // job is to answer "what is due RIGHT NOW". Read exactly, and leave the
+  // process-wide setting as it was: `routines run --once` inside a daemon
+  // process must not turn the daemon's cache off behind it.
+  const previous = enableSituationsCache(false);
+  try {
+    const started = dispatchDue(opts);
+    return await Promise.all(started);
+  } finally {
+    enableSituationsCache(previous);
+  }
 }
 
 export interface DaemonHandle {
@@ -1307,6 +1325,12 @@ export interface DaemonHandle {
  *   time instead of starting every due routine at once.
  */
 export function startDaemon(opts: DaemonOptions = {}): DaemonHandle {
+  // This process has ticks, so it can amortise the situations/notices reads.
+  // Without this the tick path keeps the blocking spawnSync that let node
+  // latency set the scheduler's period (one tick in 14m54s against 15_000ms,
+  // measured 2026-09-05T18:24-18:39Z on an idle daemon). One-shot commands
+  // deliberately keep the direct read.
+  enableSituationsCache(true);
   const tickMs = opts.tickMs ?? 15_000;
   const staggerMs = normalizeStaggerMs(opts.staggerMs);
   const catchupMs = opts.catchupMs ?? 0;
