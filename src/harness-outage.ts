@@ -21,7 +21,15 @@
 // and if the harness is still down the first failure re-fences it.
 
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 
 import { buildRouteChain, type RouteStep } from "./fallback.ts";
@@ -374,9 +382,37 @@ function writeOutageState(harness: string, st: OutageState): void {
 }
 
 /**
- * True when this harness was recently recorded as out of service and the
- * expiry has not lapsed. Used by the fallback chain to skip a dead primary
- * on the next fire without rewriting registry TOML.
+ * True when this harness was recently recorded as out of service and neither
+ * bound on the fence has lapsed.
+ *
+ * TWO bounds, and both must hold. `expiresAt` may only SHORTEN a fence:
+ *
+ *   1. `expiresAt` (the provider's own "try again at …" hint when parseable,
+ *      else lastSeenAt + DEFAULT_TTL_MS) has not passed, AND
+ *   2. the outage was actually SEEN within DEFAULT_TTL_MS.
+ *
+ * Bound 2 used to sit in an `else` reached only by legacy state with no
+ * `expiresAt` — so on every state file this daemon writes it never ran, and a
+ * provider hint pinned the fence for as long as it said from ONE sighting. A
+ * fenced harness is never dispatched to, so nothing could re-probe it and
+ * nothing could correct the record; it only ran its clock out. Measured
+ * 2026-09-06: codex read outaged with `lastSeenAt` 2026-09-02T12:13Z and
+ * `expiresAt` 2026-09-07T02:28Z — 5d14h of fence from a single sighting, with
+ * no `harness-outage-codex` Situation left on the ledger. All four
+ * `last-stack-fkanban-pickup` shipping lanes, `last-stack-milestone-driver`
+ * and `last-stack-pipeline-health` safe-skipped every pass.
+ *
+ * Capping here rather than at the write site is deliberate: the Situation's
+ * `expires_at` stays the provider's verbatim hint, which is what an operator
+ * reads and what `handleHarnessOutage`'s tests assert. Only the fence — the
+ * thing that decides whether a routine fires — is bounded.
+ *
+ * The cost of the cap is one dispatch per harness per TTL when the provider is
+ * genuinely still out; that attempt re-arms the fence with a fresh
+ * `lastSeenAt`, and the 12h `lastNotifiedAt` cooldown stops it re-paging. That
+ * is the re-probe
+ * `papercut-routines-provider-reset-hint-fences-a-harness-for-days-unprobed`
+ * asks for, and it costs no scheduler.
  */
 export function isHarnessOutaged(harness: string, nowMs: number = Date.now()): boolean {
   const st = readOutageState(harness);
@@ -384,13 +420,105 @@ export function isHarnessOutaged(harness: string, nowMs: number = Date.now()): b
   if (st.expiresAt) {
     const exp = Date.parse(st.expiresAt);
     if (!Number.isNaN(exp) && nowMs >= exp) return false;
-  } else {
-    // Legacy state without expiresAt: treat as outaged for the default TTL
-    // from lastSeenAt so we do not stick forever.
-    const seen = Date.parse(st.lastSeenAt);
-    if (!Number.isNaN(seen) && nowMs - seen >= DEFAULT_TTL_MS) return false;
   }
+  // Unconditional: a fence outlives its evidence by at most DEFAULT_TTL_MS,
+  // whatever expiry the provider hinted at.
+  const seen = Date.parse(st.lastSeenAt);
+  if (!Number.isNaN(seen) && nowMs - seen >= DEFAULT_TTL_MS) return false;
   return true;
+}
+
+/**
+ * Grace before a state file may be cleared for having no Situation. A fresh
+ * outage writes the state file and upserts the Situation in the same call; if
+ * that upsert failed we must not read the gap as "cleared" and un-fence a dead
+ * harness. `handleHarnessOutage` re-upserts every DEFAULT_SITUATION_REFRESH_MS
+ * while failures continue, so a slug still missing after that window is gone.
+ */
+const OUTAGE_SITUATION_GRACE_MS = DEFAULT_SITUATION_REFRESH_MS;
+
+export interface OutageFenceReconcileResult {
+  /** Harnesses whose local fence was dropped because its Situation is gone. */
+  cleared: string[];
+  /** Harnesses left fenced, with the reason they were not cleared. */
+  kept: { harness: string; reason: string }[];
+}
+
+/**
+ * Reconcile the local fence store against the Situations ledger.
+ *
+ * routinesd decided "is this harness fenced?" in two places that read two
+ * different stores and never compared them: `fencedHarnesses(situations)` reads
+ * the ledger, and `isHarnessOutaged` reads
+ * `~/.routines/harness-outage/<harness>.json`. On 2026-09-06T07:0xZ they said
+ * opposite things — the ledger carried no `harness-outage-codex` at all while
+ * the file fenced codex, so six routines returned `all-routes-fenced` 25 times
+ * in 90 minutes (all four `last-stack-fkanban-pickup` shipping lanes among
+ * them) while `situations list` reported the harness healthy. Resolving the
+ * Situation is the documented way to clear an outage and a human had done
+ * exactly that on 2026-09-01; it cleared nothing.
+ *
+ * The join is free: the state file already records the `situationSlug` it was
+ * written with, and nothing read it back. This is the read-back.
+ *
+ * It fails CLOSED in every uncertain case — an unreadable file, a file with no
+ * slug, a ledger read the caller could not trust, or a state file inside the
+ * grace window all keep the fence. Clearing a fence wrongly dispatches work to
+ * a dead harness; keeping one wrongly costs at most DEFAULT_TTL_MS, which
+ * `isHarnessOutaged` already bounds.
+ *
+ * papercut-routines-harness-fence-reads-a-local-file-the-situations-ledger-cannot-clear-20260906
+ */
+export function reconcileOutageFences(
+  activeSituationSlugs: Iterable<string>,
+  opts: { nowMs?: number; quiet?: boolean } = {},
+): OutageFenceReconcileResult {
+  const nowMs = opts.nowMs ?? Date.now();
+  const active = new Set(activeSituationSlugs);
+  const dir = outageStateDir();
+  const result: OutageFenceReconcileResult = { cleared: [], kept: [] };
+  if (!existsSync(dir)) return result;
+
+  let files: string[];
+  try {
+    files = readdirSync(dir).filter((f) => f.endsWith(".json"));
+  } catch {
+    return result;
+  }
+
+  for (const file of files.sort()) {
+    const harness = file.slice(0, -".json".length);
+    const st = readOutageState(harness);
+    if (!st) {
+      result.kept.push({ harness, reason: "state-unreadable" });
+      continue;
+    }
+    if (!st.situationSlug) {
+      result.kept.push({ harness, reason: "no-situation-slug" });
+      continue;
+    }
+    if (active.has(st.situationSlug)) {
+      result.kept.push({ harness, reason: "situation-active" });
+      continue;
+    }
+    const wrote = Date.parse(st.lastSituationAt ?? st.lastSeenAt);
+    if (!Number.isNaN(wrote) && nowMs - wrote < OUTAGE_SITUATION_GRACE_MS) {
+      result.kept.push({ harness, reason: "within-situation-grace" });
+      continue;
+    }
+    try {
+      rmSync(outageStatePath(harness));
+    } catch {
+      result.kept.push({ harness, reason: "remove-failed" });
+      continue;
+    }
+    logLine(
+      opts.quiet,
+      `cleared fence for ${harness}: Situation ${st.situationSlug} is not active`,
+    );
+    result.cleared.push(harness);
+  }
+  return result;
 }
 
 function logLine(quiet: boolean | undefined, msg: string): void {

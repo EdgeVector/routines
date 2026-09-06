@@ -32,11 +32,13 @@ grep -q 'never in host-track post-install' "$SCRIPT" || {
 }
 
 # Extract just the signing block so the test needs no bun build.
+# Range ends at the next section comment — nested `fi` inside the block must
+# not truncate the extract (keychain-lockout best-effort path adds one).
 block="$tmp/sign-block.sh"
 {
   echo '#!/usr/bin/env bash'
   echo 'set -euo pipefail'
-  awk '/^# ── Stable code identity/,/^fi$/' "$SCRIPT"
+  awk '/^# ── Stable code identity/,/^# Scheduled probes/' "$SCRIPT" | sed '$d'
 } > "$block"
 chmod 755 "$block"
 bash -n "$block"
@@ -87,5 +89,26 @@ grep -q -- '--verify --strict' "$CODESIGN_LOG" || {
   echo "signing path must verify the result" >&2; exit 1; }
 printf '%s' "$out" | grep -q 'signed dist/routines' || {
   echo "signing path must report what it signed" >&2; exit 1; }
+
+# 4. Identity present but codesign fails (keychain lockout / errSecInternalComponent):
+# default mode must ship ad-hoc; strict mode must fail.
+cat > "$tmp/bin/codesign" <<'STUB'
+#!/bin/sh
+echo "dist/routines: errSecInternalComponent" >&2
+exit 1
+STUB
+chmod 755 "$tmp/bin/codesign"
+out="$(cd "$tmp" && PATH="$tmp/bin:$PATH" bash "$block" 2>&1)" || {
+  echo "codesign failure must not fail the default build" >&2
+  exit 1
+}
+printf '%s' "$out" | grep -q 'codesign failed' || {
+  echo "codesign failure must warn" >&2
+  exit 1
+}
+if (cd "$tmp" && PATH="$tmp/bin:$PATH" ROUTINES_REQUIRE_CODESIGN=1 bash "$block" >/dev/null 2>&1); then
+  echo "ROUTINES_REQUIRE_CODESIGN=1 must fail when codesign fails" >&2
+  exit 1
+fi
 
 echo "ok build-artifact-codesign"

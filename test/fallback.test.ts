@@ -63,7 +63,9 @@ function markHarnessOutaged(harness: string): void {
     join(dir, `${harness}.json`),
     JSON.stringify({
       kind: "usage-limit",
-      lastSeenAt: "2026-08-29T00:00:00.000Z",
+      // A fixture claiming a LIVE fence must carry a LIVE sighting: the fence
+      // is bounded by lastSeenAt + DEFAULT_TTL_MS, not by expiresAt alone.
+      lastSeenAt: new Date().toISOString(),
       situationSlug: `harness-outage-${harness}`,
       expiresAt: "2099-01-01T00:00:00.000Z",
     }) + "\n",
@@ -272,6 +274,54 @@ exit 0
 
     expect(isHarnessOutaged("codex", 1_000_000)).toBe(true);
     expect(isHarnessOutaged("codex", 1_000_000 + 61_000)).toBe(false);
+  });
+
+  // 2026-09-06: codex read outaged with lastSeenAt 2026-09-02T12:13Z and a
+  // provider hint of 2026-09-07T02:28Z — 5d14h of fence from ONE sighting,
+  // with no harness-outage-codex Situation left on the ledger. A fenced
+  // harness is never dispatched to, so nothing could re-probe it. The
+  // lastSeenAt bound existed but sat in an `else` no daemon-written state file
+  // ever reached.
+  test("a far-future provider hint cannot outlive the last sighting", () => {
+    const dir = join(home, "harness-outage");
+    mkdirSync(dir, { recursive: true });
+    const write = (lastSeenAt: string, expiresAt: string): void => {
+      writeFileSync(
+        join(dir, "codex.json"),
+        JSON.stringify({
+          kind: "usage-limit",
+          lastSeenAt,
+          situationSlug: "harness-outage-codex",
+          expiresAt,
+        }) + "\n",
+      );
+    };
+    const now = Date.parse("2026-09-06T07:00:00.000Z");
+    const SIX_HOURS = 6 * 60 * 60 * 1000;
+    const farFuture = "2026-09-07T02:28:00.000Z";
+
+    // Seen five minutes ago, hint days out: fenced.
+    write(new Date(now - 5 * 60_000).toISOString(), farFuture);
+    expect(isHarnessOutaged("codex", now)).toBe(true);
+
+    // Still inside the TTL at the last minute: fenced.
+    write(new Date(now - (SIX_HOURS - 60_000)).toISOString(), farFuture);
+    expect(isHarnessOutaged("codex", now)).toBe(true);
+
+    // Past the TTL, same far-future hint still in force: NOT fenced. The hint
+    // is a wrong expiry that is present, not an absent one — a fixture with
+    // no expiresAt would take the legacy path and prove nothing.
+    write(new Date(now - (SIX_HOURS + 60_000)).toISOString(), farFuture);
+    expect(isHarnessOutaged("codex", now)).toBe(false);
+
+    // The live shape that stopped six routines, verbatim.
+    write("2026-09-02T12:13:23.427Z", "2026-09-07T02:28:00.000Z");
+    expect(isHarnessOutaged("codex", now)).toBe(false);
+
+    // expiresAt may still SHORTEN: a fresh sighting whose hint has passed
+    // clears immediately.
+    write(new Date(now - 60_000).toISOString(), new Date(now - 1000).toISOString());
+    expect(isHarnessOutaged("codex", now)).toBe(false);
   });
 });
 
@@ -722,7 +772,7 @@ describe("runRoutine same-run fallback", () => {
       join(home, "harness-outage", "codex.json"),
       JSON.stringify({
         kind: "usage-limit",
-        lastSeenAt: "2026-08-23T08:33:45.773Z",
+        lastSeenAt: new Date().toISOString(),
         situationSlug: "harness-outage-codex",
         expiresAt: "2099-01-01T00:00:00.000Z",
       }) + "\n",
@@ -824,7 +874,7 @@ describe("runRoutine same-run fallback", () => {
       join(home, "harness-outage", "codex.json"),
       JSON.stringify({
         kind: "capacity",
-        lastSeenAt: "2026-08-28T06:32:32.898Z",
+        lastSeenAt: new Date().toISOString(),
         situationSlug: "harness-outage-codex",
         expiresAt: "2099-01-01T00:00:00.000Z",
       }) + "\n",
