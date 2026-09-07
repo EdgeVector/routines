@@ -28,6 +28,7 @@ import { buildInvocation, type HarnessInvocation } from "./adapters.ts";
 import {
   formatClaudeAuthSource,
   resolveClaudeAuthEnv,
+  type ClaudeAuthReason,
   type ClaudeAuthSource,
 } from "./claude-auth.ts";
 import { releaseLockIfOwned, setLockOwnerPid } from "./daemon.ts";
@@ -91,6 +92,7 @@ export interface RunResult {
    * outage classifier tell "login keychain locked" from "token expired".
    */
   claudeAuthSource?: ClaudeAuthSource;
+  claudeAuthReason?: ClaudeAuthReason;
 }
 
 // Timestamp safe for a directory name (no colons): 2026-07-12T21-05-00-123Z.
@@ -152,6 +154,7 @@ export function writeEarlyMeta(args: {
   waitingForHarness?: string | null;
   waitingSince?: string | null;
   claudeAuthSource?: ClaudeAuthSource | null;
+  claudeAuthReason?: ClaudeAuthReason | null;
 }): void {
   writeRunFile(
     join(args.runDir, "meta.json"),
@@ -174,6 +177,7 @@ export function writeEarlyMeta(args: {
         exitCode: null,
         finishedAt: null,
         ...(args.claudeAuthSource ? { claudeAuthSource: args.claudeAuthSource } : {}),
+        ...(args.claudeAuthReason ? { claudeAuthReason: args.claudeAuthReason } : {}),
         ...(args.waitingForHarness
           ? {
               waitingForHarness: args.waitingForHarness,
@@ -767,7 +771,15 @@ async function runOnce(
   const claudeAuth =
     entry.harness === "claude" ? await resolveClaudeAuthEnv(configuredEnv) : null;
   const claudeAuthSource = claudeAuth?.source;
-  if (claudeAuth && !opts.quiet) {
+  const claudeAuthReason = claudeAuth?.reason;
+  // Logged on EVERY claude leg, scheduled included. This line used to sit
+  // behind !opts.quiet, so a scheduled dispatch printed nothing and the auth
+  // path stayed unobservable for exactly as long as it was wrong: on
+  // 2026-09-07 a manual run resolved claudeAuthSource=lastsecrets at 04:13:06Z
+  // while the daemon dispatch two minutes later resolved keychain-default, and
+  // no daemon-side line existed to show it. The value is never printed, only
+  // the source, the reason and the locator, so this is safe in any log.
+  if (claudeAuth) {
     try {
       process.stderr.write(
         `[routines] ${entry.id}: ${formatClaudeAuthSource(claudeAuth)} locator=${claudeAuth.locator || "off"}\n`,
@@ -855,6 +867,7 @@ async function runOnce(
       gateProceeded,
       gateSkippedHarness: false,
       claudeAuthSource,
+      claudeAuthReason,
     });
 
     let timedOut = false;
@@ -1001,6 +1014,7 @@ async function runOnce(
         outcome,
         harnessPid,
         ...(claudeAuthSource ? { claudeAuthSource } : {}),
+        ...(claudeAuthReason ? { claudeAuthReason } : {}),
       };
 
       result.heartbeat = writeHeartbeat(entry, result);
@@ -1036,6 +1050,7 @@ async function runOnce(
             outcomeDetail: result.outcome.detail,
             outcomeSource: result.outcome.source,
             ...(claudeAuthSource ? { claudeAuthSource } : {}),
+            ...(claudeAuthReason ? { claudeAuthReason } : {}),
             stdoutTail: tail(stdout, 2000),
             stderrTail: tail(filteredStderr, 2000),
             logWriteFailed,

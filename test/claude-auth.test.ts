@@ -10,6 +10,7 @@ import {
   DEFAULT_CLAUDE_OAUTH_LOCATOR,
   formatClaudeAuthSource,
   resolveClaudeAuthEnv,
+  scrubLastsecretsEnv,
 } from "../src/claude-auth.ts";
 
 let home: string;
@@ -88,6 +89,104 @@ describe("resolveClaudeAuthEnv", () => {
     expect(r.source).toBe("keychain-default");
     expect(r.env).toEqual({});
     expect(r.locator).toBe(DEFAULT_CLAUDE_OAUTH_LOCATOR);
+  });
+
+  test("every outcome names WHY, not only where it landed", async () => {
+    // The 2026-09-07 outage: four different causes all reported
+    // keychain-default and nothing distinguished them, so two investigations
+    // measured the daemon leg correctly and still could not explain it.
+    const envToken = await resolveClaudeAuthEnv({ [CLAUDE_OAUTH_TOKEN_ENV]: "tok" });
+    expect([envToken.source, envToken.reason]).toEqual(["env", "env-token"]);
+
+    const hit = await resolveClaudeAuthEnv({}, { resolveSecret: () => "tok" });
+    expect([hit.source, hit.reason]).toEqual(["lastsecrets", "lastsecrets-hit"]);
+
+    const empty = await resolveClaudeAuthEnv({}, { resolveSecret: () => "" });
+    expect([empty.source, empty.reason]).toEqual(["keychain-default", "lastsecrets-empty"]);
+
+    const off = await resolveClaudeAuthEnv({ ROUTINES_CLAUDE_OAUTH_LOCATOR: "off" });
+    expect([off.source, off.reason]).toEqual(["keychain-default", "locator-disabled"]);
+
+    const unsupported = await resolveClaudeAuthEnv({
+      ROUTINES_CLAUDE_OAUTH_LOCATOR: "keychain://something",
+    });
+    expect([unsupported.source, unsupported.reason]).toEqual([
+      "keychain-default",
+      "locator-unsupported",
+    ]);
+
+    // All four non-hits share a source. None share a reason. That is the
+    // whole point of the field.
+    const nonHits = [empty, off, unsupported];
+    expect(new Set(nonHits.map((r) => r.source)).size).toBe(1);
+    expect(new Set(nonHits.map((r) => r.reason)).size).toBe(3);
+  });
+
+  test("a store that exits 0 with NO output is 'empty', not 'error'", async () => {
+    // This is the exact measured shape of the outage. `lastsecrets get <slug>`
+    // wrote nothing to stdout and exited 0. Reporting that as an error would
+    // send the reader to the wrong fix; the binary did not fail, it succeeded
+    // at returning nothing.
+    const bin = stubLastsecrets(
+      "stub-lastsecrets-silent-success",
+      [
+        "#!/bin/sh",
+        'echo "OBS_SENTRY_DSN is set but @sentry/node is not installed" >&2',
+        "exit 0",
+        "",
+      ].join("\n"),
+    );
+    const r = await resolveClaudeAuthEnv({}, { lastsecretsBin: bin });
+    expect(r.source).toBe("keychain-default");
+    expect(r.reason).toBe("lastsecrets-empty");
+    expect(r.env).toEqual({});
+  });
+
+  test("a store that FAILS is 'error', so the two stay distinguishable", async () => {
+    const bin = stubLastsecrets(
+      "stub-lastsecrets-failing",
+      ["#!/bin/sh", 'echo "secret not found" >&2', "exit 1", ""].join("\n"),
+    );
+    const r = await resolveClaudeAuthEnv({}, { lastsecretsBin: bin });
+    expect(r.reason).toBe("lastsecrets-error");
+  });
+
+  test("OBS_SENTRY_* cannot decide whether a credential resolves", async () => {
+    // Regression for the 3h15m fleet outage of 2026-09-07. This stub is the
+    // measured behaviour of the shipped lastsecrets at the time: same slug,
+    // 109 bytes without OBS_SENTRY_DSN, 0 bytes with it, rc=0 both times.
+    // EdgeVector/lastsecrets PR 8 removed the trigger; this asserts routines
+    // no longer depends on that fix being present.
+    const bin = stubLastsecrets(
+      "stub-lastsecrets-sentry-sensitive",
+      [
+        "#!/bin/sh",
+        'if [ -n "$OBS_SENTRY_DSN" ]; then',
+        '  echo "OBS_SENTRY_DSN is set but @sentry/node is not installed" >&2',
+        "  exit 0",
+        "fi",
+        'printf "%s\\n" "tok-despite-sentry"',
+        "",
+      ].join("\n"),
+    );
+    const r = await resolveClaudeAuthEnv(
+      { OBS_SENTRY_DSN: "lastsecrets://obs-sentry-dsn-routines", PATH: process.env.PATH },
+      { lastsecretsBin: bin },
+    );
+    expect(r.reason).toBe("lastsecrets-hit");
+    expect(r.source).toBe("lastsecrets");
+    expect(r.env[CLAUDE_OAUTH_TOKEN_ENV]).toBe("tok-despite-sentry");
+  });
+
+  test("the scrub removes only the telemetry prefix and keeps the rest", () => {
+    const scrubbed = scrubLastsecretsEnv({
+      OBS_SENTRY_DSN: "lastsecrets://x",
+      OBS_SENTRY_ENVIRONMENT: "production",
+      OBS_SENTRY_RELEASE: "routines@1",
+      PATH: "/usr/bin",
+      HOME: "/Users/x",
+    });
+    expect(scrubbed).toEqual({ PATH: "/usr/bin", HOME: "/Users/x" });
   });
 
   test("locator off skips the store entirely", async () => {
@@ -172,8 +271,15 @@ describe("resolveClaudeAuthEnv", () => {
   test("the log token carries the source, never the value", async () => {
     const r = await resolveClaudeAuthEnv({}, { resolveSecret: () => "super-secret-value" });
     const line = formatClaudeAuthSource(r);
-    expect(line).toBe("claude_auth_source=lastsecrets");
+    expect(line).toBe("claude_auth_source=lastsecrets claude_auth_reason=lastsecrets-hit");
     expect(line).not.toContain("super-secret-value");
+
+    // A failure line has to carry the cause too, or the log is only useful on
+    // the path that never needed explaining.
+    const failed = await resolveClaudeAuthEnv({}, { resolveSecret: () => "" });
+    expect(formatClaudeAuthSource(failed)).toBe(
+      "claude_auth_source=keychain-default claude_auth_reason=lastsecrets-empty",
+    );
   });
 });
 

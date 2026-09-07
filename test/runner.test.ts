@@ -903,6 +903,38 @@ describe("child env Claude credential", () => {
     expect(dumped).not.toMatch(/^CLAUDE_CODE_OAUTH_TOKEN=/m);
     const meta = JSON.parse(readFileSync(join(result.runDir, "meta.json"), "utf8"));
     expect(meta.claudeAuthSource).toBe("keychain-default");
+    // Where it landed was already recorded. WHY it landed there was not, and
+    // that is the field two investigations of the 2026-09-07 outage needed and
+    // did not have. A failing lookup is 'error'; a lookup that returns nothing
+    // and exits 0 is 'empty'; they need different fixes.
+    expect(meta.claudeAuthReason).toBe("lastsecrets-error");
+    expect(result.claudeAuthReason).toBe("lastsecrets-error");
+  });
+
+  test("a store that exits 0 with no value records reason=lastsecrets-empty", async () => {
+    const dump = join(home, "claude-child-env-silent.dump");
+    delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+    process.env.ROUTINES_CLAUDE_BIN = envDumpHarness(dump);
+    // The measured 2026-09-07 shape: silent success. Indistinguishable from a
+    // real failure before this field existed, and it took the fleet dark for
+    // 3h15m because nobody could tell them apart.
+    process.env.ROUTINES_LASTSECRETS_BIN = stub(
+      join(home, "stub-lastsecrets-silent"),
+      ["#!/bin/sh", 'echo "not installed" >&2', "exit 0", ""].join("\n"),
+    );
+    writeRoutine("claude-auth-silent");
+
+    const result = await runRoutine(loadEntry("claude-auth-silent"), {
+      quiet: true,
+      noFallback: true,
+    });
+    expect(result.claudeAuthSource).toBe("keychain-default");
+    expect(result.claudeAuthReason).toBe("lastsecrets-empty");
+    const meta = JSON.parse(readFileSync(join(result.runDir, "meta.json"), "utf8"));
+    expect(meta.claudeAuthReason).toBe("lastsecrets-empty");
+    // Same source as the failing case above; different reason. If these ever
+    // collapse back to one value this test is the thing that says so.
+    expect(meta.claudeAuthSource).toBe("keychain-default");
   });
 
   test("a daemon-env token wins over the locator", async () => {
