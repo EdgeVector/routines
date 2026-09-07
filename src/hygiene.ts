@@ -21,9 +21,11 @@ import { join } from "node:path";
 
 import { daemonLogDir, routinesHome } from "./paths.ts";
 import {
+  isExecutableWrapper,
   isThrottledProcessType,
   plistPath as routinesdPlistPath,
   readProcessType,
+  routinesdLaunchWrapperPath,
   SCHEDULER_PROCESS_TYPE,
 } from "./launchd.ts";
 
@@ -481,6 +483,10 @@ export interface ArtifactDaemonRefreshSeams {
   resolveExecutable?: (link: string) => string;
   readLaunchctlPrint?: (uid: number) => string;
   reinstall?: (executable: string) => void;
+  /** Launch wrapper to accept as current. `null` disables the alias. */
+  wrapperPath?: string | null;
+  /** Seam: decides whether the wrapper is runnable. Tests inject this. */
+  wrapperIsExecutable?: (path: string) => boolean;
 }
 
 export function tryArtifactDaemonRefresh(
@@ -536,11 +542,22 @@ export function tryArtifactDaemonRefresh(
     daemonAbsent = true;
   }
 
+  // A wrapper-launched daemon names the WRAPPER in ProgramArguments, never a
+  // version digest, because the wrapper resolves `current` itself at exec
+  // time. Without this alias the staleness test never matches, so hygiene
+  // would reinstall and restart routinesd every single hour — trading a
+  // credential-less daemon for an hourly one.
+  const wrapper =
+    seams.wrapperPath === undefined ? routinesdLaunchWrapperPath() : seams.wrapperPath;
+  const wrapperIsExecutable = seams.wrapperIsExecutable ?? isExecutableWrapper;
+  const aliases = [currentLink];
+  if (wrapper && wrapperIsExecutable(wrapper)) aliases.push(wrapper);
+
   return refreshArtifactDaemonIfStale({
     dryRun,
     restart,
     currentExecutable,
-    currentAliases: [currentLink],
+    currentAliases: aliases,
     launchctlPrint,
     daemonAbsent,
     reinstall: () => {
@@ -898,11 +915,70 @@ if [ ! -f "\$ROUTINES_CLI" ] && [ ! -L "\$ROUTINES_CLI" ]; then
   exit 127
 fi
 
+rc=0
 if [ -x "\$ROUTINES_CLI" ]; then
-  exec "\$ROUTINES_CLI" hygiene --json --ff-install
+  "\$ROUTINES_CLI" hygiene --json --ff-install || rc=\$?
+else
+  BUN_BIN="\${ROUTINES_BUN_BIN:-\$HOME/.bun/bin/bun}"
+  "\$BUN_BIN" "\$ROUTINES_CLI" hygiene --json --ff-install || rc=\$?
 fi
-BUN_BIN="\${ROUTINES_BUN_BIN:-\$HOME/.bun/bin/bun}"
-exec "\$BUN_BIN" "\$ROUTINES_CLI" hygiene --json --ff-install
+
+# Re-assert what an OLD routines binary clobbers. Idempotent; it only writes on
+# drift, and a current binary produces no drift because renderPlist() now emits
+# the wrapper and the chain itself.
+#
+# The guard stays GENERATED rather than deleted because \`--ff-install\` can run
+# \`install-daemon\` from a rolled-back artifact, and that older generator still
+# writes \`dist/routines daemon\` with no chain. It reads the chain from
+# local-env.sh instead of hardcoding one, so it cannot become the second source
+# of truth that the hand-written STATE copy was.
+PLIST="\$HOME/Library/LaunchAgents/com.edgevector.routinesd.plist"
+WRAPPER="\$HOME/.routines/daemon/routinesd-launch.sh"
+LOCAL_ENV="\$HOME/.routines/daemon/local-env.sh"
+CHAIN=""
+if [ -r "\$LOCAL_ENV" ]; then
+  # \`|| true\` is load-bearing under \`set -euo pipefail\`: a local-env.sh that
+  # names no chain makes grep exit 1, and the assignment would kill the pass.
+  CHAIN="\$( { grep -E '^[[:space:]]*(export[[:space:]]+)?ROUTINES_FALLBACK_CHAIN=' "\$LOCAL_ENV" \\
+    | tail -1 | sed -e 's/^[^=]*=//' -e 's/^"//' -e 's/"\$//'; } || true)"
+fi
+repaired=0
+if [ -x "\$WRAPPER" ] && [ -f "\$PLIST" ]; then
+  if ! grep -q 'routinesd-launch.sh' "\$PLIST"; then
+    /usr/libexec/PlistBuddy -c "Delete :ProgramArguments" "\$PLIST" 2>/dev/null || true
+    /usr/libexec/PlistBuddy -c "Add :ProgramArguments array" "\$PLIST"
+    /usr/libexec/PlistBuddy -c "Add :ProgramArguments:0 string \$WRAPPER" "\$PLIST"
+    repaired=1
+    echo "[run-hygiene] re-pointed routinesd ProgramArguments at routinesd-launch.sh" >&2
+  fi
+  if [ -n "\$CHAIN" ] \\
+    && ! /usr/libexec/PlistBuddy -c "Print :EnvironmentVariables:ROUTINES_FALLBACK_CHAIN" "\$PLIST" >/dev/null 2>&1; then
+    /usr/libexec/PlistBuddy -c "Add :EnvironmentVariables:ROUTINES_FALLBACK_CHAIN string \$CHAIN" "\$PLIST"
+    repaired=1
+    echo "[run-hygiene] restored ROUTINES_FALLBACK_CHAIN in routinesd plist" >&2
+  fi
+  plutil -lint "\$PLIST" >/dev/null || echo "[run-hygiene] WARNING routinesd plist failed lint" >&2
+
+  # A repaired plist does not reach the running daemon. installFf rewrites AND
+  # kickstarts in one pass, and kickstart does not re-read the plist, so only
+  # bootout+bootstrap picks the change up. Restart only when no harness leg is
+  # in flight, so the repair never kills a working routine.
+  if [ "\$repaired" = "1" ]; then
+    DAEMON_PID="\$(launchctl print "gui/\$(id -u)/com.edgevector.routinesd" 2>/dev/null | awk '/pid = /{print \$3; exit}')"
+    if [ -n "\$DAEMON_PID" ] && ps -Eww -p "\$DAEMON_PID" 2>/dev/null | grep -q 'CLAUDE_CODE_OAUTH_TOKEN'; then
+      echo "[run-hygiene] daemon already carries the token; no restart needed" >&2
+    elif pgrep -f 'claude -p --verbose|codex exec --sandbox' >/dev/null 2>&1; then
+      echo "[run-hygiene] drift repaired but a harness leg is in flight; deferring restart" >&2
+    else
+      echo "[run-hygiene] drift repaired and idle; bootout+bootstrap routinesd" >&2
+      launchctl bootout "gui/\$(id -u)/com.edgevector.routinesd" 2>/dev/null || true
+      sleep 3
+      launchctl bootstrap "gui/\$(id -u)" "\$PLIST" 2>/dev/null || true
+    fi
+  fi
+fi
+
+exit "\$rc"
 `;
 }
 

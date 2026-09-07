@@ -5,7 +5,7 @@
 // plist and bootstraps it; `routines uninstall-daemon` reverses it.
 
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -69,6 +69,81 @@ export function isThrottledProcessType(value: string | null): boolean {
   return value != null && THROTTLED_PROCESS_TYPES.includes(value);
 }
 
+/**
+ * The shell wrapper launchd runs instead of the daemon binary, when present.
+ *
+ * The daemon needs two things that a plist cannot carry safely or cannot carry
+ * at all:
+ *
+ * 1. `CLAUDE_CODE_OAUTH_TOKEN`, resolved at start time from `lastsecrets`. A
+ *    secret must not be written into a world-readable plist, and the in-process
+ *    resolver reaches the LOCKED login keychain from inside the daemon, so
+ *    every claude leg 401s and re-arms `harness-outage-claude`.
+ * 2. `ROUTINES_FALLBACK_CHAIN`, whose source of truth is `local-env.sh`. On
+ *    2026-09-07 that file called itself the single source of truth and nothing
+ *    sourced it; the live daemon carried 14 variables and none was the chain.
+ *
+ * A wrapper resolves both in a shell, before `exec`, so the value never lands
+ * on disk. This generator therefore names the wrapper when it exists. Before
+ * this, `renderPlist` always emitted `dist/routines daemon`, so every
+ * `hygiene --ff-install` fast-forward silently reverted the daemon to a
+ * credential-less launch and fenced 71 of 73 routines into `safe_skip`.
+ *
+ * See papercut-routines-plist-generator-fix-never-reaches-the-live-launchagent-20260905.
+ */
+export function routinesdLaunchWrapperPath(home: string = routinesHome()): string {
+  return join(home, "daemon", "routinesd-launch.sh");
+}
+
+/** True only for a wrapper that exists AND launchd could actually execute. */
+export function isExecutableWrapper(path: string): boolean {
+  try {
+    const st = statSync(path);
+    return st.isFile() && (st.mode & 0o111) !== 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Read `ROUTINES_FALLBACK_CHAIN` out of `~/.routines/daemon/local-env.sh`.
+ *
+ * `local-env.sh` is the declared source of truth for the chain, so the plist
+ * must agree with it rather than with whatever the installing shell happened
+ * to export. Returns `null` when the file is missing or names no chain — that
+ * is "not stated here", not "empty chain", and callers fall back to the
+ * environment.
+ */
+export function readFallbackChainFromLocalEnv(home: string = routinesHome()): string | null {
+  const path = join(home, "daemon", "local-env.sh");
+  let text: string;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch {
+    return null;
+  }
+  return parseFallbackChainAssignment(text);
+}
+
+/** Last `ROUTINES_FALLBACK_CHAIN=` assignment in a shell fragment, unquoted. */
+export function parseFallbackChainAssignment(shell: string): string | null {
+  let found: string | null = null;
+  for (const line of shell.split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith("#")) continue;
+    const m = trimmed.match(/^(?:export\s+)?ROUTINES_FALLBACK_CHAIN=(.*)$/);
+    if (!m) continue;
+    let value = m[1]!.trim();
+    // Strip one matching quote pair; a `${VAR:-default}` form is not a literal
+    // chain and must not be written into the plist as one.
+    const quoted = value.match(/^"([^"]*)"$/) ?? value.match(/^'([^']*)'$/);
+    if (quoted) value = quoted[1]!;
+    if (!value || value.includes("$")) continue;
+    found = value;
+  }
+  return found;
+}
+
 export function plistPath(): string {
   return join(homedir(), "Library", "LaunchAgents", `${LAUNCHD_LABEL}.plist`);
 }
@@ -80,6 +155,13 @@ export interface PlistOptions {
   runtime?: string;
   /** The program is already a standalone executable; do not prepend a runtime. */
   direct?: boolean;
+  /**
+   * The program is the launch wrapper, which appends `daemon` itself.
+   *
+   * A wrapper `exec`s the daemon with its own argument list, so launchd must
+   * not append a second `daemon` word after the script path.
+   */
+  wrapper?: boolean;
   /** Extra env to inject (e.g. LASTGIT_SOCKET, ROUTINES_HOME). */
   env?: Record<string, string>;
 }
@@ -94,7 +176,11 @@ function xmlEscape(s: string): string {
 export function renderPlist(opts: PlistOptions): string {
   const runtime = opts.runtime ?? process.execPath;
   const logDir = daemonLogDir();
-  const args = opts.direct ? [opts.program, "daemon"] : [runtime, opts.program, "daemon"];
+  const args = opts.wrapper
+    ? [opts.program]
+    : opts.direct
+      ? [opts.program, "daemon"]
+      : [runtime, opts.program, "daemon"];
   const argXml = args.map((a) => `    <string>${xmlEscape(a)}</string>`).join("\n");
 
   const env = { ROUTINES_HOME: routinesHome(), ...(opts.env ?? {}) };
@@ -142,7 +228,21 @@ export function plistOptionsForEntrypoint(opts: {
   execPath: string;
   entrypoint: string;
   env?: Record<string, string>;
+  /** Wrapper to prefer. Defaults to the live one; pass `null` to ignore it. */
+  wrapperPath?: string | null;
+  /** Seam: decides whether the wrapper is runnable. Tests inject this. */
+  wrapperIsExecutable?: (path: string) => boolean;
 }): PlistOptions {
+  // The wrapper wins over both binary forms. It ends in `exec …/current/dist/
+  // routines daemon`, so launchd still supervises the same process; it only
+  // gains the env that a plist cannot carry. Resolving it here — not in
+  // `renderPlist` — keeps the renderer pure and every caller consistent.
+  const wrapper =
+    opts.wrapperPath === undefined ? routinesdLaunchWrapperPath() : opts.wrapperPath;
+  const isExecutable = opts.wrapperIsExecutable ?? isExecutableWrapper;
+  if (wrapper && isExecutable(wrapper)) {
+    return { program: wrapper, direct: true, wrapper: true, env: opts.env };
+  }
   if (opts.entrypoint.startsWith("/$bunfs/") || opts.entrypoint.startsWith("$bunfs/")) {
     return { program: stableHostTrackExecutable(opts.execPath), direct: true, env: opts.env };
   }

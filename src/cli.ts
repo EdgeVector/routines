@@ -33,6 +33,7 @@ import {
   installDaemon,
   plistOptionsForEntrypoint,
   plistPath,
+  readFallbackChainFromLocalEnv,
   renderPlist,
   uninstallDaemon,
 } from "./launchd.ts";
@@ -969,9 +970,20 @@ function launchdEnv(): Record<string, string> {
     .filter((p) => p && (seen.has(p) ? false : (seen.add(p), true)))
     .join(":");
   env.PATH = path;
-  env.OBS_SENTRY_DSN = process.env.OBS_SENTRY_DSN ?? "lastsecrets://obs-sentry-dsn-routines";
-  env.OBS_SENTRY_ENVIRONMENT = process.env.OBS_SENTRY_ENVIRONMENT ?? "production";
-  env.OBS_SENTRY_RELEASE = process.env.OBS_SENTRY_RELEASE ?? `routines@${pkg.version}`;
+  // `??` keeps an EMPTY string, and these three arrive empty from a routine
+  // shell more often than they arrive unset. Measured 2026-09-07 in a pickup
+  // dispatch: OBS_SENTRY_DSN was set with length 0, so `install-daemon` wrote
+  // an empty DSN into the plist and the locator default never applied.
+  env.OBS_SENTRY_DSN = process.env.OBS_SENTRY_DSN || "lastsecrets://obs-sentry-dsn-routines";
+  env.OBS_SENTRY_ENVIRONMENT = process.env.OBS_SENTRY_ENVIRONMENT || "production";
+  env.OBS_SENTRY_RELEASE = process.env.OBS_SENTRY_RELEASE || `routines@${pkg.version}`;
+  // The fallback chain decides which harness a fenced leg reroutes to. When it
+  // is absent the daemon has ONE harness, so a single usage-limit Situation
+  // fences the whole fleet. `local-env.sh` owns the value; the installing
+  // shell is only the fallback, because a login shell that never sourced that
+  // file would otherwise write a plist that disagrees with it.
+  const chain = readFallbackChainFromLocalEnv() ?? process.env.ROUTINES_FALLBACK_CHAIN;
+  if (chain) env.ROUTINES_FALLBACK_CHAIN = chain;
   return env;
 }
 
@@ -1073,11 +1085,15 @@ function printHygieneHuman(r: HygieneResult): void {
 }
 
 function cmdPrintPlist(): number {
+  // Same options `install-daemon` uses, env included. A print that omitted the
+  // env made the generator look wrong whenever someone diffed it against the
+  // live plist, which is how the wrapper drift stayed unexplained for two days.
   console.log(
     renderPlist(
       plistOptionsForEntrypoint({
         execPath: process.execPath,
         entrypoint: selfProgram(),
+        env: launchdEnv(),
       }),
     ),
   );

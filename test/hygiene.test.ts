@@ -349,9 +349,46 @@ describe("renderHygieneLauncher", () => {
 
     expect(script).toContain("ROUTINES_SHIM");
     expect(script).toContain("$HOME/.local/bin/routines");
-    expect(script).toContain("exec \"$ROUTINES_CLI\" hygiene --json --ff-install");
-    expect(script).toContain("exec \"$BUN_BIN\" \"$ROUTINES_CLI\" hygiene --json --ff-install");
+    expect(script).toContain("\"$ROUTINES_CLI\" hygiene --json --ff-install");
+    expect(script).toContain("\"$BUN_BIN\" \"$ROUTINES_CLI\" hygiene --json --ff-install");
     expect(script).toContain("no live routines CLI resolved");
+  });
+
+  // The launcher must not `exec` the hygiene pass any more: the re-assert
+  // guard below runs AFTER it, and an exec'd process never comes back.
+  test("keeps the hygiene exit status while still running the guard", () => {
+    const script = renderHygieneLauncher();
+
+    expect(script).not.toContain("exec \"$ROUTINES_CLI\"");
+    expect(script).toContain("|| rc=$?");
+    expect(script).toContain('exit "$rc"');
+  });
+
+  // Defence in depth for a ROLLED-BACK artifact: an older `install-daemon`
+  // still writes `dist/routines daemon` with no chain, and installFf runs it.
+  // A current binary produces no drift, so this guard never fires then.
+  test("re-asserts the wrapper and the chain after the hygiene pass", () => {
+    const script = renderHygieneLauncher();
+
+    expect(script).toContain("routinesd-launch.sh");
+    expect(script).toContain("ROUTINES_FALLBACK_CHAIN");
+    expect(script).toContain("PlistBuddy");
+    // The chain is READ from local-env.sh. A hardcoded chain here would be a
+    // second source of truth, which is what the hand-written STATE copy became.
+    expect(script).toContain("local-env.sh");
+    expect(script).not.toContain("codex:gpt-5.6-terra");
+  });
+
+  // The repair restarts the daemon, so it must never cut off a live routine.
+  test("defers the restart while a harness leg is in flight", () => {
+    const script = renderHygieneLauncher();
+
+    expect(script).toContain("deferring restart");
+    expect(script).toContain("pgrep");
+    // kickstart does not re-read the plist; only bootout+bootstrap does.
+    expect(script).toContain("launchctl bootout");
+    expect(script).toContain("launchctl bootstrap");
+    expect(script).not.toContain("launchctl kickstart");
   });
 });
 
@@ -471,6 +508,7 @@ describe("tryArtifactDaemonRefresh wiring", () => {
     const reinstalled: string[] = [];
     const result = tryArtifactDaemonRefresh(false, true, {
       currentLink: artifact,
+      wrapperPath: null,
       resolveExecutable: () => artifact,
       readLaunchctlPrint: () => {
         throw new Error(
@@ -493,6 +531,7 @@ describe("tryArtifactDaemonRefresh wiring", () => {
     const reinstalled: string[] = [];
     const result = tryArtifactDaemonRefresh(false, true, {
       currentLink: artifact,
+      wrapperPath: null,
       resolveExecutable: () => artifact,
       readLaunchctlPrint: () => {
         throw new Error("spawnSync launchctl ENOENT");
@@ -510,6 +549,7 @@ describe("tryArtifactDaemonRefresh wiring", () => {
     const reinstalled: string[] = [];
     const result = tryArtifactDaemonRefresh(false, true, {
       currentLink: artifact,
+      wrapperPath: null,
       resolveExecutable: () => artifact,
       readLaunchctlPrint: () => `arguments = {\n\t${artifact}\n\tdaemon\n}`,
       reinstall: (exe) => reinstalled.push(exe),
@@ -679,5 +719,46 @@ describe("throttled launchd band detection", () => {
     // `null` is reported verbatim so a reader can tell "not measured" from
     // "measured and fine".
     expect(result.daemon.processType).toBeNull();
+  });
+});
+
+describe("launch wrapper is a current daemon, not a stale one", () => {
+  const artifact =
+    "/Users/x/.host-track/apps/routines/versions/" +
+    "2eb07e371d8924078a602dcfabce78d55fc689a6586da54d48e8b819d79f7010" +
+    "/dist/routines";
+  const wrapper = "/Users/x/.routines/daemon/routinesd-launch.sh";
+
+  // A wrapper-launched daemon names the WRAPPER in ProgramArguments and never
+  // a version digest, because the wrapper resolves `current` itself at exec
+  // time. Without the alias the staleness test can never match, so hygiene
+  // would reinstall and restart routinesd every hour, for ever.
+  test("a wrapper-launched daemon is left alone", () => {
+    const reinstalled: string[] = [];
+    const result = tryArtifactDaemonRefresh(false, true, {
+      currentLink: artifact,
+      resolveExecutable: () => artifact,
+      wrapperPath: wrapper,
+      wrapperIsExecutable: (path) => path === wrapper,
+      readLaunchctlPrint: () => `arguments = {\n\t${wrapper}\n}`,
+      reinstall: (exe) => reinstalled.push(exe),
+    });
+    expect(reinstalled).toEqual([]);
+    expect(result?.attempted).toBe(false);
+    expect(result?.restarted).toBe(false);
+  });
+
+  test("a non-executable wrapper is not an alias, so a stale job still heals", () => {
+    const reinstalled: string[] = [];
+    const result = tryArtifactDaemonRefresh(false, true, {
+      currentLink: artifact,
+      resolveExecutable: () => artifact,
+      wrapperPath: wrapper,
+      wrapperIsExecutable: () => false,
+      readLaunchctlPrint: () => `arguments = {\n\t${wrapper}\n}`,
+      reinstall: (exe) => reinstalled.push(exe),
+    });
+    expect(reinstalled).toEqual([artifact]);
+    expect(result?.restarted).toBe(true);
   });
 });
