@@ -390,6 +390,123 @@ describe("renderHygieneLauncher", () => {
     expect(script).toContain("launchctl bootstrap");
     expect(script).not.toContain("launchctl kickstart");
   });
+
+  // The drift repair must not restart with three unverified calls. `bootout`
+  // is async and drains in-flight children, so a fixed sleep cannot stand in
+  // for it; on 2026-09-07 the bootstrap raced a still-terminating job, failed
+  // into /dev/null, and the fleet was dark for 57 minutes.
+  test("restarts through the verified helper, never a fixed sleep", () => {
+    const script = renderHygieneLauncher();
+
+    expect(script).toContain("restart_routinesd || rc=1");
+    expect(script).toContain("routinesd_loaded || break");
+    // The old shape: bootout, sleep 3, bootstrap, all errors discarded.
+    expect(script).not.toContain("sleep 3\n      launchctl bootstrap");
+  });
+
+  // The check is UNCONDITIONAL: the hygiene pass, `--ff-install`, and the
+  // drift repair can each leave the job unloaded, so it cannot sit behind any
+  // of their conditions.
+  test("ends every pass with an unconditional routinesd check", () => {
+    const script = renderHygieneLauncher();
+
+    expect(script).toContain('ensure_routinesd_loaded "end-of-pass" || rc=1');
+    // Nothing may guard it: the last line before the exit is the check itself.
+    const tail = script.trimEnd().split("\n").slice(-3).join("\n");
+    expect(tail).toContain('ensure_routinesd_loaded "end-of-pass" || rc=1');
+    expect(tail).toContain('exit "$rc"');
+  });
+});
+
+/**
+ * Behaviour, not text. The generated wrapper runs against a FAKE `launchctl`
+ * on PATH and a stub `routines` CLI, so the suite exercises the real script
+ * without ever touching the live scheduler.
+ */
+describe("renderHygieneLauncher routinesd guard (executed)", () => {
+  let dir = "";
+
+  const runPass = (
+    initialState: "loaded" | "unloaded",
+    bootstrapFails: boolean,
+  ): { code: number; stderr: string; finalState: string } => {
+    writeFileSync(join(dir, "state"), `${initialState}\n`);
+    const proc = Bun.spawnSync({
+      cmd: ["bash", join(dir, "run-hygiene.sh")],
+      env: {
+        PATH: `${join(dir, "bin")}:/usr/bin:/bin`,
+        HOME: join(dir, "home"),
+        USER: "test",
+        FAKE_LAUNCHCTL_STATE: join(dir, "state"),
+        FAKE_BOOTSTRAP_FAILS: bootstrapFails ? "1" : "0",
+        // A throwaway label: the fake launchctl answers for it, and the real
+        // com.edgevector.routinesd is never named.
+        ROUTINESD_LABEL: "com.edgevector.routinesd-test-throwaway",
+        ROUTINES_HYGIENE_BOOTSTRAP_ATTEMPTS: "2",
+        ROUTINES_HYGIENE_BOOTSTRAP_SLEEP: "0",
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    return {
+      code: proc.exitCode ?? -1,
+      stderr: proc.stderr.toString(),
+      finalState: readFileSync(join(dir, "state"), "utf8").trim(),
+    };
+  };
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "hygiene-guard-"));
+    mkdirSync(join(dir, "bin"), { recursive: true });
+    mkdirSync(join(dir, "home", ".local", "bin"), { recursive: true });
+
+    const launchctl = [
+      "#!/usr/bin/env bash",
+      'state="$FAKE_LAUNCHCTL_STATE"',
+      'case "$1" in',
+      '  print)     [ "$(cat "$state" 2>/dev/null)" = "loaded" ] && exit 0 || exit 113 ;;',
+      '  bootstrap) [ "${FAKE_BOOTSTRAP_FAILS:-0}" = "1" ] && exit 5; echo loaded > "$state"; exit 0 ;;',
+      '  bootout)   echo unloaded > "$state"; exit 0 ;;',
+      "  *) exit 0 ;;",
+      "esac",
+      "",
+    ].join("\n");
+    writeFileSync(join(dir, "bin", "launchctl"), launchctl, { mode: 0o755 });
+    writeFileSync(
+      join(dir, "home", ".local", "bin", "routines"),
+      '#!/usr/bin/env bash\necho \'{"stub":true}\'\nexit 0\n',
+      { mode: 0o755 },
+    );
+    writeFileSync(join(dir, "run-hygiene.sh"), renderHygieneLauncher(), { mode: 0o755 });
+  });
+
+  // The 2026-09-07 shape: the pass leaves routinesd booted out. It must heal.
+  test("a pass that starts with routinesd unloaded leaves it loaded", () => {
+    const r = runPass("unloaded", false);
+
+    expect(r.finalState).toBe("loaded");
+    expect(r.code).toBe(0);
+    expect(r.stderr).toContain("routinesd NOT loaded (end-of-pass)");
+    expect(r.stderr).toContain("routinesd loaded after attempt 1");
+  });
+
+  // The pass that exited 0 with `"daemon": {"loaded": false}` is the whole
+  // reason the outage went unseen for 57 minutes.
+  test("a bootstrap that fails every attempt makes the pass exit non-zero", () => {
+    const r = runPass("unloaded", true);
+
+    expect(r.code).not.toBe(0);
+    expect(r.finalState).toBe("unloaded");
+    expect(r.stderr).toContain("ERROR routinesd still NOT loaded after 2 attempts");
+  });
+
+  test("a healthy pass neither bootstraps nor complains", () => {
+    const r = runPass("loaded", false);
+
+    expect(r.code).toBe(0);
+    expect(r.finalState).toBe("loaded");
+    expect(r.stderr).not.toContain("NOT loaded");
+  });
 });
 
 describe("artifact daemon refresh", () => {

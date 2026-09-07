@@ -915,6 +915,78 @@ if [ ! -f "\$ROUTINES_CLI" ] && [ ! -L "\$ROUTINES_CLI" ]; then
   exit 127
 fi
 
+# --- routinesd availability guard -------------------------------------------
+# A hygiene pass must never END with the scheduler dark, and must never exit 0
+# when it is. \`hygiene --ff-install\` restarts routinesd itself, the drift
+# repair below restarts it again, and either path can leave it unloaded.
+#
+# Measured 2026-09-07T13:12:34Z: the pass SIGTERMed routinesd with in_flight=2
+# and it never came back. The fleet ran NOTHING for 57 minutes, until an
+# operator ran \`launchctl bootstrap\` by hand at 14:09:58Z. The same pass wrote
+# \`"daemon": {"loaded": false}\`, printed the warning \`routinesd launchd not
+# loaded\`, and exited 0. That was recurrence 2; the first cost 8 h 53 min on
+# 2026-08-27.
+#
+# The old restart was three unverified calls:
+#
+#   launchctl bootout "\$DOMAIN/\$LABEL" 2>/dev/null || true
+#   sleep 3
+#   launchctl bootstrap "\$DOMAIN" "\$PLIST" 2>/dev/null || true
+#
+# \`bootout\` is ASYNCHRONOUS and drains in-flight children first, so with harness
+# legs alive it outlasts the fixed 3 s sleep. The \`bootstrap\` then races a job
+# that is still terminating, fails, and the error goes to /dev/null. Poll for
+# the bootout to complete, verify the bootstrap, and retry it.
+#
+# Brain: papercut-hygiene-sees-unloaded-routinesd-and-never-heals-it (p1).
+ROUTINESD_LABEL="\${ROUTINESD_LABEL:-com.edgevector.routinesd}"
+ROUTINESD_DOMAIN="gui/\$(id -u)"
+PLIST="\${ROUTINESD_PLIST:-\$HOME/Library/LaunchAgents/\$ROUTINESD_LABEL.plist}"
+# Bounds. The defaults are the production values; the tests shorten them and
+# point the label at a throwaway job, so the suite never touches the live
+# scheduler.
+BOOTSTRAP_ATTEMPTS="\${ROUTINES_HYGIENE_BOOTSTRAP_ATTEMPTS:-10}"
+BOOTSTRAP_SLEEP="\${ROUTINES_HYGIENE_BOOTSTRAP_SLEEP:-3}"
+BOOTOUT_ATTEMPTS="\${ROUTINES_HYGIENE_BOOTOUT_ATTEMPTS:-10}"
+BOOTOUT_SLEEP="\${ROUTINES_HYGIENE_BOOTOUT_SLEEP:-2}"
+
+routinesd_loaded() {
+  launchctl print "\$ROUTINESD_DOMAIN/\$ROUTINESD_LABEL" >/dev/null 2>&1
+}
+
+# Bring routinesd back whenever it is not loaded, whatever unloaded it.
+ensure_routinesd_loaded() {
+  local why="\${1:-check}" i=1
+  if routinesd_loaded; then
+    return 0
+  fi
+  echo "[run-hygiene] routinesd NOT loaded (\$why); bootstrapping" >&2
+  while [ "\$i" -le "\$BOOTSTRAP_ATTEMPTS" ]; do
+    launchctl bootstrap "\$ROUTINESD_DOMAIN" "\$PLIST" 2>/dev/null || true
+    if routinesd_loaded; then
+      echo "[run-hygiene] routinesd loaded after attempt \$i (\$why)" >&2
+      return 0
+    fi
+    sleep "\$BOOTSTRAP_SLEEP"
+    i=\$((i + 1))
+  done
+  echo "[run-hygiene] ERROR routinesd still NOT loaded after \$BOOTSTRAP_ATTEMPTS attempts (\$why)" >&2
+  return 1
+}
+
+# Replace the job in place, then PROVE it came back.
+restart_routinesd() {
+  local i=1
+  launchctl bootout "\$ROUTINESD_DOMAIN/\$ROUTINESD_LABEL" 2>/dev/null || true
+  # bootout is async: wait for the job to actually leave the domain.
+  while [ "\$i" -le "\$BOOTOUT_ATTEMPTS" ]; do
+    routinesd_loaded || break
+    sleep "\$BOOTOUT_SLEEP"
+    i=\$((i + 1))
+  done
+  ensure_routinesd_loaded "post-restart"
+}
+
 rc=0
 if [ -x "\$ROUTINES_CLI" ]; then
   "\$ROUTINES_CLI" hygiene --json --ff-install || rc=\$?
@@ -932,7 +1004,6 @@ fi
 # writes \`dist/routines daemon\` with no chain. It reads the chain from
 # local-env.sh instead of hardcoding one, so it cannot become the second source
 # of truth that the hand-written STATE copy was.
-PLIST="\$HOME/Library/LaunchAgents/com.edgevector.routinesd.plist"
 WRAPPER="\$HOME/.routines/daemon/routinesd-launch.sh"
 LOCAL_ENV="\$HOME/.routines/daemon/local-env.sh"
 CHAIN=""
@@ -964,19 +1035,24 @@ if [ -x "\$WRAPPER" ] && [ -f "\$PLIST" ]; then
   # bootout+bootstrap picks the change up. Restart only when no harness leg is
   # in flight, so the repair never kills a working routine.
   if [ "\$repaired" = "1" ]; then
-    DAEMON_PID="\$(launchctl print "gui/\$(id -u)/com.edgevector.routinesd" 2>/dev/null | awk '/pid = /{print \$3; exit}')"
+    DAEMON_PID="\$(launchctl print "\$ROUTINESD_DOMAIN/\$ROUTINESD_LABEL" 2>/dev/null | awk '/pid = /{print \$3; exit}')"
     if [ -n "\$DAEMON_PID" ] && ps -Eww -p "\$DAEMON_PID" 2>/dev/null | grep -q 'CLAUDE_CODE_OAUTH_TOKEN'; then
       echo "[run-hygiene] daemon already carries the token; no restart needed" >&2
     elif pgrep -f 'claude -p --verbose|codex exec --sandbox' >/dev/null 2>&1; then
       echo "[run-hygiene] drift repaired but a harness leg is in flight; deferring restart" >&2
     else
       echo "[run-hygiene] drift repaired and idle; bootout+bootstrap routinesd" >&2
-      launchctl bootout "gui/\$(id -u)/com.edgevector.routinesd" 2>/dev/null || true
-      sleep 3
-      launchctl bootstrap "gui/\$(id -u)" "\$PLIST" 2>/dev/null || true
+      restart_routinesd || rc=1
     fi
   fi
 fi
+
+# Last line of defence, and UNCONDITIONAL. The pass reaches here after the
+# hygiene run, after \`--ff-install\` (which can run \`install-daemon\` and restart
+# the daemon), and after the drift repair above. Any of them can leave the job
+# unloaded, so the check cannot sit behind any of their conditions. A pass that
+# ends with the scheduler dark exits non-zero.
+ensure_routinesd_loaded "end-of-pass" || rc=1
 
 exit "\$rc"
 `;
