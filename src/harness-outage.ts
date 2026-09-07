@@ -350,6 +350,31 @@ export function classifyHarnessOutage(
   // "usage limit" text and re-fenced the live harness.
   if (result.timedOut || result.exitCode === 124) return null;
 
+  // A routine that authored its own terminal verdict proves the harness was
+  // alive: the child had to start, load the prompt, do the work and reach its
+  // final write. A harness that is genuinely out (401 / 402 / usage limit)
+  // never gets that far, so every outage-shaped line in such a transcript is
+  // about something the ROUTINE touched — a third-party API, or Situation and
+  // notice text it read back — not about the provider.
+  //
+  // This is the structural form of the runner's existing "do NOT classify pure
+  // ok runs" rule (2026-07-18). Scoring in matchLine() demotes known echo
+  // shapes, but it is a per-phrase chase and it lost twice on 2026-09-06:
+  //   - sentry-triage wrote `error sentry_api_401` after SENTRY's API returned
+  //     401, and its own summary line "…because Sentry authentication failed."
+  //     matched AUTH_PATTERNS and fenced codex fleet-wide.
+  //   - dogfood-onboarding read back the heal notice "false codex harness
+  //     fence cleared …" and re-fenced codex 42 minutes after the heal.
+  // Both wrote an outcome sink; all 13 real fences that day did not.
+  //
+  // Trade-off: a routine that deliberately probes a dead provider and still
+  // writes a verdict no longer arms the fence itself. That costs at most one
+  // fire — the next routine that actually fails to start arms it with
+  // first-hand evidence — and it buys immunity from whole-fleet false outages.
+  const routineAuthoredVerdict =
+    result.outcome.source === "sink" || result.outcome.source === "routine_result";
+  if (routineAuthoredVerdict) return null;
+
   const nowMs = opts.nowMs ?? Date.now();
   const corpus = [
     readTail(join(result.runDir, "stderr.log")),

@@ -39,6 +39,25 @@ const CLAUDE_WEEKLY_LIMIT_ASSISTANT =
   '{"type":"assistant","message":{"content":[{"type":"text","text":"You\'ve hit your weekly limit · resets Aug 29 at 11am (America/Los_Angeles)"}]},"error":"rate_limit","is_api_error_message":true}';
 const CLAUDE_WEEKLY_LIMIT_RESULT =
   '{"is_error":true,"type":"result","subtype":"success","result":"You\'ve hit your weekly limit · resets Aug 29 at 11am (America/Los_Angeles)","terminal_reason":"api_error","api_error_status":429}';
+/**
+ * Real sentry-triage transcript (2026-09-06T15:25Z). SENTRY's API returned 401;
+ * the routine finished, wrote `outcome.txt`, and its own summary line matched
+ * AUTH_PATTERNS — which fenced codex fleet-wide for every routine.
+ */
+const SENTRY_401_TRANSCRIPT = [
+  "curl: received 401: Unauthorized on the first project request.",
+  "The keychain token is unavailable or invalid, so I will not file cards.",
+  "No issue triage occurred because Sentry authentication failed.",
+].join("\n");
+/**
+ * Real dogfood-onboarding transcript (2026-09-06T18:01Z): the routine listed
+ * Situations and read back the 17:20Z heal notice, re-fencing codex 42 minutes
+ * after a human-cleared false fence.
+ */
+const HEAL_NOTICE_READBACK =
+  "Fleet dispatch restored: false codex harness fence cleared — 2026-09-06T17:20Z: " +
+  "a live probe returned PROBE_OK; the arming evidence was \"You've hit your usage limit\" " +
+  "quoted from the prior notice.";
 const CLAUDE_TRANSIENT_429 =
   '{"is_error":true,"type":"result","result":"Too many requests","terminal_reason":"api_error","api_error_status":429}';
 
@@ -196,6 +215,43 @@ describe("classifyHarnessOutage", () => {
     const quoted =
       '{"slug":"harness-outage-grok","summary":"The grok harness is out of service (usage-limit); evidence: \\"API error (status 402 Payment Required): Grok Build usage balance exhausted\\". Filed by routinesd harness-outage; Tom paged via Telegram."}';
     expect(classifyHarnessOutage(result(quoted))).toBeNull();
+  });
+
+  // 2026-09-06: two false codex fences in one day, both from runs that had
+  // finished their work and written an outcome sink. A dead harness cannot
+  // produce a routine-authored verdict, so those lines were never about codex.
+  test("a routine-authored sink verdict is never a harness outage (sentry 401)", () => {
+    const r = result(SENTRY_401_TRANSCRIPT);
+    r.outcome = {
+      kind: "error",
+      detail: "sentry_api_401 auth_ref=keychain://sentry-auth-token/edge-vector cards=0",
+      source: "sink",
+    };
+    expect(classifyHarnessOutage(r)).toBeNull();
+  });
+
+  test("a routine reading back a heal notice cannot re-fence the harness", () => {
+    const r = result(HEAL_NOTICE_READBACK);
+    r.outcome = {
+      kind: "error",
+      detail: "required routine contract returned no data; no DEV probe action ran",
+      source: "sink",
+    };
+    expect(classifyHarnessOutage(r)).toBeNull();
+  });
+
+  test("a ROUTINE_RESULT trailer also proves the harness ran", () => {
+    const r = result(SENTRY_401_TRANSCRIPT);
+    r.outcome = { kind: "error", detail: "sentry_api_401", source: "routine_result" };
+    expect(classifyHarnessOutage(r)).toBeNull();
+  });
+
+  // The guard must not blunt a real outage: a dead harness leaves no
+  // routine-authored verdict, so the source stays exit/none and it still fences.
+  test("real codex usage limit with no sink still classifies", () => {
+    const r = result(CODEX_LIMIT_LINE);
+    expect(r.outcome.source).toBe("exit");
+    expect(classifyHarnessOutage(r)?.kind).toBe("usage-limit");
   });
 
   test("codex selected-model capacity classifies as capacity", () => {
