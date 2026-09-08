@@ -18,6 +18,7 @@ import {
   type EscalateStatus,
 } from "./escalate-status.ts";
 import { runsDir } from "./paths.ts";
+import type { ExecutionRecord } from "./execution-record.ts";
 
 const OUTCOME_LOG_TAIL_BYTES = 40_000;
 /** A verdict line is tiny; refuse to slurp a runaway sink file. */
@@ -51,6 +52,7 @@ export interface RunSummary {
   outcomeSource: RunOutcome["source"];
   /** Present when error-escalate ran for this run (card + optional triage). */
   escalate: EscalateStatus | null;
+  execution?: ExecutionRecord | null;
 }
 
 export interface RunDetail extends RunSummary {
@@ -215,6 +217,8 @@ function summarize(
     finishedAt: typeof meta.finishedAt === "string" ? meta.finishedAt : null,
     exitCode: typeof meta.exitCode === "number" ? meta.exitCode : null,
     durationMs: typeof meta.durationMs === "number" ? meta.durationMs : null,
+    execution: meta.execution && typeof meta.execution === "object" && (meta.execution as ExecutionRecord).version === 1
+      ? meta.execution as ExecutionRecord : null,
     timedOut: meta.timedOut === true,
     command: typeof meta.command === "string" ? meta.command : null,
     outcome: outcome.kind,

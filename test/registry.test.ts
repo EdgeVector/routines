@@ -13,6 +13,10 @@ const base = [
 ].join("\n");
 
 describe("parseEntry", () => {
+  test("session retention and effect checks require explicit valid fields", () => {
+    expect(parseEntry(base + '\nsession_mode = "persistent"\nresume_check = "test -f proof"', "/x/r.toml").sessionMode).toBe("persistent");
+    expect(() => parseEntry(base + '\nsession_mode = "forever"', "/x/r.toml")).toThrow(/session_mode/);
+  });
   test("parses a valid entry, id from filename", () => {
     const e = parseEntry(base, "/x/disk-reclaim.toml");
     expect(e.id).toBe("disk-reclaim");

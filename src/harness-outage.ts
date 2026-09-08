@@ -376,10 +376,22 @@ export function classifyHarnessOutage(
   if (routineAuthoredVerdict) return null;
 
   const nowMs = opts.nowMs ?? Date.now();
+  const structuredCodex = result.execution?.provider === "codex";
+  const stdout = readTail(join(result.runDir, "stdout.log"));
+  // JSON mode includes tool payloads. Only provider error events are evidence
+  // of a Codex outage; quoted API failures and truncated item fragments are not.
+  const providerStdout = structuredCodex ? stdout.split("\n").map((line) => {
+    try {
+      const event = JSON.parse(line);
+      if (event?.type !== "error" && event?.type !== "turn.failed") return "";
+      const message = event.message ?? event.error?.message;
+      return typeof message === "string" ? `Error: ${message}` : "";
+    } catch { return ""; }
+  }).join("\n") : stdout;
   const corpus = [
     readTail(join(result.runDir, "stderr.log")),
-    readTail(join(result.runDir, "stdout.log")),
-    result.outcome.detail ?? "",
+    providerStdout,
+    structuredCodex ? "" : result.outcome.detail ?? "",
   ].join("\n");
 
   const usage = matchLine(corpus, USAGE_LIMIT_PATTERNS);

@@ -210,27 +210,36 @@ describe("daemon evaluateOnce", () => {
   });
 
   test("a slow pre-dispatch gate does not delay another routine timeout", async () => {
-    process.env.ROUTINES_SIGKILL_GRACE_MS = "50";
+    process.env.ROUTINES_SIGKILL_GRACE_MS = "1000";
+    const timeoutObserved = join(home, "timeout-observed");
     process.env.ROUTINES_CLAUDE_BIN = stub(
       join(home, "hung-harness"),
-      "#!/bin/sh\nsleep 5\n",
+      `#!/bin/sh\ntrap ': > "${timeoutObserved}"; exit 0' TERM\nwhile :; do sleep 0.05; done\n`,
     );
     const slowGate = stub(
       join(home, "slow-gate"),
       [
         "#!/bin/sh",
-        "sleep 2",
+        // The gate runs first and can finish only after the other harness
+        // receives its timeout. A synchronous gate blocks that dispatch and
+        // fails the test; a loaded host does not fail merely for taking >1s.
+        "attempt=0",
+        `while [ ! -f "${timeoutObserved}" ]; do`,
+        "  attempt=$((attempt + 1))",
+        "  [ \"$attempt\" -lt 100 ] || exit 7",
+        "  sleep 0.1",
+        "done",
         "printf '%s\\n' 'ROUTINE_RESULT outcome=noop detail=gate-finished'",
         "exit 0",
         "",
       ].join("\n"),
     );
 
-    writeRoutine("a-timeout", "claude", ["timeout_min = 0.002"]);
-    writeRoutine("b-slow-gate", "claude", [
+    writeRoutine("a-slow-gate", "claude", [
       "timeout_min = 1",
       `gate_command = ${JSON.stringify(slowGate)}`,
     ]);
+    writeRoutine("b-timeout", "claude", ["timeout_min = 0.02"]);
 
     const results = await evaluateOnce({
       once: true,
@@ -238,11 +247,11 @@ describe("daemon evaluateOnce", () => {
       staggerMs: 0, // both routines must start together to race the gate
       log: () => {},
     });
-    const timed = results.find((result) => result.id === "a-timeout");
-    const gated = results.find((result) => result.id === "b-slow-gate");
+    const timed = results.find((result) => result.id === "b-timeout");
+    const gated = results.find((result) => result.id === "a-slow-gate");
 
     expect(timed?.timedOut).toBe(true);
-    expect(timed?.durationMs).toBeLessThan(1_000);
+    expect(existsSync(timeoutObserved)).toBe(true);
     expect(gated?.outcome.kind).toBe("noop");
   });
 

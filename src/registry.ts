@@ -56,6 +56,10 @@ export interface RoutineEntry {
   cwd: string;
   status: Status;
   timeoutMin: number;
+  /** Native session retention is opt-in; durable knowledge stays in Brain. */
+  sessionMode?: "ephemeral" | "persistent";
+  /** Read-only command: exit 0 only when continuing interrupted effects is safe. */
+  resumeCheck?: string;
   /**
    * The PRIMARY harness's `timeout_min`, preserved when a fallback leg scales
    * `timeoutMin` for a slower harness. Set only on the ephemeral per-route
@@ -111,6 +115,8 @@ const KNOWN_KEYS = new Set([
   "cwd",
   "status",
   "timeout_min",
+  "session_mode",
+  "resume_check",
   "error_priority",
   "heartbeat_slug",
   "group",
@@ -268,6 +274,13 @@ export function parseEntry(text: string, sourcePath: string): RoutineEntry {
     sourcePath,
   };
   if (difficulty) entry.difficulty = difficulty;
+  const sessionMode = str(raw, "session_mode", sourcePath);
+  if (sessionMode !== undefined && sessionMode !== "ephemeral" && sessionMode !== "persistent") {
+    throw new RegistryError("session_mode must be ephemeral|persistent", sourcePath);
+  }
+  if (sessionMode) entry.sessionMode = sessionMode;
+  const resumeCheck = str(raw, "resume_check", sourcePath);
+  if (resumeCheck) entry.resumeCheck = resumeCheck;
   if (matrixResolution) entry.matrixResolution = matrixResolution;
   if (pin === true) entry.routingPin = true;
   if (promptPath) entry.promptPath = promptPath;
