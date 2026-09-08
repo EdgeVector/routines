@@ -25,6 +25,8 @@ import {
 import { join } from "node:path";
 
 import { buildInvocation, type HarnessInvocation } from "./adapters.ts";
+import { ExecutionCollector, type ExecutionRecord } from "./execution-record.ts";
+import { claimResume, recoveryTaskHash, validateResume, worktreeIdentity } from "./session-recovery.ts";
 import {
   formatClaudeAuthSource,
   resolveClaudeAuthEnv,
@@ -93,6 +95,7 @@ export interface RunResult {
    */
   claudeAuthSource?: ClaudeAuthSource;
   claudeAuthReason?: ClaudeAuthReason;
+  execution?: ExecutionRecord;
 }
 
 // Timestamp safe for a directory name (no colons): 2026-07-12T21-05-00-123Z.
@@ -112,6 +115,8 @@ export interface RunOptions {
   trigger?: "scheduled" | "manual";
   /** Skip same-run fallback chain (tests / explicit single-route). */
   noFallback?: boolean;
+  /** Explicit prior run directory; never substitutes another provider. */
+  resumeRun?: string;
 }
 
 interface FallbackAttempt {
@@ -302,7 +307,7 @@ export function nextLiveRouteIndex(
  */
 export async function runRoutine(entry: RoutineEntry, opts: RunOptions = {}): Promise<RunResult> {
   const trigger = opts.trigger ?? "scheduled";
-  const useFallback = fallbackEnabled() && !opts.noFallback;
+  const useFallback = fallbackEnabled() && !opts.noFallback && !opts.resumeRun;
   const routes = useFallback ? routesForFire(entry) : [buildRouteChain(entry)[0]!];
   const attempts: FallbackAttempt[] = [];
   let last: RunResult | null = null;
@@ -723,13 +728,17 @@ async function runOnce(
   existing?: { runDir: string; startedAt: Date },
 ): Promise<RunResult> {
   const trigger = opts.trigger ?? "scheduled";
+  const project = loadProjectConfig();
+  const cwd = resolveRoutineCwd(entry.cwd, project);
+  const sessionId = opts.resumeRun ? validateResume(entry, opts.resumeRun, cwd) : undefined;
+  const taskHash = entry.sessionMode === "persistent" ? recoveryTaskHash(entry) : null;
   const startedAt = existing?.startedAt ?? new Date();
   const runDir = existing?.runDir ?? join(runsDir(), entry.id, runStamp(startedAt));
   mkdirSync(runDir, { recursive: true });
   mkdirSync(join(runDir, "scratch"), { recursive: true });
   // Prompt after runDir so the envelope can name Run directory / Run-Id trailers.
   const prompt = resolveDispatchPrompt(entry, { runDir });
-  const invocation = buildInvocation(entry, prompt);
+  const invocation = buildInvocation(entry, prompt, sessionId);
   writeRunFile(join(runDir, "prompt.txt"), prompt);
   // Empty logs so mid-flight `tail -f` works even before first chunk.
   writeRunFile(join(runDir, "stdout.log"), "");
@@ -761,8 +770,6 @@ async function runOnce(
     gateSkippedHarness: false,
   });
 
-  const project = loadProjectConfig();
-  const cwd = resolveRoutineCwd(entry.cwd, project);
   const configuredEnv = { ...process.env, ...envFromProjectConfig(project) };
   // Claude legs: hand the child a credential that does not go through the
   // macOS login keychain (CLAUDE_CODE_OAUTH_TOKEN from LastSecrets). See
@@ -833,7 +840,20 @@ async function runOnce(
   const stdoutCapture = new BoundedLogCapture(maxLogBytes);
   const stderrCapture = new BoundedLogCapture(maxLogBytes);
   let logWriteFailed = false;
+  let savedSession: string | null = null;
+  const execution = new ExecutionCollector(entry.harness, entry.model, () => {
+    // Save identity immediately, but avoid a disk write for every tool event.
+    if (execution.record.sessionId !== savedSession) {
+      savedSession = execution.record.sessionId;
+      writeRunFile(join(runDir, "execution.json"), JSON.stringify(execution.record) + "\n");
+    }
+  });
 
+  if (opts.resumeRun) {
+    // A gate can touch external state. Repeat the recovery check after it.
+    if (entry.gateCommand) validateResume(entry, opts.resumeRun, cwd);
+    claimResume(opts.resumeRun, runDir);
+  }
   return new Promise<RunResult>((resolve) => {
     const child = spawn(invocation.bin, invocation.args, {
       cwd,
@@ -916,6 +936,7 @@ async function runOnce(
 
     child.stdout?.on("data", (d: Buffer) => {
       const s = d.toString();
+      execution.push(s);
       stdoutCapture.push(s);
       if (!appendRunLog(runDir, "stdout.log", s, maxLogBytes)) logWriteFailed = true;
       if (!opts.quiet) {
@@ -983,6 +1004,8 @@ async function runOnce(
         }
       }
       const finishedAt = new Date();
+      execution.finish();
+      writeRunFile(join(runDir, "execution.json"), JSON.stringify(execution.record, null, 2) + "\n");
       const stdout = stdoutCapture.text();
       const stderr = stderrCapture.text();
       // Final rewrite ensures the on-disk logs match memory even if a chunk
@@ -1013,6 +1036,7 @@ async function runOnce(
         heartbeat: { attempted: false, ok: true },
         outcome,
         harnessPid,
+        execution: execution.record,
         ...(claudeAuthSource ? { claudeAuthSource } : {}),
         ...(claudeAuthReason ? { claudeAuthReason } : {}),
       };
@@ -1046,6 +1070,12 @@ async function runOnce(
             harnessPid: result.harnessPid,
             daemonPid: process.pid,
             status: "finished",
+            sessionMode: entry.sessionMode ?? "ephemeral",
+            recoveryTaskHash: taskHash,
+            resumedFrom: opts.resumeRun ?? null,
+            recoveryWorktree: entry.harness === "codex" && entry.sessionMode === "persistent" && ["error", "unknown"].includes(result.outcome.kind)
+              ? worktreeIdentity(cwd) : null,
+            execution: execution.record,
             outcome: result.outcome.kind,
             outcomeDetail: result.outcome.detail,
             outcomeSource: result.outcome.source,

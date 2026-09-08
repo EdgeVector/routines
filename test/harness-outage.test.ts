@@ -15,6 +15,7 @@ import {
 } from "../src/harness-outage.ts";
 import type { RoutineEntry } from "../src/registry.ts";
 import type { RunResult } from "../src/runner.ts";
+import { ExecutionCollector } from "../src/execution-record.ts";
 import { parseRRule } from "../src/rrule.ts";
 
 const CODEX_LIMIT_LINE =
@@ -149,6 +150,15 @@ afterEach(() => {
 });
 
 describe("classifyHarnessOutage", () => {
+  test("structured Codex tool errors cannot fence the provider; actual provider errors can", () => {
+    const r = result("");
+    r.execution = new ExecutionCollector("codex", "test").record;
+    const path = join(r.runDir, "stdout.log");
+    writeFileSync(path, JSON.stringify({ type: "item.completed", item: { type: "command_execution", aggregated_output: "You've hit your usage limit" } }));
+    expect(classifyHarnessOutage(r)).toBeNull();
+    writeFileSync(path, JSON.stringify({ type: "error", message: "You've hit your usage limit" }));
+    expect(classifyHarnessOutage(r)?.kind).toBe("usage-limit");
+  });
   test("codex usage-limit stderr classifies as usage-limit with reset time", () => {
     const out = classifyHarnessOutage(result(CODEX_LIMIT_LINE), {
       nowMs: Date.parse("2026-07-17T18:00:00Z"),

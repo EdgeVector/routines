@@ -66,7 +66,7 @@ Usage:
 Commands:
   list                        list registered routines (--json)
   status                      last run / next fire / harness / model per routine (--json)
-  run <id>                    run a routine now (foreground); --quiet to suppress streaming
+  run <id>                    run now; --quiet; --resume-run <dir> for guarded Codex recovery
   pause <id>                  set status = paused
   resume <id>                 set status = active
   route <id> --harness X --model Y   change a routine's harness and/or model
@@ -323,12 +323,12 @@ function cmdStatus(rest: string[]): number {
 async function cmdRun(rest: string[]): Promise<number> {
   const { values, positionals } = parseArgs({
     args: rest,
-    options: { quiet: { type: "boolean" } },
+    options: { quiet: { type: "boolean" }, "resume-run": { type: "string" } },
     allowPositionals: true,
   });
   const id = positionals[0];
   if (!id) {
-    console.error("usage: routines run <id> [--quiet]");
+    console.error("usage: routines run <id> [--quiet] [--resume-run <run-dir>]");
     return 2;
   }
   const entry = loadEntry(id);
@@ -340,7 +340,7 @@ async function cmdRun(rest: string[]): Promise<number> {
     return 3;
   }
   try {
-    const result = await runRoutine(entry, { quiet: values.quiet === true, trigger: "manual" });
+    const result = await runRoutine(entry, { quiet: values.quiet === true, trigger: "manual", resumeRun: values["resume-run"] });
     console.error(
       `run ${id}: exit=${result.exitCode} dur=${(result.durationMs / 1000).toFixed(1)}s log=${result.runDir}` +
         (result.heartbeat.attempted ? ` heartbeat=${result.heartbeat.ok ? "ok" : "FAILED"}` : ""),
@@ -1123,6 +1123,7 @@ function summarize(e: RoutineEntry) {
     cwd: e.cwd,
     status: e.status,
     timeoutMin: e.timeoutMin,
+    sessionMode: e.sessionMode ?? "ephemeral",
     heartbeatSlug: e.heartbeatSlug ?? null,
     hasPrompt: e.prompt !== undefined,
     promptPath: e.promptPath ?? null,

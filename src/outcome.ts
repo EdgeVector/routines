@@ -209,7 +209,7 @@ function isPreRunHeartbeat(
  * that aren't valid single-line JSON (plain-text harnesses, stderr) pass
  * through unchanged — there's no tool_result structure to strip there.
  */
-function stripToolResultPayloads(raw: string): string {
+function stripToolResultPayloads(raw: string, codexOnly = false): string {
   const out: string[] = [];
   for (const line of raw.split("\n")) {
     const trimmed = line.trim();
@@ -225,7 +225,14 @@ function stripToolResultPayloads(raw: string): string {
       continue;
     }
     const type = (obj as { type?: unknown } | null)?.type;
-    if (type === "user") continue; // tool_result envelope — quoted data, not this agent's speech
+    if (type === "user" && !codexOnly) continue; // tool_result envelope — quoted data, not this agent's speech
+    // Codex JSON command output can quote another run's verdict. Only the
+    // completed agent message is authored outcome text; all other items are data.
+    if (typeof type === "string" && type.startsWith("item.")) {
+      const item = (obj as { item?: { type?: string; text?: string } }).item;
+      if (type === "item.completed" && item?.type === "agent_message" && typeof item.text === "string") out.push(item.text);
+      continue;
+    }
     out.push(line);
   }
   return out.join("\n");
@@ -260,7 +267,7 @@ export function parseOutcome(
   const sink = parseOutcomeSink(opts.sink);
   if (sink) return sink;
 
-  text = filterBenignHarnessNoise(text);
+  text = filterBenignHarnessNoise(stripToolResultPayloads(text, true));
   const candidates: Candidate[] = [];
   const startedAtMs = heartbeatTsMs(opts.startedAt ?? null);
   // Highest-confidence, unscoped-by-name signals: only trust these from the

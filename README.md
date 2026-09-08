@@ -199,6 +199,7 @@ example lives in `examples/`.
 routines list                 # registered routines
 routines status               # last run / next fire / harness / model — the single-pane view
 routines run <id>             # run a routine now (foreground)
+routines run <id> --resume-run <run-directory> # guarded continuation of one interrupted Codex run
 routines pause|resume <id>    # toggle status
 routines route <id> --harness codex --model gpt-5.5
 routines route <id> --harness grok --model grok-4.5

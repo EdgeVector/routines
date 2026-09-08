@@ -52,7 +52,7 @@ describe("buildInvocation", () => {
       "--model",
       "m1",
       "--skip-git-repo-check",
-      "--ephemeral",
+      "--json",
     ]);
     expect(inv.args).toContain("--add-dir");
     expect(inv.args).toContain("sandbox_workspace_write.network_access=true");
@@ -72,7 +72,7 @@ describe("buildInvocation", () => {
       "--model",
       "m1",
       "--skip-git-repo-check",
-      "--ephemeral",
+      "--json",
     ]);
     expect(inv.args).toContain("--add-dir");
     expect(inv.args.at(-1)).toBe("-");

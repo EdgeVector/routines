@@ -50,7 +50,7 @@ function harnessOverride(envKey: string): string | undefined {
   return value && value.length > 0 ? value : undefined;
 }
 
-export function buildInvocation(entry: RoutineEntry, prompt: string): HarnessInvocation {
+export function buildInvocation(entry: RoutineEntry, prompt: string, sessionId?: string): HarnessInvocation {
   const bin = harnessBinary(entry.harness);
   let args: string[];
   switch (entry.harness) {
@@ -89,8 +89,9 @@ export function buildInvocation(entry: RoutineEntry, prompt: string): HarnessInv
         "--model",
         entry.model,
         "--skip-git-repo-check",
-        "--ephemeral",
+        "--json",
       ];
+      if (!sessionId && entry.sessionMode !== "persistent") args.push("--ephemeral");
       for (const dir of codexWritableDirs()) {
         args.push("--add-dir", dir);
       }
@@ -98,6 +99,7 @@ export function buildInvocation(entry: RoutineEntry, prompt: string): HarnessInv
       if (entry.effort) {
         args.push("-c", `model_reasoning_effort=${JSON.stringify(entry.effort)}`);
       }
+      if (sessionId) args.push("resume", sessionId);
       args.push("-"); // read prompt from stdin
       const inv: HarnessInvocation = {
         bin,
