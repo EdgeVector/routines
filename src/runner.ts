@@ -1167,7 +1167,7 @@ export function completedExitCode(
 
 
 /** Exit code meaning "proceed to harness" for gate_command scripts. */
-export const GATE_PROCEED_EXIT = 10;
+const GATE_PROCEED_EXIT = 10;
 
 /**
  * Gate wall clock. `ROUTINES_GATE_TIMEOUT_MS` is a test override (milliseconds).
