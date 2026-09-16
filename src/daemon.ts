@@ -439,7 +439,7 @@ export function pidAlive(pid: number): boolean {
 }
 
 /** How long after host-track `current` flips we still name the stop as activate. */
-export const HOST_TRACK_ACTIVATE_WINDOW_MS = 10 * 60 * 1000;
+const HOST_TRACK_ACTIVATE_WINDOW_MS = 10 * 60 * 1000;
 
 /** Who wrote `stopReason` onto this identity. */
 export type DaemonStopSource = "self" | "reconstructed" | "inherited";
