@@ -465,7 +465,7 @@ describe("daemon evaluateOnce", () => {
     expect(events.some((e) => e.startsWith("skip-fence:gated-routine:"))).toBe(false);
   });
 
-  test("every harness fenced still fences a routine with no gate", async () => {
+  test("every harness fenced still records a run dir and sink for a routine with no gate", async () => {
     process.env.ROUTINES_FSITUATIONS_BIN = stub(
       join(home, "stub-fsituations"),
       '#!/bin/sh\ncat <<\'JSON\'\n[{"slug":"harness-outage-grok","status":"active","scope_routines":["ungated-routine"]}]\nJSON\n',
@@ -480,8 +480,61 @@ describe("daemon evaluateOnce", () => {
       log: (e) => events.push(`${e.kind}:${e.id ?? ""}:${e.detail ?? ""}`),
     });
 
-    expect(results.length).toBe(0);
-    expect(events.some((e) => e.startsWith("skip-fence:ungated-routine:"))).toBe(true);
+    expect(results.map((r) => r.id)).toEqual(["ungated-routine"]);
+    expect(results[0]!.outcome.kind).toBe("noop");
+    expect(results[0]!.outcome.detail).toContain("all-routes-fenced");
+    expect(results[0]!.outcome.source).toBe("sink");
+    expect(results[0]!.harnessPid).toBeNull();
+    expect(events.some((e) => e.startsWith("skip-fence:ungated-routine:"))).toBe(false);
+    const sinkPath = join(results[0]!.runDir, "outcome.txt");
+    expect(existsSync(sinkPath)).toBe(true);
+    const sink = readFileSync(sinkPath, "utf8");
+    expect(sink).toMatch(/^noop all-routes-fenced harnesses=/m);
+    const meta = JSON.parse(readFileSync(join(results[0]!.runDir, "meta.json"), "utf8"));
+    expect(meta.outcomeSource).toBe("sink");
+    expect(meta.fencedRoutes).toEqual(expect.arrayContaining(["grok"]));
+  });
+
+  test("a coalesced FREQ=DAILY tick writes error missed-fire for the skipped day", async () => {
+    process.env.ROUTINES_FSITUATIONS_BIN = stub(
+      join(home, "stub-fsituations-daily"),
+      '#!/bin/sh\ncat <<\'JSON\'\n[{"slug":"harness-outage-grok","status":"active","scope_routines":["daily-ungated"]},{"slug":"harness-outage-claude","status":"active","scope_routines":["daily-ungated"]},{"slug":"harness-outage-codex","status":"active","scope_routines":["daily-ungated"]}]\nJSON\n',
+    );
+    writeFileSync(
+      join(home, "registry", "daily-ungated.toml"),
+      [
+        'harness = "grok"',
+        'model = "test-model"',
+        'rrule = "FREQ=DAILY"',
+        'prompt = "hello from daily-ungated"',
+        'heartbeat_slug = "routine-heartbeats"',
+      ].join("\n") + "\n",
+    );
+    const since = new Date(Date.now() - 48 * 60 * 60 * 1000);
+    writeState({ id: "daily-ungated", lastFire: since.toISOString() });
+    fenceEveryHarness();
+
+    const results = await evaluateOnce({
+      once: true,
+      catchupMs: 60_000,
+      staggerMs: 0,
+      log: () => {},
+    });
+
+    expect(results.map((r) => r.id)).toEqual(["daily-ungated"]);
+    const dirs = readdirSync(join(home, "runs", "daily-ungated")).sort();
+    expect(dirs.length).toBeGreaterThanOrEqual(2);
+    const missedDir = dirs
+      .map((stamp) => join(home, "runs", "daily-ungated", stamp))
+      .find((dir) => {
+        const sink = existsSync(join(dir, "outcome.txt"))
+          ? readFileSync(join(dir, "outcome.txt"), "utf8")
+          : "";
+        return /^error missed-fire /m.test(sink);
+      });
+    expect(missedDir).toBeDefined();
+    const liveSink = readFileSync(join(results[0]!.runDir, "outcome.txt"), "utf8");
+    expect(liveSink).toMatch(/^noop all-routes-fenced harnesses=/m);
   });
 
   test("dispatch envelope uses registry id for automation memory, not prompt frontmatter name", async () => {
