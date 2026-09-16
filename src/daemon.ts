@@ -198,7 +198,7 @@ export const DEFAULT_STAGGER_MS = 60_000;
  */
 export const DEFAULT_SPAWN_DEADLINE_MS = 600_000;
 
-export function spawnDeadlineMs(): number {
+function spawnDeadlineMs(): number {
   const raw = process.env.ROUTINES_SPAWN_DEADLINE_MS;
   if (raw == null || raw === "") return DEFAULT_SPAWN_DEADLINE_MS;
   const n = Number(raw);
