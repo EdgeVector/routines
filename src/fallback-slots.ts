@@ -136,7 +136,7 @@ export type FallbackSlotWait =
   | { overloaded: true };
 
 /** Default: log a long wait once after one minute. */
-export const DEFAULT_FALLBACK_WAIT_LOG_AFTER_MS = 60_000;
+const DEFAULT_FALLBACK_WAIT_LOG_AFTER_MS = 60_000;
 
 export type FallbackSlotWaitInfo = {
   harness: string;
