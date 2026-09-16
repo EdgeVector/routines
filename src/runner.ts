@@ -550,6 +550,15 @@ function recordAllRoutesFenced(
     join(runDir, "prompt.txt"),
     "(all routes fenced by active harness outages; harness not spawned)\n",
   );
+  // Visible skip: ungated daily fires used to vanish because skip-fence
+  // advanced lastFire with no run dir and no sink. The runner is the only
+  // party present, so it writes outcome.txt the same way a gate_command run
+  // does. VERIFY: `routines status` reports outcomeSource=sink.
+  writeRunFile(
+    join(runDir, OUTCOME_SINK_FILENAME),
+    `# written by routinesd: all routes fenced; no harness was spawned.\n` +
+      `noop ${detail}\n`,
+  );
 
   const finishedAt = new Date();
   const invocation: HarnessInvocation = {
@@ -568,10 +577,11 @@ function recordAllRoutesFenced(
     finishedAt: finishedAt.toISOString(),
     durationMs: finishedAt.getTime() - startedAt.getTime(),
     heartbeat: { attempted: false, ok: true },
-    outcome: { kind: "noop", detail, source: "safe_skip" },
+    outcome: { kind: "noop", detail, source: "sink" },
     harnessPid: null,
   };
   result.heartbeat = writeHeartbeat(entry, result);
+  pageMissedDailyFire(entry, result, opts);
 
   writeRunFile(
     join(runDir, "meta.json"),
@@ -630,6 +640,129 @@ function recordAllRoutesFenced(
 
   releaseLockIfOwned(entry.id, process.pid);
   return result;
+}
+
+/**
+ * Record a FREQ=DAILY occurrence that never started (daemon down, or an
+ * older skip-fence that advanced lastFire without a run dir). Uses the
+ * missed occurrence as the run stamp so the calendar day is addressable.
+ * Does not release the dispatch lock — the caller still owns this tick.
+ */
+export function recordMissedDailyFire(
+  entry: RoutineEntry,
+  args: { firstMissed: Date; coalescedTo: Date; since: Date },
+): RunResult {
+  const startedAt = args.firstMissed;
+  const runDir = join(runsDir(), entry.id, runStamp(startedAt));
+  mkdirSync(runDir, { recursive: true });
+  mkdirSync(join(runDir, "scratch"), { recursive: true });
+  const detail =
+    `missed-fire since=${args.since.toISOString()} ` +
+    `first=${args.firstMissed.toISOString()} coalesced_to=${args.coalescedTo.toISOString()}`;
+  writeRunFile(
+    join(runDir, "stdout.log"),
+    `ROUTINE_RESULT outcome=error detail=${detail}\n`,
+  );
+  writeRunFile(join(runDir, "stderr.log"), "");
+  writeRunFile(
+    join(runDir, "prompt.txt"),
+    "(rrule tick never started; coalesced into a later occurrence)\n",
+  );
+  writeRunFile(
+    join(runDir, OUTCOME_SINK_FILENAME),
+    `# written by routinesd: a FREQ=DAILY occurrence never started.\n` +
+      `error ${detail}\n`,
+  );
+  const finishedAt = new Date();
+  const invocation: HarnessInvocation = {
+    bin: "missed-fire",
+    args: [],
+    display: "missed-fire: rrule tick never started",
+  };
+  const result: RunResult = {
+    id: entry.id,
+    runDir,
+    invocation,
+    exitCode: 1,
+    signal: null,
+    timedOut: false,
+    startedAt: startedAt.toISOString(),
+    finishedAt: finishedAt.toISOString(),
+    durationMs: Math.max(0, finishedAt.getTime() - startedAt.getTime()),
+    heartbeat: { attempted: false, ok: true },
+    outcome: { kind: "error", detail, source: "sink" },
+    harnessPid: null,
+  };
+  result.heartbeat = writeHeartbeat(entry, result);
+  writeRunFile(
+    join(runDir, "meta.json"),
+    JSON.stringify(
+      {
+        id: entry.id,
+        trigger: "scheduled",
+        harness: entry.harness,
+        model: entry.model,
+        effort: entry.effort ?? null,
+        cwd: entry.cwd,
+        command: invocation.display,
+        gateCommand: entry.gateCommand ?? null,
+        gateSkippedHarness: true,
+        exitCode: result.exitCode,
+        signal: result.signal,
+        timedOut: result.timedOut,
+        startedAt: result.startedAt,
+        finishedAt: result.finishedAt,
+        durationMs: result.durationMs,
+        harnessPid: null,
+        daemonPid: process.pid,
+        status: "finished",
+        outcome: result.outcome.kind,
+        outcomeDetail: result.outcome.detail,
+        outcomeSource: result.outcome.source,
+        stdoutTail: `ROUTINE_RESULT outcome=error detail=${detail}`,
+        stderrTail: "",
+        heartbeat: result.heartbeat,
+        resolvedBy: entry.resolvedBy,
+        difficulty: entry.difficulty ?? null,
+        matrixResolution: entry.matrixResolution ?? null,
+      },
+      null,
+      2,
+    ) + "\n",
+  );
+  patchState(entry.id, {
+    lastRun: result.finishedAt,
+    lastExit: result.exitCode,
+    lastRunDir: runDir,
+    lastOutcome: result.outcome.kind,
+    lastOutcomeDetail: result.outcome.detail ?? undefined,
+  });
+  pageMissedDailyFire(entry, result, { quiet: true, trigger: "scheduled" });
+  return result;
+}
+
+function pageMissedDailyFire(
+  entry: RoutineEntry,
+  result: RunResult,
+  opts: Pick<RunOptions, "quiet" | "trigger">,
+): void {
+  if ((opts.trigger ?? "scheduled") !== "scheduled") return;
+  if (entry.parsedRrule.freq !== "DAILY") return;
+  const page: RunResult = {
+    ...result,
+    exitCode: result.exitCode === 0 ? 1 : result.exitCode,
+    outcome: {
+      kind: "error",
+      detail: result.outcome.detail ?? "missed-fire",
+      source: result.outcome.source,
+    },
+  };
+  if (!shouldAutoEscalateScheduledRun(page)) return;
+  try {
+    escalateRoutineError(entry, page, { quiet: opts.quiet });
+  } catch {
+    /* never break caller */
+  }
 }
 
 /**

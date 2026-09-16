@@ -338,10 +338,15 @@ describe("runRoutine same-run fallback", () => {
     expect(result.exitCode).toBe(0);
     expect(result.outcome.kind).toBe("noop");
     expect(result.outcome.detail).toContain("all-routes-fenced");
+    expect(result.outcome.source).toBe("sink");
     expect(result.harnessPid).toBeNull();
+    const sinkPath = join(result.runDir, "outcome.txt");
+    expect(existsSync(sinkPath)).toBe(true);
+    expect(readFileSync(sinkPath, "utf8")).toMatch(/^noop all-routes-fenced harnesses=/m);
     const meta = JSON.parse(readFileSync(join(result.runDir, "meta.json"), "utf8"));
     expect(meta.fencedRoutes).toEqual(["codex", "claude", "grok"]);
     expect(meta.gateSkippedHarness).toBe(true);
+    expect(meta.outcomeSource).toBe("sink");
     expect(meta.command).toContain("all routes fenced");
   });
 

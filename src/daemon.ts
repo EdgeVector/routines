@@ -46,7 +46,13 @@ import { reconcileOutageFences } from "./harness-outage.ts";
 import { daemonIdentityPath, daemonLogDir, locksDir, runsDir } from "./paths.ts";
 import { nextAfter } from "./rrule.ts";
 import { patchState, readState } from "./state.ts";
-import { nextLiveRouteIndex, routesForFire, runRoutine, type RunResult } from "./runner.ts";
+import {
+  nextLiveRouteIndex,
+  recordMissedDailyFire,
+  routesForFire,
+  runRoutine,
+  type RunResult,
+} from "./runner.ts";
 import { readOutcomeSink } from "./runs.ts";
 import { parseOutcomeSink, OUTCOME_SINK_FILENAME } from "./outcome.ts";
 import { loadProjectConfig } from "./project-config.ts";
@@ -102,19 +108,20 @@ export function routeForAvailability(
  *     bypassing on the Situation alone would hand the fire straight back to
  *     the harness the fence protects.
  *
- *  2. EVERY hop is outaged, but the routine carries a zero-LLM `gateCommand`.
- *     `runRoutine` is already written for this — its `allRoutesFenced` branch
- *     runs the gate because "a zero-LLM gate is useful precisely when every
- *     provider is unavailable" — but the daemon returned at the fence before
- *     the runner was ever called, so that branch was unreachable from the
- *     scheduler.
+ *  2. EVERY hop is outaged. `runRoutine` already has an `allRoutesFenced`
+ *     branch: it runs a zero-LLM `gateCommand` when one exists, and otherwise
+ *     writes a run dir + `outcome.txt` sink (`noop all-routes-fenced`). The
+ *     daemon used to return at the fence before the runner was called, so
+ *     ungated daily fires vanished: no dir, no sink, `lastRun` unchanged.
+ *     Bypass so the runner records the skip for gated AND ungated rows.
  *
  * Case 2 is not hypothetical. On 2026-08-29 claude, codex and grok were all
  * recorded outaged at the same instant; `routesForFire` falls back to
  * returning the chain WHOLE when no hop is healthy, so `[0]` was the fenced
  * primary, the bypass was denied, and routinesd dispatched nothing for
  * 14h54m — 368 skip-fence events over 52 routine ids. Seven of those routines
- * needed no provider at all to do their work.
+ * needed no provider at all to do their work. Recurred 2026-09-15 for
+ * ungated `daily-retro-prevention`: skip-fence left no `2026-09-15T*` dir.
  */
 function canBypassHarnessOutageFence(entry: RoutineEntry, situationSlug: string): boolean {
   const fencedHarness = harnessFromOutageSituation(situationSlug);
@@ -123,8 +130,9 @@ function canBypassHarnessOutageFence(entry: RoutineEntry, situationSlug: string)
     const routes = routesForFire(entry);
     const live = nextLiveRouteIndex(routes, 0);
     if (live >= 0) return routes[live]!.harness !== fencedHarness;
-    // No live provider anywhere. A zero-LLM gate still needs none.
-    return Boolean(entry.gateCommand);
+    // No live provider anywhere. The runner still records a visible skip
+    // (and a zero-LLM gate still needs none).
+    return true;
   } catch {
     return false;
   }
@@ -1116,6 +1124,32 @@ function tryDispatch(entry: RoutineEntry, occ: Date, deps: DispatchDeps): void {
   if (isLocked(entry.id) || !acquireLock(entry.id)) {
     log({ ts: now.toISOString(), kind: "skip-single-flight", id: entry.id });
     return;
+  }
+
+  // A FREQ=DAILY rrule whose lastFire is more than one occurrence behind
+  // `occ` skipped a calendar fire (daemon down, or an older skip-fence that
+  // advanced lastFire without a run dir). Write a sink for the missed day
+  // before this tick's dispatch overwrites lastRun. Do not release the lock.
+  const prior = readState(entry.id);
+  if (entry.parsedRrule.freq === "DAILY" && prior.lastFire) {
+    const firstMissed = nextAfter(entry.parsedRrule, new Date(prior.lastFire));
+    if (firstMissed && firstMissed.getTime() < occ.getTime()) {
+      try {
+        const missed = recordMissedDailyFire(entry, {
+          firstMissed,
+          coalescedTo: occ,
+          since: new Date(prior.lastFire),
+        });
+        log({
+          ts: now.toISOString(),
+          kind: "complete",
+          id: entry.id,
+          detail: `missed-fire run=${missed.runDir}`,
+        });
+      } catch {
+        /* never block the live tick */
+      }
+    }
   }
 
   patchState(entry.id, { lastFire: occ.toISOString() });
