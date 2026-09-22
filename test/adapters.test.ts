@@ -91,6 +91,9 @@ describe("buildInvocation", () => {
     // Durable state-machine steps, including the canary build, write here.
     expect(dirs).toContain(`${home}/.local/state/state-machine`);
     expect(dirs).toContain(`${home}/.cache/edgevector-git`);
+    // gbrain audit lines (EPERM before); not the whole ~/.gbrain (config holds the DB URL).
+    expect(dirs).toContain(`${home}/.gbrain/audit`);
+    expect(dirs).not.toContain(`${home}/.gbrain`);
   });
 
   test("grok adapter shape (flags before -p prompt)", () => {
