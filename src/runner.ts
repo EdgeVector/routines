@@ -1138,7 +1138,6 @@ async function runOnce(
       }
       const finishedAt = new Date();
       execution.finish();
-      writeRunFile(join(runDir, "execution.json"), JSON.stringify(execution.record, null, 2) + "\n");
       const stdout = stdoutCapture.text();
       const stderr = stderrCapture.text();
       // Final rewrite ensures the on-disk logs match memory even if a chunk
@@ -1156,6 +1155,13 @@ async function runOnce(
         sink: readOutcomeSink(runDir),
       });
       const exitCode = completedExitCode(rawExitCode, timedOut, outcome);
+      // execution.json carries the run's exit code and outcome next to the
+      // model/tool counters, so an audit of "which runs failed for a model
+      // reason" reads one file. meta.json stays the full record.
+      writeRunFile(
+        join(runDir, "execution.json"),
+        JSON.stringify({ ...execution.record, exitCode, outcome: outcome.kind }, null, 2) + "\n",
+      );
       const result: RunResult = {
         id: entry.id,
         runDir,

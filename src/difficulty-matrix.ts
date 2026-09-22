@@ -64,6 +64,18 @@ export function difficultyMatrixPath(): string {
   return process.env.ROUTINES_ROUTING_MATRIX_PATH || join(routinesHome(), "routing-matrix.json");
 }
 
+/**
+ * Where the routing matrix comes from right now. The path depends on
+ * ROUTINES_ROUTING_MATRIX_PATH, else on ROUTINES_HOME. An isolated
+ * ROUTINES_HOME with no routing-matrix.json uses the built-in default matrix,
+ * so it can select a different provider than the fleet home does. Report this
+ * next to every route so a reader can see which matrix made the choice.
+ */
+export function difficultyMatrixSource(): { path: string; source: "file" | "default" } {
+  const path = difficultyMatrixPath();
+  return { path, source: existsSync(path) ? "file" : "default" };
+}
+
 export function isDifficulty(value: string): value is Difficulty {
   return (DIFFICULTIES as readonly string[]).includes(value);
 }

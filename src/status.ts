@@ -197,6 +197,40 @@ export interface StatusSnapshot {
 }
 
 /** Compute the current status of every registered routine. */
+/**
+ * The routine's newest FINISHED run, from whichever source is newer: the
+ * persisted state file or the run dirs on disk.
+ *
+ * State is only patched by scheduled runs (and by the first manual run, as a
+ * bootstrap). A later manual `routines run` — a zero-LLM gate run is the common
+ * case — writes a complete meta.json but leaves state alone. Status used to read
+ * lastRun/lastExit/lastRunDir from state only, while lastOutcome came from the
+ * run dirs, so one row paired a newer run's outcome with an older run's time.
+ * Deriving all of them from the newest finished run keeps the row consistent.
+ */
+function newestFinishedRun(
+  id: string,
+  recent: RunSummary[],
+  st: { lastRun?: string; lastExit?: number | null; lastRunDir?: string },
+): { lastRun: string | null; lastExit: number | null; lastRunDir: string | null } {
+  const fromState = {
+    lastRun: st.lastRun ?? null,
+    lastExit: st.lastExit ?? null,
+    lastRunDir: st.lastRunDir ?? null,
+  };
+  const finished = recent.find((r) => r.finishedAt);
+  if (!finished?.finishedAt) return fromState;
+  const finishedMs = Date.parse(finished.finishedAt);
+  if (Number.isNaN(finishedMs)) return fromState;
+  const stateMs = fromState.lastRun ? Date.parse(fromState.lastRun) : Number.NaN;
+  if (!Number.isNaN(stateMs) && stateMs >= finishedMs) return fromState;
+  return {
+    lastRun: finished.finishedAt,
+    lastExit: finished.exitCode,
+    lastRunDir: join(runsDir(), id, finished.stamp),
+  };
+}
+
 export function collectStatus(now: Date = new Date(), options: StatusOptions = {}): StatusSnapshot {
   reconcileOrphanedRuns(now);
   const { entries, errors } = loadAll();
@@ -259,6 +293,7 @@ export function collectStatus(now: Date = new Date(), options: StatusOptions = {
     const lastOutcomeDetail = displayRun
       ? displayRun.outcomeDetail
       : (st.lastOutcomeDetail ?? null);
+    const last = newestFinishedRun(e.id, recent, st);
 
     return {
       id: e.id,
@@ -273,9 +308,9 @@ export function collectStatus(now: Date = new Date(), options: StatusOptions = {
       timeoutMin: e.timeoutMin,
       cwd: e.cwd,
       nextFire: next ? next.toISOString() : null,
-      lastRun: st.lastRun ?? null,
-      lastExit: st.lastExit ?? null,
-      lastRunDir: st.lastRunDir ?? null,
+      lastRun: last.lastRun,
+      lastExit: last.lastExit,
+      lastRunDir: last.lastRunDir,
       running,
       harnessPid,
       currentRun: currentRun?.stamp ?? null,

@@ -29,7 +29,12 @@ and heartbeats still flow to fbrain.
 
 The versioned 3×3 provider/model matrix has one optional fleet owner at
 `$ROUTINES_HOME/routing-matrix.json`. If it is absent, the checked-in version 1
-bootstrap matrix is used. `providerOrder` selects the first available cell.
+bootstrap matrix is used. `ROUTINES_ROUTING_MATRIX_PATH` overrides the path.
+CAUTION: the path follows `ROUTINES_HOME`. An isolated `ROUTINES_HOME` without
+its own `routing-matrix.json` uses the bootstrap matrix, so it can select a
+different provider than the fleet home. `routines doctor` prints the matrix
+path and source; `agent-exec` returns them as `matrixPath` and `matrixSource`.
+`providerOrder` selects the first available cell.
 At each routinesd dispatch pass, an active Situation named
 `harness-outage-<provider>` makes that provider unavailable to matrix-routed
 routines; clearing the Situation restores the configured order. This is an
@@ -86,6 +91,7 @@ The command resolves and prints JSON on stdout; it starts no agent.
 |---|---|
 | `harness` / `model` | the selected provider and model (`null` on an empty route) |
 | `matrixVersion` | the routing-matrix version the decision used |
+| `matrixPath` / `matrixSource` | the matrix file read, and `file` or `default` (built-in matrix, file absent) |
 | `reasons` | ordered decision tokens (order, fences, fallback, selection) |
 | `fenced` | fenced providers with their Situation slug and known retry time |
 | `retry` | `retryable`, earliest `retryAt`, and the fence Situation slugs |
@@ -414,7 +420,8 @@ the Telegram page still fire, but the remedy names the locator instead of
 
 ```sh
 bun test            # unit + daemon + dashboard integration (47 tests)
-bun run typecheck   # tsc --noEmit
+bun run typecheck   # scripts/typecheck.sh: installs locked devDeps if tsc is
+                    # missing, keeps Bun temp files in .cache/bun-tmp, runs tsc --noEmit
 bun run e2e         # full both-adapter dispatch e2e on a throwaway ROUTINES_HOME
 ```
 

@@ -18,6 +18,7 @@
 
 import {
   DifficultyMatrixError,
+  difficultyMatrixSource,
   loadDifficultyMatrix,
   resolveDifficulty,
   type Difficulty,
@@ -88,6 +89,13 @@ export interface RouteDecision {
   mode: RouteMode;
   timeoutMs: number | null;
   matrixVersion: number;
+  /**
+   * The routing-matrix file this decision read (ROUTINES_ROUTING_MATRIX_PATH,
+   * else $ROUTINES_HOME/routing-matrix.json).
+   */
+  matrixPath: string;
+  /** "file" when that path exists; "default" when the built-in matrix was used. */
+  matrixSource: "file" | "default";
   /** Configured preference order, for the caller's evidence. */
   providerOrder: Harness[];
   harness: Harness | null;
@@ -156,6 +164,7 @@ export function routeAgent(request: RouteRequest): RouteDecision {
     if (!check.ok) reasons.push(`situations-degraded:${check.error ?? "unknown"}`);
   }
 
+  const matrixSource = difficultyMatrixSource();
   const config = loadDifficultyMatrix();
   const fencedSet = fencedHarnesses(situations);
   const fenced: FencedProvider[] = [...fencedSet].map((harness) => ({
@@ -177,6 +186,8 @@ export function routeAgent(request: RouteRequest): RouteDecision {
     mode: request.mode,
     timeoutMs: request.timeoutMs ?? null,
     matrixVersion: config.version,
+    matrixPath: matrixSource.path,
+    matrixSource: matrixSource.source,
     providerOrder: config.providerOrder,
     fenced,
     retry,

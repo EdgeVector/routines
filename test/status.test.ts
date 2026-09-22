@@ -522,7 +522,10 @@ test("running status exposes current run separately from last completed run", ()
   );
 
   expect(row?.running).toBe(true);
-  expect(row?.lastRun).toBeNull();
+  // lastRun is the last COMPLETED run (derived from its run dir), never the
+  // in-flight one.
+  expect(row?.lastRun).toBe("2026-07-16T15:05:00.000Z");
+  expect(row?.lastRunDir).toBe(completed);
   expect(row?.lastOutcome).toBe("ok");
   expect(row?.currentRun).toBe("2026-07-16T15-58-40-903Z");
   expect(row?.currentRunDir).toBe(current);
@@ -727,4 +730,62 @@ test("status effective route matches configured route when no outage is active",
   expect(row?.effectiveHarness).toBe("codex");
   expect(row?.model).toBe("gpt-5");
   expect(row?.effectiveModel).toBe("gpt-5");
+});
+
+test("status lastRun follows a newer finished manual gate run that did not patch state", () => {
+  const id = "gate-manual-newer";
+  writeRoutine(id);
+
+  const older = join(home, "runs", id, "2026-09-21T22-05-45-142Z");
+  const newer = join(home, "runs", id, "2026-09-21T22-12-22-339Z");
+  for (const [dir, finishedAt, exitCode] of [
+    [older, "2026-09-21T22:06:36.236Z", 0],
+    [newer, "2026-09-21T22:14:12.930Z", 3],
+  ] as const) {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "meta.json"),
+      JSON.stringify({
+        trigger: "manual",
+        status: "finished",
+        gateSkippedHarness: true,
+        exitCode,
+        startedAt: finishedAt,
+        finishedAt,
+        outcome: "ok",
+        outcomeDetail: "gate",
+        outcomeSource: "sink",
+      }) + "\n",
+    );
+  }
+  mkdirSync(join(home, "state"), { recursive: true });
+  writeFileSync(
+    join(home, "state", `${id}.json`),
+    JSON.stringify({ id, lastRun: "2026-09-21T22:06:36.236Z", lastExit: 0, lastRunDir: older }) + "\n",
+  );
+
+  const row = collectStatus(new Date("2026-09-21T22:20:00Z")).rows.find((r) => r.id === id)!;
+  expect(row.lastRun).toBe("2026-09-21T22:14:12.930Z");
+  expect(row.lastExit).toBe(3);
+  expect(row.lastRunDir).toBe(newer);
+});
+
+test("status keeps state lastRun when state is newer than every run dir", () => {
+  const id = "state-newer";
+  writeRoutine(id);
+  const dir = join(home, "runs", id, "2026-09-21T22-05-45-142Z");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, "meta.json"),
+    JSON.stringify({ status: "finished", exitCode: 0, finishedAt: "2026-09-21T22:06:36.236Z", outcome: "ok" }) + "\n",
+  );
+  mkdirSync(join(home, "state"), { recursive: true });
+  writeFileSync(
+    join(home, "state", `${id}.json`),
+    JSON.stringify({ id, lastRun: "2026-09-21T23:00:00.000Z", lastExit: 1, lastRunDir: "/elsewhere" }) + "\n",
+  );
+  const row = collectStatus(new Date("2026-09-21T23:10:00Z")).rows.find((r) => r.id === id)!;
+  expect(row.lastRun).toBe("2026-09-21T23:00:00.000Z");
+  expect(row.lastExit).toBe(1);
+  expect(row.lastRunDir).toBe("/elsewhere");
 });

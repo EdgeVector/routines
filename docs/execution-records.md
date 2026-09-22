@@ -3,6 +3,11 @@
 Each provider run writes `execution.json` beside its logs. The terminal `meta.json`
 and the run detail API include the same `execution` object.
 
+The terminal `execution.json` also has `exitCode` and `outcome`
+(`ok`, `noop`, `error`, or `unknown`). These values are the same as in
+`meta.json`. A reader can find the runs that failed for a model reason from one
+file. While the run is in progress, the file has no `exitCode`.
+
 The record contains the provider, model, session ID, observed tool completions,
 tool failures, model errors, and provider-reported token counts. Missing usage
 and cost remain `null`. A reported zero remains zero. The collector does not
