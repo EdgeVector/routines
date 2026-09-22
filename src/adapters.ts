@@ -201,6 +201,11 @@ export function codexWritableDirs(): string[] {
     join(home, ".local", "state", "state-machine"),
     join(home, ".lastgit"),
     join(home, ".brain"),
+    // gbrain (the temporary primary brain since 2026-09-06) appends an audit
+    // line on every call; without this root each call printed EPERM for
+    // ~/.gbrain/audit/db-disconnect-<week>.jsonl and dropped the audit.
+    // Only the audit dir: ~/.gbrain/config.json holds the database URL.
+    join(home, ".gbrain", "audit"),
     // Portal git cache (wt fetch); read/write during routine portal ops
     join(home, ".cache", "edgevector-git"),
   ];
