@@ -45,7 +45,7 @@ import {
 } from "./hygiene.ts";
 import { loadActiveSituations } from "./situations.ts";
 import { isRouteMode, routeAgent, ROUTE_MODES } from "./route-engine.ts";
-import { DIFFICULTIES, isDifficulty } from "./difficulty-matrix.ts";
+import { DIFFICULTIES, difficultyMatrixSource, isDifficulty } from "./difficulty-matrix.ts";
 import { HARNESSES, isHarness } from "./registry.ts";
 import { loadAll, loadEntry, resolvePrompt, type RoutineEntry } from "./registry.ts";
 import { collectStatus } from "./status.ts";
@@ -57,6 +57,29 @@ import { clearLegacyFleetSnapshot, deliverFleetStatus, publishFleetStatus, readF
 import { initRoutinesSentry } from "./observability.ts";
 import { runCapacityControllerTick } from "./capacity-runtime.ts";
 import { resolveProbePath } from "./probes.ts";
+
+const IMPORT_OPTIONS = `  --write                     apply the plan (default is a dry-run)
+  --force                     refresh existing registry files
+  --replace-routing           with --force, also replace existing harness/model
+                              instead of preserving local route edits; live
+                              active/paused status and timeout_min are always
+                              preserved (fleet-health bumps must survive import)
+  --json                      machine-readable plan
+  --out <dir>                 registry dir to write (default $ROUTINES_HOME/registry)
+  --codex-dir <dir>           legacy Codex automations dir to read
+                              (default ~/.codex/automations)
+  --claude-registry <path>    legacy Claude scheduled-tasks registry to read
+  --claude-model <model>      model for imported Claude routines (default sonnet)
+  --prefer codex|claude       which source wins when both define one routine
+  --keep-duplicates           do not collapse same-name routines across sources
+  -h, --help                  print this help`;
+
+const IMPORT_HELP = `Usage: routines import [options]
+
+Import legacy schedulers into the registry. Dry-run unless --write.
+
+Options:
+${IMPORT_OPTIONS}`;
 
 const HELP = `routines ${pkg.version} — one scheduler for agent routines (claude|codex|grok|gemini)
 
@@ -101,7 +124,12 @@ Commands:
   help                        print this help
 
 Environment:
-  ROUTINES_HOME               state root (default ~/.routines)
+  ROUTINES_HOME               state root (default ~/.routines); also the
+                              default home of routing-matrix.json
+  ROUTINES_ROUTING_MATRIX_PATH
+                              routing matrix file (default
+                              $ROUTINES_HOME/routing-matrix.json; absent ⇒
+                              built-in default matrix)
   ROUTINES_ALLOW_HARNESS_BIN_OVERRIDES=1
                               allow ROUTINES_*_BIN harness overrides
   ROUTINES_CLAUDE_BIN         claude binary override when explicitly allowed
@@ -126,11 +154,7 @@ Environment:
                               must be within seven days
 
 Import:
-  --force                     refresh existing registry files
-  --replace-routing           with --force, also replace existing harness/model
-                              instead of preserving local route edits; live
-                              active/paused status and timeout_min are always
-                              preserved (fleet-health bumps must survive import)
+${IMPORT_OPTIONS}
 
 Hygiene:
   --dry-run                   report only; do not delete/truncate
@@ -482,9 +506,14 @@ function cmdImport(rest: string[]): number {
       "claude-registry": { type: "string" },
       "replace-routing": { type: "boolean" },
       out: { type: "string" },
+      help: { type: "boolean", short: "h" },
     },
     allowPositionals: true,
   });
+  if (values.help) {
+    console.log(IMPORT_HELP);
+    return 0;
+  }
 
   const prefer = values.prefer;
   if (prefer && prefer !== "codex" && prefer !== "claude") {
@@ -840,6 +869,14 @@ function cmdDoctor(): number {
       console.log(`  ok   ${e.id} (${e.harness}/${e.model}, ${e.rrule})`);
     }
   }
+
+  // The routing matrix depends on ROUTINES_ROUTING_MATRIX_PATH, else on
+  // ROUTINES_HOME. An isolated home without the file routes with the built-in
+  // default, which can differ from the fleet matrix.
+  const matrix = difficultyMatrixSource();
+  console.log(
+    `\nrouting-matrix: ${matrix.path} (${matrix.source === "file" ? "file" : "absent; built-in default matrix"})`,
+  );
 
   const check = loadActiveSituations();
   console.log(`\nSituation fence: ${check.ok ? `ok (${check.situations.length} active)` : `DEGRADED — ${check.error}`}`);

@@ -71,6 +71,8 @@ test("normal selection takes the first provider in the matrix order", () => {
   expect(decision.harness).toBe("grok");
   expect(decision.model).toBe("grok-normal");
   expect(decision.matrixVersion).toBe(7);
+  expect(decision.matrixPath).toBe(process.env.ROUTINES_ROUTING_MATRIX_PATH!);
+  expect(decision.matrixSource).toBe("file");
   expect(decision.fallback).toBe(false);
   expect(decision.guardRequired).toBe(false);
   expect(decision.fenced).toEqual([]);
@@ -244,4 +246,20 @@ test("agent-exec rejects a missing or invalid difficulty and mode", async () => 
   } finally {
     console.error = originalError;
   }
+});
+
+test("a route from an isolated home without a matrix file reports the built-in default", () => {
+  const missing = join(home, "no-such-dir", "routing-matrix.json");
+  process.env.ROUTINES_ROUTING_MATRIX_PATH = missing;
+  const decision = routeAgent({ difficulty: "hard", mode: "read", situations: [] });
+  expect(decision.matrixPath).toBe(missing);
+  expect(decision.matrixSource).toBe("default");
+  expect(decision.matrixVersion).toBe(1);
+});
+
+test("the matrix path follows ROUTINES_HOME when no explicit path is set", () => {
+  delete process.env.ROUTINES_ROUTING_MATRIX_PATH;
+  const decision = routeAgent({ difficulty: "normal", mode: "read", situations: [] });
+  expect(decision.matrixPath).toBe(join(home, "routing-matrix.json"));
+  expect(decision.matrixSource).toBe("file");
 });

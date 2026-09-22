@@ -48,6 +48,11 @@ test("exact session recovery crosses a process boundary and consumes the prior a
   expect(record.sessionId).toBe("fixture-session");
   expect(record.inputTokens).toBe(17);
   expect(record.costUsd).toBeNull();
+  // The exit code and outcome sit next to the model counters (same values as meta.json).
+  const meta = JSON.parse(readFileSync(join(f.previous, "meta.json"), "utf8"));
+  expect(record.exitCode).toBe(1);
+  expect(record.exitCode).toBe(meta.exitCode);
+  expect(record.outcome).toBe(meta.outcome);
   const result = f.run(f.previous);
   expect(result.stderr).not.toContain("resume refused");
   expect(result.status).toBe(0);

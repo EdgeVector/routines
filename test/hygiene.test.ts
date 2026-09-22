@@ -777,6 +777,19 @@ describe("prompt doctor probe", () => {
 });
 
 describe("throttled launchd band detection", () => {
+  // runHygiene runs the host prompt doctor unless told otherwise. That real
+  // process probe took these tests past the 5s budget under host load
+  // (papercut-routines-full-test-host-timeouts-20260922). The band check does
+  // not need it, so point the doctor at an absent path.
+  const prevDoctor = process.env.ROUTINES_PROMPT_DOCTOR_BIN;
+  beforeEach(() => {
+    process.env.ROUTINES_PROMPT_DOCTOR_BIN = join(tmpdir(), "routines-absent-prompt-doctor");
+  });
+  afterEach(() => {
+    if (prevDoctor === undefined) delete process.env.ROUTINES_PROMPT_DOCTOR_BIN;
+    else process.env.ROUTINES_PROMPT_DOCTOR_BIN = prevDoctor;
+  });
+
   test("the hygiene plist is not throttled", () => {
     // StartInterval 3600 with a coalesced timer fired every 7-8 hours;
     // routine-fleet-health logged that stall seven times and never found it,

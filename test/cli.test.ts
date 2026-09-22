@@ -147,3 +147,23 @@ test("import writes fresh entries paused and force re-import keeps them paused",
   }
   expect(logs).toContain("imported-routine\tpaused\tcodex/gpt-5.6-terra\tFREQ=DAILY;BYHOUR=3;BYMINUTE=0;BYSECOND=0");
 });
+
+test("import --help prints import usage and exits 0 instead of Unknown option", async () => {
+  for (const flag of ["--help", "-h"]) {
+    const logs: string[] = [];
+    const originalLog = console.log;
+    console.log = (value?: unknown, ...rest: unknown[]) => {
+      logs.push([value, ...rest].map(String).join(" "));
+    };
+    try {
+      expect(await main(["import", flag])).toBe(0);
+    } finally {
+      console.log = originalLog;
+    }
+    const out = logs.join("\n");
+    expect(out).toContain("Usage: routines import");
+    expect(out).toContain("--write");
+    expect(out).toContain("--codex-dir");
+    expect(out).toContain("--claude-registry");
+  }
+});

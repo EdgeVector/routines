@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -33,6 +33,12 @@ const CLAUDE_API_DISCONNECT =
 
 let home: string;
 const savedEnv = { ...process.env };
+// These tests spawn real stub harness processes through runRoutine. Under host
+// load (48 agents, load avg ~100) the default 5s budget timed out, and a
+// timed-out test left its run going, so the next tests failed too
+// (papercut-routines-full-test-host-timeouts-20260922). Give every test in this
+// file the 30s budget the slowest spawning tests here already used.
+setDefaultTimeout(30_000);
 
 function stub(path: string, body: string): string {
   writeFileSync(path, body);
