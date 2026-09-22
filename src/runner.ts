@@ -1342,6 +1342,12 @@ export function enrichGateEnv(
   base: NodeJS.ProcessEnv,
 ): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...base };
+  // A shared gate script (last-stack-janitor-lag-gate and friends) keys its
+  // state by routine id and reads ROUTINE_ID when the registry passes no
+  // positional. Nothing set it, so every janitor gate exited 2 (usage) on
+  // every fire and card-reaper / worktree-cleanup never ran.
+  // papercut-routinesd-janitor-gate-invoked-without-routine-id-kills-card-reaper-20260922
+  if (!env.ROUTINE_ID) env.ROUTINE_ID = entry.id;
   const id = entry.id.toLowerCase();
   if (
     id.includes("north-star-rollup") &&

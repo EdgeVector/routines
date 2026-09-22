@@ -841,6 +841,31 @@ describe("enrichGateEnv", () => {
     );
     expect(env.LAST_STACK_NORTH_STAR_DASHBOARD_CMD_TIMEOUT).toBe("45");
   });
+
+  const janitorEntry = {
+    id: "last-stack-card-reaper",
+    harness: "codex",
+    model: "x",
+    resolvedBy: "pin",
+    rrule: "FREQ=HOURLY",
+    parsedRrule: { freq: "HOURLY" } as never,
+    cwd: "/",
+    status: "active",
+    timeoutMin: 20,
+    sourcePath: "/tmp/x.toml",
+  } as const;
+
+  test("exports ROUTINE_ID so a shared gate knows which routine it gates", async () => {
+    const { enrichGateEnv } = await import("../src/runner.ts");
+    const env = enrichGateEnv(janitorEntry as never, { PATH: "/usr/bin" });
+    expect(env.ROUTINE_ID).toBe("last-stack-card-reaper");
+  });
+
+  test("keeps an explicit ROUTINE_ID", async () => {
+    const { enrichGateEnv } = await import("../src/runner.ts");
+    const env = enrichGateEnv(janitorEntry as never, { ROUTINE_ID: "other" });
+    expect(env.ROUTINE_ID).toBe("other");
+  });
 });
 
 describe("child env Claude credential", () => {
