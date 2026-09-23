@@ -284,7 +284,7 @@ function cmdList(rest: string[]): number {
   }
   if (entries.length === 0) console.log(`(no routines in ${registryDir()})`);
   for (const e of entries) {
-    console.log(`${e.id}\t${e.status}\t${e.harness}/${e.model}\t${e.rrule}`);
+    console.log(`${e.id}\t${e.status}\t${e.harness}/${e.model}\t${e.rrule}\t${routeSource(e)}`);
   }
   for (const err of errors) console.error(`ERROR ${err.message}`);
   return errors.length > 0 ? 1 : 0;
@@ -1149,11 +1149,22 @@ if (import.meta.main) {
 // Exported for tests / embedding.
 export { main, summarize };
 
+/**
+ * Explicit `pin = true` prints `pin`. Every other entry prints
+ * `matrix:<difficulty>`, or `matrix:-` when no difficulty is set.
+ * Legacy harness/model rows are not pins unless the file sets `pin = true`.
+ */
+function routeSource(e: RoutineEntry): string {
+  if (e.routingPin === true) return "pin";
+  return `matrix:${e.difficulty ?? "-"}`;
+}
+
 function summarize(e: RoutineEntry) {
   return {
     id: e.id,
     harness: e.harness,
     model: e.model,
+    route_source: routeSource(e),
     effort: e.effort ?? null,
     tier: e.tier ?? null,
     rrule: e.rrule,
