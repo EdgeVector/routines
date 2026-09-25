@@ -224,7 +224,7 @@ describe("cache scope", () => {
     // This module's flag has already been set by beforeEach, so asking it here
     // would prove nothing. Read the DEFAULT out of a fresh interpreter.
     const probe = join(dir, "default-probe.ts");
-    const mod = new URL("../src/situations.ts", import.meta.url).pathname;
+    const mod = Bun.fileURLToPath(new URL("../src/situations.ts", import.meta.url));
     writeFileSync(
       probe,
       `import { situationsCacheEnabled } from ${JSON.stringify(mod)};\n` +

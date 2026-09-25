@@ -94,11 +94,15 @@ describe("runRoutine heartbeat handling", () => {
       join(home, "registry", "matrix-run.toml"),
       'difficulty = "fast"\nrrule = "FREQ=DAILY"\nprompt = "hi"\n',
     );
-    const pinnedRoutes = [["smoke-claude", "claude"], ["smoke-codex", "codex"], ["smoke-grok", "grok"]] as const;
-    for (const [id, harness] of pinnedRoutes) {
+    const pinnedRoutes = [
+      ["smoke-claude", "claude", "opus"],
+      ["smoke-codex", "codex", "gpt-5.6-terra"],
+      ["smoke-grok", "grok", "grok-4.6"],
+    ] as const;
+    for (const [id, harness, model] of pinnedRoutes) {
       writeFileSync(
         join(home, "registry", `${id}.toml`),
-        `pin = true\nharness = "${harness}"\nmodel = "pinned-${harness}"\nrrule = "FREQ=DAILY"\nprompt = "hi"\n`,
+        `pin = true\nharness = "${harness}"\nmodel = "${model}"\nrrule = "FREQ=DAILY"\nprompt = "hi"\n`,
       );
     }
 
@@ -115,7 +119,7 @@ describe("runRoutine heartbeat handling", () => {
       harness: "codex",
       model: "c-fast",
     });
-    for (const [id, harness] of pinnedRoutes) {
+    for (const [id, harness, _model] of pinnedRoutes) {
       const result = await runRoutine(loadEntry(id), { quiet: true, noFallback: true, trigger: "manual" });
       const meta = JSON.parse(readFileSync(join(result.runDir, "meta.json"), "utf8"));
       expect(meta.resolvedBy).toBe("pin");

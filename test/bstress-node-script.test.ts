@@ -9,7 +9,7 @@ const scriptPath = new URL("../scripts/bstress-node.sh", import.meta.url);
 const execFileAsync = promisify(execFile);
 
 async function runScript(statePath: string, ...args: string[]) {
-  const { stdout, stderr } = await execFileAsync("bash", [scriptPath.pathname, ...args], {
+  const { stdout, stderr } = await execFileAsync("bash", [Bun.fileURLToPath(scriptPath), ...args], {
     env: { ...process.env, BSTRESS_STATE: statePath },
     timeout: 2_000,
   });
