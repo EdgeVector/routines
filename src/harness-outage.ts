@@ -692,7 +692,11 @@ function upsertSituation(
     scope_systems: [`harness:${entry.harness}`],
     scope_routines: scopeRoutines,
     blocked_actions: [`dispatch-${entry.harness}-agents`],
-    requires_human_clearance: false,
+    // `situations put` types this as a list of action names and rejects a
+    // boolean ("List fields must be arrays of strings"). With `false` every
+    // upsert failed, the Situation expired, and the route engine (which reads
+    // only the ledger) kept dispatching Loom work to an out-of-credit harness.
+    requires_human_clearance: [],
     preflight_message:
       `The ${entry.harness} harness is out of service (${outage.kind}). ` +
       (fenced

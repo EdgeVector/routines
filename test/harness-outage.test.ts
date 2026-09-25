@@ -544,6 +544,8 @@ describe("handleHarnessOutage via escalateRoutineError", () => {
     expect(sit.blocked_actions).toEqual(["dispatch-claude-agents"]);
     expect(sit.blocked_actions).not.toContain("dispatch-grok-agents");
     expect(sit.expires_at).toBe("2026-08-29T18:00:00.000Z");
+    // situations put rejects a boolean here (2026-09-25 grok/codex fences never landed).
+    expect(sit.requires_human_clearance).toEqual([]);
   });
 
   test("claude outage while codex primaries are on fallback fences the whole substituted fleet", () => {
