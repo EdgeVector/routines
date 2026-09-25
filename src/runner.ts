@@ -24,7 +24,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 
-import { buildInvocation, type HarnessInvocation } from "./adapters.ts";
+import { buildInvocation, filterHarnessEnv, type HarnessInvocation } from "./adapters.ts";
 import { ExecutionCollector, type ExecutionRecord } from "./execution-record.ts";
 import { claimResume, recoveryTaskHash, validateResume, worktreeIdentity } from "./session-recovery.ts";
 import {
@@ -74,6 +74,7 @@ import {
   shouldEscalate,
 } from "./error-escalate.ts";
 import { enrichWorktreeCleanupLivenessEnv } from "./worktree-liveness.ts";
+import { ModelValidationError, validateModel } from "./models.ts";
 
 export interface RunResult {
   id: string;
@@ -872,6 +873,7 @@ async function runOnce(
   // Prompt after runDir so the envelope can name Run directory / Run-Id trailers.
   const prompt = resolveDispatchPrompt(entry, { runDir });
   const invocation = buildInvocation(entry, prompt, sessionId);
+
   writeRunFile(join(runDir, "prompt.txt"), prompt);
   // Empty logs so mid-flight `tail -f` works even before first chunk.
   writeRunFile(join(runDir, "stdout.log"), "");
@@ -903,6 +905,34 @@ async function runOnce(
     gateSkippedHarness: false,
   });
 
+  // Validate that the model is known and live before spawning the harness.
+  // Skip for gate commands: gates don't need a harness and may bypass it entirely.
+  if (!entry.gateCommand) {
+    try {
+      validateModel(entry.harness, entry.model);
+    } catch (err) {
+      if (err instanceof ModelValidationError) {
+        const now = new Date().toISOString();
+        writeRunFile(join(runDir, "stderr.log"), `Model validation failed: ${err.message}\n`);
+        return {
+          id: entry.id,
+          runDir,
+          invocation,
+          exitCode: 2,
+          signal: null,
+          timedOut: false,
+          startedAt: startedAt.toISOString(),
+          finishedAt: now,
+          durationMs: Date.parse(now) - Date.parse(startedAt.toISOString()),
+          heartbeat: { attempted: false, ok: true },
+          outcome: { kind: "error", detail: `model-validation-failed: ${err.message}`, source: "routine_result" },
+          harnessPid: null,
+        };
+      }
+      throw err;
+    }
+  }
+
   const configuredEnv = { ...process.env, ...envFromProjectConfig(project) };
   // Claude legs: hand the child a credential that does not go through the
   // macOS login keychain (CLAUDE_CODE_OAUTH_TOKEN from LastSecrets). See
@@ -928,15 +958,18 @@ async function runOnce(
       /* ignore */
     }
   }
-  const childEnv = enrichWorktreeCleanupLivenessEnv(
-    entry.id,
-    stripUnresolvedSentryLocators(
-      enrichGateEnv(entry, {
-        ...configuredEnv,
-        ...(claudeAuth?.env ?? {}),
-        ...discoveredRoutineSocketEnv(configuredEnv),
-        ...buildRoutineAttributionEnv(entry.id, runDir),
-      }),
+  const childEnv = filterHarnessEnv(
+    entry.harness,
+    enrichWorktreeCleanupLivenessEnv(
+      entry.id,
+      stripUnresolvedSentryLocators(
+        enrichGateEnv(entry, {
+          ...configuredEnv,
+          ...(claudeAuth?.env ?? {}),
+          ...discoveredRoutineSocketEnv(configuredEnv),
+          ...buildRoutineAttributionEnv(entry.id, runDir),
+        }),
+      ),
     ),
   );
 

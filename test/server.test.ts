@@ -16,7 +16,7 @@ let home: string;
 let server: ServerHandle;
 let stubHarness: string;
 let stubSituations: string;
-const statusCommand = [process.execPath, new URL("./fixtures/status-command.ts", import.meta.url).pathname];
+const statusCommand = [process.execPath, Bun.fileURLToPath(new URL("./fixtures/status-command.ts", import.meta.url))];
 
 beforeAll(() => {
   // A stub harness that exits 0 quickly — no API credits, but the full

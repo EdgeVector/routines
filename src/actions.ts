@@ -7,6 +7,7 @@ import { acquireLock, isLocked, releaseLock } from "./daemon.ts";
 import { setKeys } from "./edit.ts";
 import { isHarness, loadEntry, type RoutineEntry, type Status } from "./registry.ts";
 import { runRoutine, type RunResult } from "./runner.ts";
+import { ModelValidationError, validateModel } from "./models.ts";
 
 /** Pause or resume a routine by rewriting its `status` key in place. Returns the
  * reloaded entry (validates the write round-trips). */
@@ -26,18 +27,33 @@ export class ActionError extends Error {}
  * registry TOML in place (comments + unrelated lines survive). */
 export function routeRoutine(entry: RoutineEntry, update: RouteUpdate): RoutineEntry {
   const updates: Record<string, string | boolean> = { pin: true };
+  let targetHarness = entry.harness;
+  let targetModel = entry.model;
+
   if (update.harness !== undefined && update.harness !== "") {
     if (!isHarness(update.harness)) {
       throw new ActionError(`invalid harness: ${update.harness} (claude|codex|grok)`);
     }
     updates.harness = update.harness;
+    targetHarness = update.harness;
   }
   if (update.model !== undefined && update.model !== "") {
     updates.model = update.model;
+    targetModel = update.model;
   }
   if (Object.keys(updates).length === 1) {
     throw new ActionError("nothing to change (set harness and/or model)");
   }
+
+  try {
+    validateModel(targetHarness, targetModel);
+  } catch (err) {
+    if (err instanceof ModelValidationError) {
+      throw new ActionError(err.message);
+    }
+    throw err;
+  }
+
   setKeys(entry.sourcePath, updates);
   return loadEntry(entry.id);
 }

@@ -6,8 +6,8 @@
 // Fallback is ephemeral — registry TOML is never rewritten.
 //
 // Disable with ROUTINES_FALLBACK=0. Override fleet tail with
-// ROUTINES_FALLBACK_CHAIN=claude:sonnet,grok:grok-4.5 or per-routine
-// `fallback = "claude:sonnet,grok:grok-4.5"` in the registry TOML.
+// ROUTINES_FALLBACK_CHAIN=claude:sonnet,grok:grok-4.6 or per-routine
+// `fallback = "claude:sonnet,grok:grok-4.6"` in the registry TOML.
 
 import type { Harness, RoutineEntry } from "./registry.ts";
 import { isHarness } from "./registry.ts";
@@ -22,7 +22,7 @@ export interface RouteStep {
 export const DEFAULT_HARNESS_MODELS: Record<Harness, string> = {
   claude: "sonnet",
   codex: "gpt-5.5",
-  grok: "grok-4.5",
+  grok: "grok-4.6",
   gemini: "gemini-3.7-flash",
 };
 
@@ -39,7 +39,7 @@ export function fallbackEnabled(): boolean {
 }
 
 /**
- * Parse a chain string like `claude:sonnet,grok:grok-4.5` or `claude/sonnet`.
+ * Parse a chain string like `claude:sonnet,grok:grok-4.6` or `claude/sonnet`.
  * Invalid tokens are skipped (never throw — registry/env typos must not kill
  * the daemon).
  */

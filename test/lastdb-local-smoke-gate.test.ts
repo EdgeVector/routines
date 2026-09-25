@@ -3,7 +3,7 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const scriptPath = new URL("../scripts/lastdb-local-smoke-gate.sh", import.meta.url).pathname;
+const scriptPath = Bun.fileURLToPath(new URL("../scripts/lastdb-local-smoke-gate.sh", import.meta.url));
 const roots: string[] = [];
 
 afterEach(() => {

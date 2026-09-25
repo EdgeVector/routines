@@ -52,13 +52,13 @@ describe("parseEntry", () => {
   test("accepts grok harness", () => {
     const text = [
       'harness = "grok"',
-      'model = "grok-4.5"',
+      'model = "grok-4.6"',
       'rrule = "FREQ=DAILY"',
       'prompt = "hi"',
     ].join("\n");
     const e = parseEntry(text, "/x/g.toml");
     expect(e.harness).toBe("grok");
-    expect(e.model).toBe("grok-4.5");
+    expect(e.model).toBe("grok-4.6");
   });
 
   test("parses gemini harness", () => {

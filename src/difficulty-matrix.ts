@@ -43,17 +43,17 @@ export const DEFAULT_DIFFICULTY_MATRIX: DifficultyMatrix = {
   providerOrder: ["grok", "codex", "claude"],
   matrix: {
     fast: {
-      grok: { model: "grok-4.5" },
+      grok: { model: "grok-4.6" },
       codex: { model: "gpt-5.6-luna" },
       claude: { model: "haiku" },
     },
     normal: {
-      grok: { model: "grok-4.5" },
+      grok: { model: "grok-4.6" },
       codex: { model: "gpt-5.6-terra" },
       claude: { model: "sonnet" },
     },
     hard: {
-      grok: { model: "grok-4.5" },
+      grok: { model: "grok-4.6" },
       codex: { model: "gpt-5.6-sol" },
       claude: { model: "opus" },
     },

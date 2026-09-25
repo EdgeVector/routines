@@ -7,8 +7,8 @@ import { promisify } from "node:util";
 import { describe, expect, test } from "bun:test";
 
 const execFileAsync = promisify(execFile);
-const installShimSrc = new URL("../scripts/install-shim.sh", import.meta.url).pathname;
-const buildArtifactSrc = new URL("../scripts/build-artifact.sh", import.meta.url).pathname;
+const installShimSrc = Bun.fileURLToPath(new URL("../scripts/install-shim.sh", import.meta.url));
+const buildArtifactSrc = Bun.fileURLToPath(new URL("../scripts/build-artifact.sh", import.meta.url));
 
 /** Gate files install-shim.sh symlinks into the install bin, and the PATH name each gets. */
 const GATES: Array<[file: string, name: string]> = [
