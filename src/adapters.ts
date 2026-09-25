@@ -220,6 +220,19 @@ export function codexWritableDirs(): string[] {
   return out;
 }
 
+export function filterHarnessEnv(harness: Harness, env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = { ...env };
+
+  if (harness === "grok") {
+    // Remove Codex sandbox-specific variables so Grok does not inherit
+    // Codex's shell identity when running after a Codex routine.
+    delete out["CODEX_SANDBOX_WORKSPACE_DIR"];
+    delete out["CODEX_SANDBOX_FALLBACK_DIR"];
+  }
+
+  return out;
+}
+
 // Render the invocation with the (potentially huge) prompt argument elided so
 // run logs stay readable and never leak a full prompt into a one-line summary.
 function displayArgs(bin: string, args: string[]): string {

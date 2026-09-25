@@ -24,7 +24,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 
-import { buildInvocation, type HarnessInvocation } from "./adapters.ts";
+import { buildInvocation, filterHarnessEnv, type HarnessInvocation } from "./adapters.ts";
 import { ExecutionCollector, type ExecutionRecord } from "./execution-record.ts";
 import { claimResume, recoveryTaskHash, validateResume, worktreeIdentity } from "./session-recovery.ts";
 import {
@@ -74,6 +74,7 @@ import {
   shouldEscalate,
 } from "./error-escalate.ts";
 import { enrichWorktreeCleanupLivenessEnv } from "./worktree-liveness.ts";
+import { ModelValidationError, validateModel } from "./models.ts";
 
 export interface RunResult {
   id: string;
@@ -872,6 +873,33 @@ async function runOnce(
   // Prompt after runDir so the envelope can name Run directory / Run-Id trailers.
   const prompt = resolveDispatchPrompt(entry, { runDir });
   const invocation = buildInvocation(entry, prompt, sessionId);
+
+  // Validate that the model is known and live before spawning the harness.
+  try {
+    validateModel(entry.harness, entry.model);
+  } catch (err) {
+    if (err instanceof ModelValidationError) {
+      const now = new Date().toISOString();
+      writeRunFile(join(runDir, "stdout.log"), "");
+      writeRunFile(join(runDir, "stderr.log"), `Model validation failed: ${err.message}\n`);
+      return {
+        id: entry.id,
+        runDir,
+        invocation,
+        exitCode: 2,
+        signal: null,
+        timedOut: false,
+        startedAt: startedAt.toISOString(),
+        finishedAt: now,
+        durationMs: Date.parse(now) - Date.parse(startedAt.toISOString()),
+        heartbeat: "fail" as HeartbeatOutcome,
+        outcome: { status: "fail", reason: "model-validation-failed" },
+        harnessPid: null,
+      };
+    }
+    throw err;
+  }
+
   writeRunFile(join(runDir, "prompt.txt"), prompt);
   // Empty logs so mid-flight `tail -f` works even before first chunk.
   writeRunFile(join(runDir, "stdout.log"), "");
@@ -928,15 +956,18 @@ async function runOnce(
       /* ignore */
     }
   }
-  const childEnv = enrichWorktreeCleanupLivenessEnv(
-    entry.id,
-    stripUnresolvedSentryLocators(
-      enrichGateEnv(entry, {
-        ...configuredEnv,
-        ...(claudeAuth?.env ?? {}),
-        ...discoveredRoutineSocketEnv(configuredEnv),
-        ...buildRoutineAttributionEnv(entry.id, runDir),
-      }),
+  const childEnv = filterHarnessEnv(
+    entry.harness,
+    enrichWorktreeCleanupLivenessEnv(
+      entry.id,
+      stripUnresolvedSentryLocators(
+        enrichGateEnv(entry, {
+          ...configuredEnv,
+          ...(claudeAuth?.env ?? {}),
+          ...discoveredRoutineSocketEnv(configuredEnv),
+          ...buildRoutineAttributionEnv(entry.id, runDir),
+        }),
+      ),
     ),
   );
 
