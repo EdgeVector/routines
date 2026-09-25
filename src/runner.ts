@@ -892,8 +892,8 @@ async function runOnce(
         startedAt: startedAt.toISOString(),
         finishedAt: now,
         durationMs: Date.parse(now) - Date.parse(startedAt.toISOString()),
-        heartbeat: "fail" as HeartbeatOutcome,
-        outcome: { status: "fail", reason: "model-validation-failed" },
+        heartbeat: { attempted: false, ok: true },
+        outcome: { kind: "error", detail: `model-validation-failed: ${err.message}`, source: "routine_result" },
         harnessPid: null,
       };
     }

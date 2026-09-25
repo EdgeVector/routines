@@ -14,7 +14,7 @@ const STRICT_HARNESSES = new Set<Harness>(["grok"]);
 export const KNOWN_MODELS: Record<Harness, Set<string>> = {
   claude: new Set(["haiku", "sonnet", "opus"]),
   codex: new Set(["gpt-5.5", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"]),
-  grok: new Set(["grok-4.5"]),
+  grok: new Set(["grok-4.6"]),
   gemini: new Set(["gemini-3.7-flash", "gemini-3.1-pro"]),
 };
 

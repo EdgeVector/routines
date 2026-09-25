@@ -77,7 +77,7 @@ export interface RoutineEntry {
   group?: string;
   /**
    * Optional comma-separated fallback chain after primary, e.g.
-   * `claude:sonnet,grok:grok-4.5`. When unset, fleet default applies.
+   * `claude:sonnet,grok:grok-4.6`. When unset, fleet default applies.
    */
   fallback?: string;
   /**

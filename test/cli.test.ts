@@ -76,7 +76,7 @@ test("list prints pin or matrix route source without changing columns 1-4", asyn
   const text = await captureLogs(() => main(["list"]));
   expect(text).toContain("alpha\tactive\tcodex/gpt-5\tFREQ=HOURLY\tmatrix:-");
   expect(text).toContain(
-    "matrix-fast\tactive\tgrok/grok-4.5\tFREQ=DAILY;BYHOUR=4;BYMINUTE=0\tmatrix:fast",
+    "matrix-fast\tactive\tgrok/grok-4.6\tFREQ=DAILY;BYHOUR=4;BYMINUTE=0\tmatrix:fast",
   );
   expect(text).toContain("smoke-pinned\tpaused\tcodex/gpt-5.6-luna\tFREQ=HOURLY\tpin");
   const byLine = Object.fromEntries(text.map((line) => [line.split("\t")[0], line.split("\t")]));
@@ -84,7 +84,7 @@ test("list prints pin or matrix route source without changing columns 1-4", asyn
   expect(byLine["matrix-fast"].slice(0, 4)).toEqual([
     "matrix-fast",
     "active",
-    "grok/grok-4.5",
+    "grok/grok-4.6",
     "FREQ=DAILY;BYHOUR=4;BYMINUTE=0",
   ]);
   expect(byLine["smoke-pinned"].slice(0, 4)).toEqual([
@@ -108,7 +108,7 @@ test("list prints pin or matrix route source without changing columns 1-4", asyn
   );
   expect(
     `${byId["matrix-fast"].id}\t${byId["matrix-fast"].status}\t${byId["matrix-fast"].harness}/${byId["matrix-fast"].model}\t${byId["matrix-fast"].rrule}`,
-  ).toBe("matrix-fast\tactive\tgrok/grok-4.5\tFREQ=DAILY;BYHOUR=4;BYMINUTE=0");
+  ).toBe("matrix-fast\tactive\tgrok/grok-4.6\tFREQ=DAILY;BYHOUR=4;BYMINUTE=0");
   expect(
     `${byId["smoke-pinned"].id}\t${byId["smoke-pinned"].status}\t${byId["smoke-pinned"].harness}/${byId["smoke-pinned"].model}\t${byId["smoke-pinned"].rrule}`,
   ).toBe("smoke-pinned\tpaused\tcodex/gpt-5.6-luna\tFREQ=HOURLY");

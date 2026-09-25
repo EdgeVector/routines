@@ -167,7 +167,7 @@ function environmentVariables(plist: string): Record<string, string> {
 }
 
 const WRAPPER = "/Users/test/.routines/daemon/routinesd-launch.sh";
-const CHAIN = "codex:gpt-5.6-terra,claude:sonnet,grok:grok-4.5";
+const CHAIN = "codex:gpt-5.6-terra,claude:sonnet,grok:grok-4.6";
 
 describe("routinesd launch wrapper", () => {
   // The regression this file exists for: `renderPlist` emitted
@@ -245,7 +245,7 @@ describe("ROUTINES_FALLBACK_CHAIN from local-env.sh", () => {
   test("the last assignment wins and comments are ignored", () => {
     const shell = [
       `# export ROUTINES_FALLBACK_CHAIN="claude:sonnet"`,
-      `export ROUTINES_FALLBACK_CHAIN="grok:grok-4.5"`,
+      `export ROUTINES_FALLBACK_CHAIN="grok:grok-4.6"`,
       `export ROUTINES_FALLBACK_CHAIN='${CHAIN}'`,
     ].join("\n");
     expect(parseFallbackChainAssignment(shell)).toBe(CHAIN);

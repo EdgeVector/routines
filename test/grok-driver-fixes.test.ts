@@ -48,7 +48,7 @@ test("Defect 1: Unknown grok model ID is caught at routing time", () => {
 
 test("Defect 1: Valid grok model passes validation", () => {
   // Should not throw
-  expect(() => validateModel("grok", "grok-4.5")).not.toThrow();
+  expect(() => validateModel("grok", "grok-4.6")).not.toThrow();
 });
 
 test("Defect 1: Route command rejects unknown grok model with clear error", () => {
@@ -115,12 +115,12 @@ test("Defect 2: Non-Grok harnesses do not filter environment", () => {
 });
 
 test("Defect 3: Grok adapter still builds invocation with valid model", () => {
-  const e = entry("grok", "grok-4.5");
+  const e = entry("grok", "grok-4.6");
   const inv = buildInvocation(e, "test prompt");
 
   expect(inv.bin).toBe("grok");
   expect(inv.args).toContain("-m");
-  expect(inv.args).toContain("grok-4.5");
+  expect(inv.args).toContain("grok-4.6");
   expect(inv.args).toContain("--always-approve");
   expect(inv.args).toContain("--output-format");
   expect(inv.args).toContain("streaming-json");
@@ -134,6 +134,6 @@ test("Fixture: Model validation happens before harness spawn (pre-flight check)"
   expect(() => validateModel(invalidGrokEntry.harness, invalidGrokEntry.model)).toThrow();
 
   // With valid model, no error
-  const validGrokEntry = entry("grok", "grok-4.5");
+  const validGrokEntry = entry("grok", "grok-4.6");
   expect(() => validateModel(validGrokEntry.harness, validGrokEntry.model)).not.toThrow();
 });

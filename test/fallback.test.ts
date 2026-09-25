@@ -104,9 +104,9 @@ afterEach(() => {
 
 describe("parseFallbackChain / buildRouteChain", () => {
   test("parses colon and slash forms", () => {
-    expect(parseFallbackChain("claude:sonnet,grok/grok-4.5")).toEqual([
+    expect(parseFallbackChain("claude:sonnet,grok/grok-4.6")).toEqual([
       { harness: "claude", model: "sonnet" },
-      { harness: "grok", model: "grok-4.5" },
+      { harness: "grok", model: "grok-4.6" },
     ]);
   });
 
@@ -115,7 +115,7 @@ describe("parseFallbackChain / buildRouteChain", () => {
     expect(chain.map((s) => `${s.harness}/${s.model}`)).toEqual([
       "codex/gpt-5.5",
       "claude/sonnet",
-      "grok/grok-4.5",
+      "grok/grok-4.6",
     ]);
     expect(DEFAULT_FALLBACK_TAIL[0]!.harness).toBe("claude");
   });
@@ -132,10 +132,10 @@ describe("parseFallbackChain / buildRouteChain", () => {
   });
 
   test("per-routine fallback string overrides fleet default", () => {
-    const chain = buildRouteChain(baseEntry({ fallback: "grok:grok-4.5" }));
+    const chain = buildRouteChain(baseEntry({ fallback: "grok:grok-4.6" }));
     expect(chain.map((s) => `${s.harness}/${s.model}`)).toEqual([
       "codex/gpt-5.5",
-      "grok/grok-4.5",
+      "grok/grok-4.6",
     ]);
   });
 
@@ -146,11 +146,11 @@ describe("parseFallbackChain / buildRouteChain", () => {
         'model = "gpt-5.5"',
         'rrule = "FREQ=HOURLY"',
         'prompt = "hi"',
-        'fallback = "claude:sonnet,grok:grok-4.5"',
+        'fallback = "claude:sonnet,grok:grok-4.6"',
       ].join("\n"),
       "/x/demo.toml",
     );
-    expect(e.fallback).toBe("claude:sonnet,grok:grok-4.5");
+    expect(e.fallback).toBe("claude:sonnet,grok:grok-4.6");
   });
 });
 
@@ -165,7 +165,7 @@ describe("fallback timeout scaling", () => {
   test("a non-primary leg is scaled, and 20 becomes 30", () => {
     // The measured case: grok primary at timeout_min = 20, claude leg ran
     // 23m19s and was killed at 20. 1.5x clears it.
-    const entry = baseEntry({ harness: "grok", model: "grok-4.5", timeoutMin: 20 });
+    const entry = baseEntry({ harness: "grok", model: "grok-4.6", timeoutMin: 20 });
     const claude = buildRouteChain(entry).find((s) => s.harness === "claude")!;
     expect(timeoutMinForRoute(entry, claude)).toBe(30);
     expect(entryForRoute(entry, claude).timeoutMin).toBe(30);
@@ -175,19 +175,19 @@ describe("fallback timeout scaling", () => {
   test("scale 1 is an exact no-op, including a fractional budget", () => {
     // Rounding here would make the disable path a behaviour change of its own.
     process.env.ROUTINES_FALLBACK_TIMEOUT_SCALE = "1";
-    const entry = baseEntry({ harness: "grok", model: "grok-4.5", timeoutMin: 0.02 });
+    const entry = baseEntry({ harness: "grok", model: "grok-4.6", timeoutMin: 0.02 });
     const claude = buildRouteChain(entry).find((s) => s.harness === "claude")!;
     expect(timeoutMinForRoute(entry, claude)).toBe(0.02);
   });
 
   test("a fractional budget scales without rounding", () => {
-    const entry = baseEntry({ harness: "grok", model: "grok-4.5", timeoutMin: 25 });
+    const entry = baseEntry({ harness: "grok", model: "grok-4.6", timeoutMin: 25 });
     const claude = buildRouteChain(entry).find((s) => s.harness === "claude")!;
     expect(timeoutMinForRoute(entry, claude)).toBe(37.5);
   });
 
   test("ROUTINES_FALLBACK_TIMEOUT_SCALE overrides, clamped to [1, 4]", () => {
-    const entry = baseEntry({ harness: "grok", model: "grok-4.5", timeoutMin: 10 });
+    const entry = baseEntry({ harness: "grok", model: "grok-4.6", timeoutMin: 10 });
     const claude = buildRouteChain(entry).find((s) => s.harness === "claude")!;
 
     process.env.ROUTINES_FALLBACK_TIMEOUT_SCALE = "2";
@@ -207,7 +207,7 @@ describe("fallback timeout scaling", () => {
   });
 
   test("the zero-LLM gate keeps the primary budget on a scaled leg", () => {
-    const entry = baseEntry({ harness: "grok", model: "grok-4.5", timeoutMin: 5 });
+    const entry = baseEntry({ harness: "grok", model: "grok-4.6", timeoutMin: 5 });
     const claude = buildRouteChain(entry).find((s) => s.harness === "claude")!;
     const legEntry = entryForRoute(entry, claude);
 
@@ -339,7 +339,7 @@ exit 0
 
 describe("runRoutine same-run fallback", () => {
   test("all fenced routes return a clean no-dispatch result", async () => {
-    process.env.ROUTINES_FALLBACK_CHAIN = "claude:sonnet,grok:grok-4.5";
+    process.env.ROUTINES_FALLBACK_CHAIN = "claude:sonnet,grok:grok-4.6";
     for (const harness of ["codex", "claude", "grok"]) markHarnessOutaged(harness);
 
     const result = await runRoutine(baseEntry({ prompt: "hello" }), {
@@ -363,7 +363,7 @@ describe("runRoutine same-run fallback", () => {
   });
 
   test("an all-fenced routine still runs its zero-LLM gate", async () => {
-    process.env.ROUTINES_FALLBACK_CHAIN = "claude:sonnet,grok:grok-4.5";
+    process.env.ROUTINES_FALLBACK_CHAIN = "claude:sonnet,grok:grok-4.6";
     for (const harness of ["codex", "claude", "grok"]) markHarnessOutaged(harness);
     const gateMarker = join(home, "gate-ran");
     const gate = stub(
@@ -393,7 +393,7 @@ describe("runRoutine same-run fallback", () => {
   });
 
   test("an exit-10 gate cannot dispatch onto an all-fenced harness", async () => {
-    process.env.ROUTINES_FALLBACK_CHAIN = "claude:sonnet,grok:grok-4.5";
+    process.env.ROUTINES_FALLBACK_CHAIN = "claude:sonnet,grok:grok-4.6";
     for (const harness of ["codex", "claude", "grok"]) markHarnessOutaged(harness);
     const harnessMarker = join(home, "harness-ran");
     process.env.ROUTINES_CODEX_BIN = stub(
@@ -649,7 +649,7 @@ describe("runRoutine same-run fallback", () => {
       join(home, "registry", "demo.toml"),
       [
         'harness = "grok"',
-        'model = "grok-4.5"',
+        'model = "grok-4.6"',
         'rrule = "FREQ=HOURLY"',
         'prompt = "rollup"',
         'fallback = "claude:sonnet"',
@@ -695,7 +695,7 @@ describe("runRoutine same-run fallback", () => {
       join(home, "registry", "demo.toml"),
       [
         'harness = "grok"',
-        'model = "grok-4.5"',
+        'model = "grok-4.6"',
         'rrule = "FREQ=HOURLY"',
         'prompt = "rollup"',
         'fallback = "claude:sonnet"',
@@ -757,7 +757,7 @@ describe("runRoutine same-run fallback", () => {
   // fenced. Claude was reachable. A mutant that returns after the first
   // `outage: true` fails this fixture.
   test("grok 402 + fenced codex still reaches claude in the same fire", async () => {
-    process.env.ROUTINES_FALLBACK_CHAIN = "codex:gpt-5.6-terra,claude:sonnet,grok:grok-4.5";
+    process.env.ROUTINES_FALLBACK_CHAIN = "codex:gpt-5.6-terra,claude:sonnet,grok:grok-4.6";
     process.env.ROUTINES_GROK_BIN = stub(
       join(home, "grok-bin"),
       [
@@ -837,7 +837,7 @@ describe("runRoutine same-run fallback", () => {
   // Claude returned api_error_status 429 "You've hit your weekly limit".
   // Grok was live. meta recorded outage=false and stopped before Grok.
   test("claude weekly-limit 429 + fenced codex still reaches grok in the same fire", async () => {
-    process.env.ROUTINES_FALLBACK_CHAIN = "codex:gpt-5.6-terra,claude:sonnet,grok:grok-4.5";
+    process.env.ROUTINES_FALLBACK_CHAIN = "codex:gpt-5.6-terra,claude:sonnet,grok:grok-4.6";
     const weeklyAssistant = JSON.stringify({
       type: "assistant",
       message: {
@@ -1029,7 +1029,7 @@ describe("runRoutine same-run fallback", () => {
         join(home, "registry", `${id}.toml`),
         [
           'harness = "grok"',
-          'model = "grok-4.5"',
+          'model = "grok-4.6"',
           'rrule = "FREQ=HOURLY"',
           'prompt = "burst"',
           "timeout_min = 0.5",
@@ -1071,7 +1071,7 @@ describe("runRoutine same-run fallback", () => {
       join(home, "registry", "timeout-demo.toml"),
       [
         'harness = "grok"',
-        'model = "grok-4.5"',
+        'model = "grok-4.6"',
         'rrule = "FREQ=HOURLY"',
         'prompt = "slow"',
         "timeout_min = 0.02",
