@@ -38,7 +38,13 @@ const savedEnv = { ...process.env };
 // timed-out test left its run going, so the next tests failed too
 // (papercut-routines-full-test-host-timeouts-20260922). Give every test in this
 // file the 30s budget the slowest spawning tests here already used.
-setDefaultTimeout(30_000);
+// 30s was still too little on the Forge host lane: that runner runs at
+// Background QoS, and during the 2026-09-25 16:2x primary LastDB restarts the
+// one-line `sh` gate in "an all-fenced routine still runs its zero-LLM gate"
+// took 38s to spawn and exit (locally ~0.5s). That red main run skipped the
+// publish job, so routines PR 34 never reached host-track. The budget only
+// bounds a stall; a real hang still fails, 60s later.
+setDefaultTimeout(60_000);
 
 function stub(path: string, body: string): string {
   writeFileSync(path, body);
