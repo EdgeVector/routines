@@ -12,9 +12,9 @@ import type { Harness } from "./registry.ts";
 const STRICT_HARNESSES = new Set<Harness>(["grok"]);
 
 export const KNOWN_MODELS: Record<Harness, Set<string>> = {
-  claude: new Set(["haiku", "sonnet", "opus"]),
-  codex: new Set(["gpt-5.5", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"]),
-  grok: new Set(["grok-4.6"]),
+  claude: new Set(["haiku", "sonnet", "opus", "a-fast", "a-normal", "a-hard", "test-model"]),
+  codex: new Set(["gpt-5.5", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol", "c-fast", "c-normal", "c-hard", "test-model"]),
+  grok: new Set(["grok-4.6", "g-fast", "g-normal", "g-hard", "grok-smoke", "test-model"]),
   gemini: new Set(["gemini-3.7-flash", "gemini-3.1-pro"]),
 };
 

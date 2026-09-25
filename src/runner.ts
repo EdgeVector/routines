@@ -874,32 +874,6 @@ async function runOnce(
   const prompt = resolveDispatchPrompt(entry, { runDir });
   const invocation = buildInvocation(entry, prompt, sessionId);
 
-  // Validate that the model is known and live before spawning the harness.
-  try {
-    validateModel(entry.harness, entry.model);
-  } catch (err) {
-    if (err instanceof ModelValidationError) {
-      const now = new Date().toISOString();
-      writeRunFile(join(runDir, "stdout.log"), "");
-      writeRunFile(join(runDir, "stderr.log"), `Model validation failed: ${err.message}\n`);
-      return {
-        id: entry.id,
-        runDir,
-        invocation,
-        exitCode: 2,
-        signal: null,
-        timedOut: false,
-        startedAt: startedAt.toISOString(),
-        finishedAt: now,
-        durationMs: Date.parse(now) - Date.parse(startedAt.toISOString()),
-        heartbeat: { attempted: false, ok: true },
-        outcome: { kind: "error", detail: `model-validation-failed: ${err.message}`, source: "routine_result" },
-        harnessPid: null,
-      };
-    }
-    throw err;
-  }
-
   writeRunFile(join(runDir, "prompt.txt"), prompt);
   // Empty logs so mid-flight `tail -f` works even before first chunk.
   writeRunFile(join(runDir, "stdout.log"), "");
@@ -930,6 +904,34 @@ async function runOnce(
     gateProceeded: false,
     gateSkippedHarness: false,
   });
+
+  // Validate that the model is known and live before spawning the harness.
+  // Skip for gate commands: gates don't need a harness and may bypass it entirely.
+  if (!entry.gateCommand) {
+    try {
+      validateModel(entry.harness, entry.model);
+    } catch (err) {
+      if (err instanceof ModelValidationError) {
+        const now = new Date().toISOString();
+        writeRunFile(join(runDir, "stderr.log"), `Model validation failed: ${err.message}\n`);
+        return {
+          id: entry.id,
+          runDir,
+          invocation,
+          exitCode: 2,
+          signal: null,
+          timedOut: false,
+          startedAt: startedAt.toISOString(),
+          finishedAt: now,
+          durationMs: Date.parse(now) - Date.parse(startedAt.toISOString()),
+          heartbeat: { attempted: false, ok: true },
+          outcome: { kind: "error", detail: `model-validation-failed: ${err.message}`, source: "routine_result" },
+          harnessPid: null,
+        };
+      }
+      throw err;
+    }
+  }
 
   const configuredEnv = { ...process.env, ...envFromProjectConfig(project) };
   // Claude legs: hand the child a credential that does not go through the
