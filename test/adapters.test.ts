@@ -91,6 +91,8 @@ describe("buildInvocation", () => {
     // Durable state-machine steps, including the canary build, write here.
     expect(dirs).toContain(`${home}/.local/state/state-machine`);
     expect(dirs).toContain(`${home}/.cache/edgevector-git`);
+    // Loom kickoff logs and graph state (pickup lanes write ~/.loom/kickoffs).
+    expect(dirs).toContain(`${home}/.loom`);
     // gbrain audit lines (EPERM before); not the whole ~/.gbrain (config holds the DB URL).
     expect(dirs).toContain(`${home}/.gbrain/audit`);
     expect(dirs).not.toContain(`${home}/.gbrain`);

@@ -208,6 +208,12 @@ export function codexWritableDirs(): string[] {
     join(home, ".gbrain", "audit"),
     // Portal git cache (wt fetch); read/write during routine portal ops
     join(home, ".cache", "edgevector-git"),
+    // Loom state: kickoff logs, publish.err, graph run state. The pickup
+    // lanes run loom-land-card-kickoff.sh, which writes ~/.loom/kickoffs.
+    // Without this root a codex pickup (the fallback while grok is out)
+    // failed every kickoff with EPERM on publish.err and reported
+    // reason=lastdb-publish-failed (2026-09-26, todo cards unclaimed).
+    join(home, ".loom"),
   ];
   // De-dupe while preserving order (ROUTINES_HOME may equal ~/.routines).
   const seen = new Set<string>();
