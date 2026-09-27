@@ -60,7 +60,7 @@ exit 0
   );
 });
 
-function writeRoutine(id: string): void {
+function writeRoutine(id: string, timeoutMin = 0.05): void {
   writeFileSync(
     join(home, "registry", `${id}.toml`),
     [
@@ -69,7 +69,7 @@ function writeRoutine(id: string): void {
       'rrule = "FREQ=SECONDLY"',
       'prompt = "hello"',
       'heartbeat_slug = "routine-heartbeats"',
-      "timeout_min = 0.05",
+      `timeout_min = ${timeoutMin}`,
     ].join("\n") + "\n",
   );
 }
@@ -894,7 +894,7 @@ describe("child env Claude credential", () => {
         "",
       ].join("\n"),
     );
-    writeRoutine("claude-auth-lastsecrets");
+    writeRoutine("claude-auth-lastsecrets", 0.5);
 
     const result = await runRoutine(loadEntry("claude-auth-lastsecrets"), {
       quiet: true,
@@ -921,7 +921,7 @@ describe("child env Claude credential", () => {
       join(home, "stub-lastsecrets-missing"),
       '#!/bin/sh\necho "secret not found" >&2\nexit 1\n',
     );
-    writeRoutine("claude-auth-absent");
+    writeRoutine("claude-auth-absent", 0.5);
 
     const result = await runRoutine(loadEntry("claude-auth-absent"), {
       quiet: true,
@@ -951,7 +951,7 @@ describe("child env Claude credential", () => {
       join(home, "stub-lastsecrets-silent"),
       ["#!/bin/sh", 'echo "not installed" >&2', "exit 0", ""].join("\n"),
     );
-    writeRoutine("claude-auth-silent");
+    writeRoutine("claude-auth-silent", 0.5);
 
     const result = await runRoutine(loadEntry("claude-auth-silent"), {
       quiet: true,
@@ -974,7 +974,7 @@ describe("child env Claude credential", () => {
       join(home, "stub-lastsecrets-unused"),
       '#!/bin/sh\nprintf "%s\\n" tok-from-lastsecrets\n',
     );
-    writeRoutine("claude-auth-env");
+    writeRoutine("claude-auth-env", 0.5);
 
     const result = await runRoutine(loadEntry("claude-auth-env"), {
       quiet: true,
@@ -1005,7 +1005,7 @@ describe("child env Claude credential", () => {
         'rrule = "FREQ=SECONDLY"',
         'prompt = "hello"',
         'heartbeat_slug = "routine-heartbeats"',
-        "timeout_min = 0.05",
+        "timeout_min = 0.5",
       ].join("\n") + "\n",
     );
 
