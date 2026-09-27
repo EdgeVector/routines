@@ -111,7 +111,7 @@ test("publishFleetStatus declares schemas and writes only bounded fleet records"
     snapshot: "hash-RoutineFleetSnapshot",
     status: "hash-RoutineStatus",
     runSummary: "hash-RoutineRunSummary",
-    fleetStatus: "hash-FleetRoutineStatus",
+    fleetStatus: "hash-FleetRoutineStatusV2",
     fleetSummary: "hash-FleetSummary",
     runSummaryV2: "hash-RoutineRunSummaryV2",
   });
@@ -129,7 +129,7 @@ test("publishFleetStatus declares schemas and writes only bounded fleet records"
     "RoutineFleetSnapshot",
     "RoutineStatus",
     "RoutineRunSummary",
-    "FleetRoutineStatus",
+    "FleetRoutineStatusV2",
     "FleetSummary",
     "RoutineRunSummaryV2",
   ]);
@@ -166,7 +166,7 @@ test("publishFleetStatus declares schemas and writes only bounded fleet records"
   expect(client.declared[5]!.fields).not.toContain("slug");
   expect(client.writes.map((w) => [w.schemaHash, w.keyHash, w.mutationType])).toEqual([
     ["hash-RoutineStatus", "alpha", "create"],
-    ["hash-FleetRoutineStatus", fleetStatusBucket("alpha"), "create"],
+    ["hash-FleetRoutineStatusV2", fleetStatusBucket("alpha"), "create"],
     ["hash-RoutineRunSummaryV2", "alpha", "create"],
     ["hash-FleetSummary", "routines", "create"],
   ]);
@@ -177,7 +177,7 @@ test("publishFleetStatus declares schemas and writes only bounded fleet records"
   });
   expect(status?.content_digest).toHaveLength(64);
   expect(status?.schema_layout_version).toBeUndefined();
-  expect(client.record("hash-FleetRoutineStatus", status!.fleet_bucket!, status!.sk!)).toMatchObject({
+  expect(client.record("hash-FleetRoutineStatusV2", status!.fleet_bucket!, status!.sk!)).toMatchObject({
     id: "alpha",
     schema_layout_version: "1",
   });
@@ -210,7 +210,7 @@ test("bounded reader validates FleetSummary against all fixed bucket pages", asy
   expect(result.attempts).toBe(1);
   expect(result.rows.map((row) => row.id)).toEqual(["alpha"]);
   expect(result.summary.row_count).toBe("1");
-  expect(client.hashQueries.filter((query) => query.schemaHash === "hash-FleetRoutineStatus")).toHaveLength(16);
+  expect(client.hashQueries.filter((query) => query.schemaHash === "hash-FleetRoutineStatusV2")).toHaveLength(16);
 });
 
 test("bounded reader retries a partial bucket pass", async () => {
@@ -241,7 +241,7 @@ test("unchanged publication skips primary status and V2 run writes", async () =>
   expect(client.writes.some((write) => write.schemaHash === "hash-RoutineFleetSnapshot")).toBe(false);
   expect(client.writes.some((write) => write.schemaHash === "hash-RoutineRunSummary")).toBe(false);
   expect(writes.some((write) => write.schemaHash === "hash-RoutineStatus")).toBe(false);
-  expect(writes.some((write) => write.schemaHash === "hash-FleetRoutineStatus")).toBe(false);
+  expect(writes.some((write) => write.schemaHash === "hash-FleetRoutineStatusV2")).toBe(false);
   expect(writes.some((write) => write.schemaHash === "hash-RoutineRunSummaryV2" && write.mutationType !== "delete")).toBe(false);
 });
 
@@ -256,16 +256,16 @@ test("publication deletes routines that left the registry before advancing the s
 
   expect(result.written.deletedStatusRows).toBe(1);
   expect(client.record("hash-RoutineStatus", "alpha")).toBeNull();
-  expect(client.record("hash-FleetRoutineStatus", oldStatus.fleet_bucket!, oldStatus.sk!)).toBeNull();
+  expect(client.record("hash-FleetRoutineStatusV2", oldStatus.fleet_bucket!, oldStatus.sk!)).toBeNull();
   expect(client.writes).toContainEqual({
-    schemaHash: "hash-FleetRoutineStatus",
+    schemaHash: "hash-FleetRoutineStatusV2",
     keyHash: oldStatus.fleet_bucket!,
     keyRange: oldStatus.sk!,
     fields: {},
     mutationType: "delete",
   });
   const currentWrites = client.writes.slice(writeStart);
-  expect(currentWrites.findIndex((write) => write.schemaHash === "hash-FleetRoutineStatus" && write.mutationType === "delete"))
+  expect(currentWrites.findIndex((write) => write.schemaHash === "hash-FleetRoutineStatusV2" && write.mutationType === "delete"))
     .toBeLessThan(currentWrites.findIndex((write) => write.schemaHash === "hash-FleetSummary"));
   expect(client.record("hash-FleetSummary", "routines")?.row_count).toBe("0");
   expect((await readFleetStatus({ client, schemaHashes: schemaHashes() })).rows).toEqual([]);
@@ -294,15 +294,15 @@ test("status move deletes the old fleet sort key directly", async () => {
   expect(result.written.rows).toBe(1);
   expect(result.written.deletedStatusRows).toBe(1);
   expect(client.writes).toContainEqual({
-    schemaHash: "hash-FleetRoutineStatus",
+    schemaHash: "hash-FleetRoutineStatusV2",
     keyHash: before.fleet_bucket!,
     keyRange: before.sk!,
     fields: {},
     mutationType: "delete",
   });
-  expect(client.record("hash-FleetRoutineStatus", before.fleet_bucket!, before.sk!)).toBeNull();
+  expect(client.record("hash-FleetRoutineStatusV2", before.fleet_bucket!, before.sk!)).toBeNull();
   expect(after.sk).toBe("paused#other#alpha");
-  expect(client.record("hash-FleetRoutineStatus", after.fleet_bucket!, after.sk!)).toMatchObject({ status: "paused" });
+  expect(client.record("hash-FleetRoutineStatusV2", after.fleet_bucket!, after.sk!)).toMatchObject({ status: "paused" });
 });
 
 test("publication deletes an obsolete fleet address for a current routine", async () => {
@@ -310,7 +310,7 @@ test("publication deletes an obsolete fleet address for a current routine", asyn
   await publishFleetStatus({ client, now: new Date("2026-07-15T02:00:00.000Z"), runLimit: 1 });
   const current = client.record("hash-RoutineStatus", "alpha")!;
   const staleSk = "paused#other#alpha";
-  client.seed("hash-FleetRoutineStatus", current.fleet_bucket!, staleSk, {
+  client.seed("hash-FleetRoutineStatusV2", current.fleet_bucket!, staleSk, {
     ...current,
     status: "paused",
     sk: staleSk,
@@ -320,8 +320,8 @@ test("publication deletes an obsolete fleet address for a current routine", asyn
 
   expect(result.written.deletedStatusRows).toBe(1);
   expect(client.record("hash-RoutineStatus", "alpha")).toMatchObject({ status: "active" });
-  expect(client.record("hash-FleetRoutineStatus", current.fleet_bucket!, current.sk!)).toMatchObject({ status: "active" });
-  expect(client.record("hash-FleetRoutineStatus", current.fleet_bucket!, staleSk)).toBeNull();
+  expect(client.record("hash-FleetRoutineStatusV2", current.fleet_bucket!, current.sk!)).toMatchObject({ status: "active" });
+  expect(client.record("hash-FleetRoutineStatusV2", current.fleet_bucket!, staleSk)).toBeNull();
 });
 
 test("retention deletes only old exact keys in one routine partition", async () => {
@@ -362,7 +362,7 @@ test("buildDeliveryStageRequest targets snapshot plus capped routine status rows
       snapshot: "hash-RoutineFleetSnapshot",
       status: "hash-RoutineStatus",
       runSummary: "hash-RoutineRunSummary",
-      fleetStatus: "hash-FleetRoutineStatus",
+      fleetStatus: "hash-FleetRoutineStatusV2",
       fleetSummary: "hash-FleetSummary",
       runSummaryV2: "hash-RoutineRunSummaryV2",
     },
@@ -420,7 +420,7 @@ test("buildBoundedDeliveryStageRequests pages RoutineStatus ids and rejects a fu
     expect(page.max_records).toBe(page.legs[1]!.hash_keys!.length + 1);
     expect(encoded.length).toBeLessThan(64 * 1024);
     for (const leg of page.legs) {
-      if (leg.schema_name === "hash-RoutineStatus" || leg.schema_name === "hash-FleetRoutineStatus") {
+      if (leg.schema_name === "hash-RoutineStatus" || leg.schema_name === "hash-FleetRoutineStatusV2") {
         expect(leg.hash_keys?.length ?? 0).toBeGreaterThan(0);
       }
       expect(leg.fields).not.toContain("rows_json");
@@ -708,7 +708,7 @@ class FakeClient implements LastDbPublisherClient {
   async queryByHash(opts: { schemaHash: string; keyHash: string; maxRows: number }) {
     this.hashQueries.push({ schemaHash: opts.schemaHash, keyHash: opts.keyHash });
     const rows = this.partition(opts.schemaHash, opts.keyHash).slice(0, opts.maxRows);
-    if (opts.schemaHash === "hash-FleetRoutineStatus" && this.hideNextFleetRow && rows.length > 0) {
+    if (opts.schemaHash === "hash-FleetRoutineStatusV2" && this.hideNextFleetRow && rows.length > 0) {
       this.hideNextFleetRow = false;
       return rows.slice(1);
     }
@@ -740,7 +740,7 @@ function schemaHashes() {
     snapshot: "hash-RoutineFleetSnapshot",
     status: "hash-RoutineStatus",
     runSummary: "hash-RoutineRunSummary",
-    fleetStatus: "hash-FleetRoutineStatus",
+    fleetStatus: "hash-FleetRoutineStatusV2",
     fleetSummary: "hash-FleetSummary",
     runSummaryV2: "hash-RoutineRunSummaryV2",
   } as const;

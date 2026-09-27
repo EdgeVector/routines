@@ -212,6 +212,7 @@ export const RUN_SUMMARY_LOG_TAIL_MAX_BYTES = 2 * 1024;
 // Keep this marker on the HashRange index. It prevents the catalog from
 // reusing the Hash-keyed RoutineStatus layout for the fleet index.
 const FLEET_STATUS_LAYOUT_VERSION = "1";
+const FLEET_STATUS_SCHEMA_NAME = "FleetRoutineStatusV2";
 const FLEET_ROUTINE_STATUS_FIELDS = [...STATUS_FIELDS, "schema_layout_version"] as const;
 
 const FLEET_SUMMARY_FIELDS = [
@@ -253,7 +254,7 @@ const SCHEMAS: Record<SchemaKey, SchemaDefinition> = {
     "slug",
   ),
   fleetStatus: hashRangeSchema(
-    "FleetRoutineStatus",
+    FLEET_STATUS_SCHEMA_NAME,
     `A bounded routine status index split across ${FLEET_STATUS_BUCKET_COUNT} stable fleet buckets; each row stays below ${ROUTINE_STATUS_MAX_BYTES} bytes`,
     [...FLEET_ROUTINE_STATUS_FIELDS],
     "fleet_bucket",
