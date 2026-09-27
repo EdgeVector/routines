@@ -284,6 +284,9 @@ The publisher intentionally excludes prompts and full logs. Recent run evidence
 is capped (`--tail-bytes`, default 2048) and common secret-looking assignments
 are redacted before write.
 
+`FleetRoutineStatus` has `schema_layout_version=1`. The marker keeps its
+HashRange physical layout separate from the Hash-keyed `RoutineStatus` records.
+
 ```sh
 routines publish-status --json
 routines publish-status --runs 5 --tail-bytes 2048
@@ -291,6 +294,32 @@ routines publish-status --dry-run --json
 routines publish-status --clear-legacy-snapshot
 routines read-status --json
 ```
+
+### Fleet physical-map repair
+
+CAUTION: Do this repair only in an attended terminal. Test it on a `lastdb-dev`
+copy before you run it on the primary. Do not restart LastDB. Do not write a
+bulk `rows_json` snapshot.
+
+The stale item is the local `routines/FleetRoutineStatus` app alias. It can
+retain the Hash-layout map from `RoutineStatus`, while fleet rows require the
+v1 HashRange map. The bounded repair drops that alias only. It does not drop a
+catalog identity, `RoutineStatus`, or fleet-wide data.
+
+First, use a private copy and confirm the command succeeds:
+
+```sh
+lastdb-dev up
+eval "$(lastdb-dev env)"
+lastdb schema drop --schema routines/FleetRoutineStatus --must-exist --json
+routines publish-status --json
+routines read-status --json
+```
+
+For the primary, open a narrow Situation fence for the status publisher. Then
+run the same schema-drop command, publish, read, and check the
+`com.edgevector.admin-routines-status` timer. Resolve the Situation after the
+checks pass.
 
 ## Admin fleet status deliver
 

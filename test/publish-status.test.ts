@@ -136,7 +136,7 @@ test("publishFleetStatus declares schemas and writes only bounded fleet records"
   expect(client.declared[3]).toMatchObject({
     schema_type: "HashRange",
     key: { hash_field: "fleet_bucket", range_field: "sk" },
-    fields: expect.arrayContaining(["fleet_bucket", "sk", "id", "status", "group_id"]),
+    fields: expect.arrayContaining(["fleet_bucket", "sk", "id", "status", "group_id", "schema_layout_version"]),
   });
   expect(client.declared[4]).toMatchObject({
     schema_type: "Hash",
@@ -166,6 +166,7 @@ test("publishFleetStatus declares schemas and writes only bounded fleet records"
   expect(client.declared[5]!.fields).not.toContain("slug");
   expect(client.writes.map((w) => [w.schemaHash, w.keyHash, w.mutationType])).toEqual([
     ["hash-RoutineStatus", "alpha", "create"],
+    ["hash-FleetRoutineStatus", fleetStatusBucket("alpha"), "create"],
     ["hash-RoutineRunSummaryV2", "alpha", "create"],
     ["hash-FleetSummary", "routines", "create"],
   ]);
@@ -175,7 +176,11 @@ test("publishFleetStatus declares schemas and writes only bounded fleet records"
     sk: "active#other#alpha",
   });
   expect(status?.content_digest).toHaveLength(64);
-  expect(client.record("hash-FleetRoutineStatus", status!.fleet_bucket!, status!.sk!)).toMatchObject({ id: "alpha" });
+  expect(status?.schema_layout_version).toBeUndefined();
+  expect(client.record("hash-FleetRoutineStatus", status!.fleet_bucket!, status!.sk!)).toMatchObject({
+    id: "alpha",
+    schema_layout_version: "1",
+  });
 });
 
 test("FleetSummary is the last write and a failed row pass does not advance it", async () => {
@@ -236,6 +241,7 @@ test("unchanged publication skips primary status and V2 run writes", async () =>
   expect(client.writes.some((write) => write.schemaHash === "hash-RoutineFleetSnapshot")).toBe(false);
   expect(client.writes.some((write) => write.schemaHash === "hash-RoutineRunSummary")).toBe(false);
   expect(writes.some((write) => write.schemaHash === "hash-RoutineStatus")).toBe(false);
+  expect(writes.some((write) => write.schemaHash === "hash-FleetRoutineStatus")).toBe(false);
   expect(writes.some((write) => write.schemaHash === "hash-RoutineRunSummaryV2" && write.mutationType !== "delete")).toBe(false);
 });
 
@@ -690,17 +696,6 @@ class FakeClient implements LastDbPublisherClient {
     const key = this.recordKey(opts.schemaHash, opts.keyHash, opts.keyRange);
     if (opts.mutationType === "delete") this.records.delete(key);
     else this.records.set(key, { ...opts.fields });
-    if (opts.schemaHash === "hash-RoutineStatus" && opts.mutationType !== "delete") {
-      for (const [recordKey, fields] of this.records.entries()) {
-        if (recordKey.startsWith("hash-FleetRoutineStatus\u0000") && fields.id === opts.fields.id) {
-          this.records.delete(recordKey);
-        }
-      }
-      this.records.set(
-        this.recordKey("hash-FleetRoutineStatus", opts.fields.fleet_bucket!, opts.fields.sk),
-        { ...opts.fields },
-      );
-    }
     if (opts.schemaHash === "hash-RoutineRunSummary" && opts.mutationType === "create") {
       const { slug: _slug, ...sharedFields } = opts.fields;
       this.records.set(
