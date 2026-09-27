@@ -126,6 +126,19 @@ test("Defect 3: Grok adapter still builds invocation with valid model", () => {
   expect(inv.args).toContain("streaming-json");
 });
 
+test("Defect 4: every live grok model from `grok models` passes validation", () => {
+  // Live roster as of 2026-09-27 (`grok models` on this host): grok-4.7
+  // (default), grok-4.7-build-fast, grok-4.6, grok-4.5. Before this fix,
+  // KNOWN_MODELS.grok only carried grok-4.6, so the difficulty matrix's own
+  // "fast" tier value (grok-4.7-build-fast, set in the live
+  // routing-matrix.json) and a re-application of the exact remediation this
+  // repo's papercut record documents (`routines route --model
+  // grok-4.7-build-fast`) would both be rejected as "unknown model".
+  for (const model of ["grok-4.7", "grok-4.7-build-fast", "grok-4.6", "grok-4.5"]) {
+    expect(() => validateModel("grok", model)).not.toThrow();
+  }
+});
+
 test("Fixture: Model validation happens before harness spawn (pre-flight check)", () => {
   // When a routine with grok-build is loaded, validation should catch it
   // before the runner tries to spawn the grok binary
