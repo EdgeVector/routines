@@ -209,7 +209,11 @@ export const FLEET_SUMMARY_MAX_BYTES = 4 * 1024;
 export const RUN_SUMMARY_V2_MAX_BYTES = 8 * 1024;
 export const RUN_SUMMARY_LOG_TAIL_MAX_BYTES = 2 * 1024;
 
-const FLEET_ROUTINE_STATUS_FIELDS = [...STATUS_FIELDS] as const;
+// Keep this marker on the HashRange index. It prevents the catalog from
+// reusing the Hash-keyed RoutineStatus layout for the fleet index.
+const FLEET_STATUS_LAYOUT_VERSION = "1";
+const FLEET_STATUS_SCHEMA_NAME = "FleetRoutineStatusV2";
+const FLEET_ROUTINE_STATUS_FIELDS = [...STATUS_FIELDS, "schema_layout_version"] as const;
 
 const FLEET_SUMMARY_FIELDS = [
   "fleet_id",
@@ -250,7 +254,7 @@ const SCHEMAS: Record<SchemaKey, SchemaDefinition> = {
     "slug",
   ),
   fleetStatus: hashRangeSchema(
-    "FleetRoutineStatus",
+    FLEET_STATUS_SCHEMA_NAME,
     `A bounded routine status index split across ${FLEET_STATUS_BUCKET_COUNT} stable fleet buckets; each row stays below ${ROUTINE_STATUS_MAX_BYTES} bytes`,
     [...FLEET_ROUTINE_STATUS_FIELDS],
     "fleet_bucket",
@@ -355,15 +359,32 @@ export async function publishFleetStatus(options: PublishStatusOptions = {}): Pr
         keyHash: requiredField(prepared, "id"),
         fields: [...STATUS_FIELDS],
       });
-      if (existing?.content_digest === prepared.content_digest) continue;
-      await client.mutate({
-        schemaHash: schemaHashes.status,
-        keyHash: requiredField(prepared, "id"),
-        fields: prepared,
-        mutationType: existing ? "update" : "create",
+      if (existing?.content_digest !== prepared.content_digest) {
+        await client.mutate({
+          schemaHash: schemaHashes.status,
+          keyHash: requiredField(prepared, "id"),
+          fields: primaryStatusFields(prepared),
+          mutationType: existing ? "update" : "create",
+        });
+        written.rows += 1;
+      }
+
+      const existingFleet = await client.queryByKey({
+        schemaHash: schemaHashes.fleetStatus,
+        keyHash: requiredField(prepared, "fleet_bucket"),
+        keyRange: requiredField(prepared, "sk"),
+        fields: [...FLEET_ROUTINE_STATUS_FIELDS],
       });
-      written.rows += 1;
-      written.fleetRows += 1;
+      if (existingFleet?.content_digest !== prepared.content_digest) {
+        await client.mutate({
+          schemaHash: schemaHashes.fleetStatus,
+          keyHash: requiredField(prepared, "fleet_bucket"),
+          keyRange: requiredField(prepared, "sk"),
+          fields: prepared,
+          mutationType: existingFleet ? "update" : "create",
+        });
+        written.fleetRows += 1;
+      }
     }
     for (const run of publication.runSummaries) {
       const id = requiredField(run, "id");
@@ -840,10 +861,15 @@ function routineStatusFields(row: FieldMap): FieldMap {
     ...row,
     fleet_bucket: fleetStatusBucket(requiredField(row, "id")),
     sk: fleetStatusSortKey(row),
+    schema_layout_version: FLEET_STATUS_LAYOUT_VERSION,
   };
   fields.content_digest = contentDigest(fields, new Set(["content_digest", "updated_at"]));
   assertSerializedSize(fields, ROUTINE_STATUS_MAX_BYTES, `RoutineStatus/${requiredField(row, "id")}`);
   return fields;
+}
+
+function primaryStatusFields(row: FieldMap): FieldMap {
+  return Object.fromEntries(STATUS_FIELDS.map((field) => [field, row[field] ?? ""]));
 }
 
 function buildFleetSummary(publication: FleetPublication, rows: FieldMap[]): FieldMap {

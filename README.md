@@ -276,13 +276,16 @@ socket. It reuses `collectStatus()` and `listRuns()`, declares the app-owned
 schemas on first run, and writes:
 
 - `routines/RoutineStatus` key `<routine id>`, only when its content changes
-- `routines/FleetRoutineStatus` in 16 stable hash buckets through protein fold
+- `routines/FleetRoutineStatusV2` in 16 stable hash buckets through protein fold
 - `routines/RoutineRunSummaryV2` key `<routine id>, <run stamp>`, once per run
 - `routines/FleetSummary` key `routines`, last as the publication marker
 
 The publisher intentionally excludes prompts and full logs. Recent run evidence
 is capped (`--tail-bytes`, default 2048) and common secret-looking assignments
 are redacted before write.
+
+`FleetRoutineStatusV2` has `schema_layout_version=1`. The marker keeps its
+HashRange physical layout separate from the Hash-keyed `RoutineStatus` records.
 
 ```sh
 routines publish-status --json
@@ -291,6 +294,27 @@ routines publish-status --dry-run --json
 routines publish-status --clear-legacy-snapshot
 routines read-status --json
 ```
+
+### Fleet physical-map repair
+
+`FleetRoutineStatusV2` is a new HashRange schema identity. It does not reuse
+the polluted `routines/FleetRoutineStatus` physical map. Do not drop V2 during
+the repair. The old schema remains only as historical data and is not read or
+written by this version.
+
+CAUTION: Use the primary socket only after the deployment uses this version.
+Do not restart LastDB. Do not write a bulk `rows_json` snapshot.
+
+Review evidence, 2026-09-27:
+
+- `bun test test/publish-status.test.ts test/runner.test.ts` passed: 51 tests.
+- The publisher test declares `FleetRoutineStatusV2` as HashRange and checks
+  direct fleet writes, bounded reads, and no `rows_json` delivery field.
+- The primary socket accepted the V2 schema declaration. Its publish then
+  stopped at a transient 503 persist-queue limit, not at the repaired 409.
+- `com.edgevector.admin-routines-status` is loaded with a 3600-second interval.
+  Its last exit code is 1. `routines hygiene --dry-run` found no unsafe change;
+  it reports a missing routine daemon as its nonzero end state.
 
 ## Admin fleet status deliver
 
@@ -301,7 +325,7 @@ routines read-status --json
 - `routines/FleetSummary` key `routines`
 - explicit `routines/RoutineStatus` ids from the bounded reader
 
-Do not deliver `FleetRoutineStatus` HashRange buckets. A live 72-row fleet
+Do not deliver `FleetRoutineStatusV2` HashRange buckets. A live 72-row fleet
 still sealed at about 118 KiB per bucket page.
 
 A rollback read needs both `--legacy-view` and an ISO deadline in
