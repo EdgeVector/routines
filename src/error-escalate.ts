@@ -1163,6 +1163,7 @@ function dispatchTriageAgent(
       detached: true,
     });
     if (stdin !== undefined) {
+      child.stdin?.on("error", () => {}); // EPIPE when the agent exits before reading
       child.stdin?.write(stdin);
       child.stdin?.end();
     }

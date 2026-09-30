@@ -1096,6 +1096,10 @@ async function runOnce(
     sinkPoll.unref();
 
     if (invocation.stdin !== undefined) {
+      // A harness that exits before it reads its prompt (out of credits, bad
+      // flags) closes the pipe: EPIPE is an unhandled stream error, not a run
+      // result. The exit code and stderr already carry the outcome.
+      child.stdin?.on("error", () => {});
       child.stdin?.write(invocation.stdin);
       child.stdin?.end();
     }

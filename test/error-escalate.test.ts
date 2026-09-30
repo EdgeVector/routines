@@ -556,6 +556,23 @@ exit 1
     writeFileSync(stub, "#!/usr/bin/env bash\necho ok\nexit 0\n");
     spawnSyncchmod(stub);
 
+    // dispatchAgent spawns the harness binary. Point it at a stub so the test
+    // never launches a real agent and does not need `codex` on PATH (a GitHub
+    // runner has none).
+    const agentStub = join(stubDir, "agent-stub");
+    writeFileSync(agentStub, "#!/usr/bin/env bash\nexit 0\n");
+    spawnSyncchmod(agentStub);
+    const prevBins = {
+      codex: process.env.ROUTINES_CODEX_BIN,
+      claude: process.env.ROUTINES_CLAUDE_BIN,
+      grok: process.env.ROUTINES_GROK_BIN,
+      allow: process.env.ROUTINES_ALLOW_HARNESS_BIN_OVERRIDES,
+    };
+    process.env.ROUTINES_ALLOW_HARNESS_BIN_OVERRIDES = "1";
+    process.env.ROUTINES_CODEX_BIN = agentStub;
+    process.env.ROUTINES_CLAUDE_BIN = agentStub;
+    process.env.ROUTINES_GROK_BIN = agentStub;
+
     const e = entry();
     const r1 = result({ exitCode: 1 });
     const t0 = Date.now();
@@ -578,6 +595,16 @@ exit 1
     });
     expect(b.escalated).toBe(true);
     expect(b.agent ?? "").toContain("cooldown");
+
+    for (const [k, v] of [
+      ["ROUTINES_CODEX_BIN", prevBins.codex],
+      ["ROUTINES_CLAUDE_BIN", prevBins.claude],
+      ["ROUTINES_GROK_BIN", prevBins.grok],
+      ["ROUTINES_ALLOW_HARNESS_BIN_OVERRIDES", prevBins.allow],
+    ] as const) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
   });
 
   test("rolls the ledger on atom_content_too_large then retries append once", () => {
