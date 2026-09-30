@@ -566,7 +566,9 @@ exit 1
       codex: process.env.ROUTINES_CODEX_BIN,
       claude: process.env.ROUTINES_CLAUDE_BIN,
       grok: process.env.ROUTINES_GROK_BIN,
+      allow: process.env.ROUTINES_ALLOW_HARNESS_BIN_OVERRIDES,
     };
+    process.env.ROUTINES_ALLOW_HARNESS_BIN_OVERRIDES = "1";
     process.env.ROUTINES_CODEX_BIN = agentStub;
     process.env.ROUTINES_CLAUDE_BIN = agentStub;
     process.env.ROUTINES_GROK_BIN = agentStub;
@@ -598,6 +600,7 @@ exit 1
       ["ROUTINES_CODEX_BIN", prevBins.codex],
       ["ROUTINES_CLAUDE_BIN", prevBins.claude],
       ["ROUTINES_GROK_BIN", prevBins.grok],
+      ["ROUTINES_ALLOW_HARNESS_BIN_OVERRIDES", prevBins.allow],
     ] as const) {
       if (v === undefined) delete process.env[k];
       else process.env[k] = v;
