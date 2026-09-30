@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# routines CI gate — run by the LastGit CI watcher on every pushed head; the
-# required status `ci-required` that gated auto-merge waits on.
+# routines CI gate — run by the GitHub Actions `test` job (.github/workflows/ci-required.yml,
+# macos-latest) on every PR and push; the job `ci-required` that branch protection
+# requires needs it.
 #
 # Keep it cheap (seconds): it runs in a fresh clone per push. Written to be
 # skeleton-tolerant (macOS bash 3.2, no arrays under set -u): loops simply
@@ -71,7 +72,7 @@ if [ "$found_tests" = 1 ]; then
   # retry loops; the default 5s Bun test timeout is too tight under CI load.
   # 60s per test, not the 30s default: on a loaded CI host (load average 40+ with
   # lastdbd busy) two subprocess-driven tests ran 34s and 38s and timed out on
-  # the first Forge CI run. Same reasoning and value as the lastgit gate.
+  # the first Forge CI run. Same value on the GitHub macOS runner.
   bun test --timeout=60000
 else
   echo "ci: no tests yet (repo skeleton) — gate is syntax + typecheck"

@@ -1,0 +1,71 @@
+# Gate of record for EdgeVector/routines: GitHub (moved from LastGit on 2026-09-30).
+# Branch protection on main requires the job named `ci-required`.
+#
+# `test` runs .lastgit/ci.sh on macOS. The gate includes test/build-artifact-codesign.sh
+# (macOS codesign/security stubs and bash 3.2 awk/sed behavior) and `bun run build`
+# (a compiled darwin binary), so a Linux runner would not prove the same thing.
+#
+# `publish` runs only on a push to main. It calls last-stack's reusable workflow, which
+# builds the host-track artifact on macOS and uploads the Actions artifact
+# `ht-artifact-<sha>`. It never touches a channel. On the Mac, `host-track refresh`
+# runs last-stack-github-artifact-pull, which re-checks this workflow's ci-required
+# check run and every digest before it promotes stable.
+# Brain: design-github-artifact-publish-path, sop-github-artifact-app-migration.
+name: ci-required
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-required-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  test:
+    name: test
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+      - name: Merge gate (.lastgit/ci.sh)
+        env:
+          NO_COLOR: "1"
+          FORCE_COLOR: "0"
+        run: bash .lastgit/ci.sh
+
+  ci-required:
+    name: ci-required
+    if: ${{ always() }}
+    needs: [test]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every needed job to succeed
+        env:
+          TEST_RESULT: ${{ needs.test.result }}
+        run: |
+          echo "test=$TEST_RESULT"
+          test "$TEST_RESULT" = "success"
+
+  publish:
+    name: publish
+    needs: [ci-required]
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    permissions:
+      contents: read
+    uses: EdgeVector/last-stack/.github/workflows/host-track-artifact.yml@main
+    with:
+      setup-bun: true
+      build-command: "bun install --frozen-lockfile && bun run build"
+      runs-on: macos-latest
+      config: .lastgit/artifacts.json

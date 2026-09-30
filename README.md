@@ -233,7 +233,7 @@ Two complementary layers:
    `memory.md` files to the last 100 lines, drops stale
    `error-escalate/*.json`, checks that `com.edgevector.routinesd` is loaded,
    and runs `publish-status`. The installed hourly agent also runs
-   `--ff-install`, so a clean CLI checkout fast-forwards to LastGit `main` and
+   `--ff-install`, so a clean CLI checkout fast-forwards to GitHub `main` and
    kickstarts `routinesd` after updates. Install hourly via
    `routines install-hygiene` (label `com.edgevector.routines-hygiene`), which
    writes a stable launcher at `~/.routines/daemon/run-hygiene.sh`. Shell
@@ -404,17 +404,16 @@ bodies are not sent.
 
 ## Forge
 
-This repo merges through **LastGit-native change requests**, not GitHub PRs
-(GitHub is a read-only mirror). Venue: `.last-stack/pr-venue`; CI gate:
-`.lastgit/ci.sh` (`ci-required`). LastGit is homed at `lastdb:///routines` on
-the canonical LastDB socket; see fbrain `sop-lastgit-native-forge-workflow`.
+This repo merges through **GitHub pull requests** (moved from LastGit on
+2026-09-30). Venue: `.last-stack/pr-venue` (`github`). CI gate:
+`.github/workflows/ci-required.yml`; the job `ci-required` is required by branch
+protection on `main`, and its `test` job runs `.lastgit/ci.sh` on a macOS runner.
+Open a PR with `gh pr create`, then `gh pr merge --squash --auto`.
 
-GitHub stays public for clone/browse only. It is not a review or CI venue:
-repository Actions are disabled, this checkout contains no GitHub workflows,
-and LastGit-to-GitHub mirror sync keeps `origin/main` aligned after CR merges.
-
-Mirror sync proof: LastGit CRs are expected to appear on the GitHub mirror within
-the configured sync interval (validated 2026-07-12T23:11:25Z).
+On a push to `main` the `publish` job calls last-stack's reusable workflow, which
+builds the host-track artifact (`dist/routines` and `dist/probes/*.sh`) on macOS and
+uploads `ht-artifact-<sha>`. `host-track refresh routines` pulls it through
+`last-stack-github-artifact-pull` (see brain `design-github-artifact-publish-path`).
 
 ## Claude credential without the login keychain
 
