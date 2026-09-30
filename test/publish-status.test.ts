@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -222,6 +222,113 @@ test("bounded reader retries a partial bucket pass", async () => {
 
   expect(result.attempts).toBe(2);
   expect(result.rows).toHaveLength(1);
+});
+
+function addRun(stamp: string, startedAt: string): void {
+  const runDir = join(home, "runs", "alpha", stamp);
+  mkdirSync(runDir, { recursive: true });
+  writeFileSync(
+    join(runDir, "meta.json"),
+    JSON.stringify({
+      id: "alpha", exitCode: 0, startedAt, finishedAt: startedAt, durationMs: 1, outcome: "ok", outcomeDetail: stamp,
+      outcomeSource: "routine_result",
+    }),
+  );
+  writeFileSync(join(runDir, "stdout.log"), `ROUTINE_RESULT outcome=ok detail=${stamp}\n`);
+  writeFileSync(join(runDir, "stderr.log"), "");
+}
+
+const runQueries = (c: FakeClient) => c.keyQueries.filter((q) => q.schemaHash === "hash-RoutineRunSummaryV2");
+const retentionQueries = (c: FakeClient) => c.hashQueries.filter((q) => q.schemaHash === "hash-RoutineRunSummaryV2");
+
+test("watermark path publishes the same fleet output as the full path", async () => {
+  const oldClient = new FakeClient();
+  const newClient = new FakeClient();
+  const steps: Array<[string, () => void]> = [
+    ["2026-07-15T02:00:00.000Z", () => {}],
+    ["2026-07-15T03:00:00.000Z", () => {}],
+    ["2026-07-15T04:00:00.000Z", () => addRun("20260715T033000Z", "2026-07-15T03:30:00.000Z")],
+    ["2026-07-15T05:00:00.000Z", () => addRun("20260715T043000Z", "2026-07-15T04:30:00.000Z")],
+    ["2026-07-15T06:00:00.000Z", () => {}],
+  ];
+  for (const [at, mutate] of steps) {
+    mutate();
+    const now = new Date(at);
+    const full = await publishFleetStatus({ client: oldClient, now, runLimit: 5, useWatermark: false });
+    const fast = await publishFleetStatus({ client: newClient, now, runLimit: 5 });
+    expect(fast.written.runSummariesV2).toBe(full.written.runSummariesV2);
+    expect(fast.fleetSummary).toEqual(full.fleetSummary);
+    expect(fast.rows).toEqual(full.rows);
+    expect(fast.runSummaries).toEqual(full.runSummaries);
+  }
+  expect(newClient.partition("hash-RoutineRunSummaryV2", "alpha")).toEqual(oldClient.partition("hash-RoutineRunSummaryV2", "alpha"));
+  expect(newClient.partition("hash-RoutineRunSummaryV2", "alpha")).toHaveLength(3);
+  expect(newClient.record("hash-FleetSummary", "routines")).toEqual(oldClient.record("hash-FleetSummary", "routines"));
+  expect(newClient.record("hash-RoutineStatus", "alpha")).toEqual(oldClient.record("hash-RoutineStatus", "alpha"));
+});
+
+test("watermark persists and later publishes read only newer runs", async () => {
+  const client = new FakeClient();
+  await publishFleetStatus({ client, now: new Date("2026-07-15T02:00:00.000Z"), runLimit: 5 });
+  const saved = JSON.parse(readFileSync(join(home, "state", "publish-watermark.json"), "utf8"));
+  expect(saved.runs.alpha).toBe("20260715T010203Z");
+
+  client.keyQueries = [];
+  await publishFleetStatus({ client, now: new Date("2026-07-15T03:00:00.000Z"), runLimit: 5 });
+  expect(runQueries(client)).toHaveLength(0);
+
+  addRun("20260715T033000Z", "2026-07-15T03:30:00.000Z");
+  const result = await publishFleetStatus({ client, now: new Date("2026-07-15T04:00:00.000Z"), runLimit: 5 });
+  expect(runQueries(client).map((q) => q.keyRange)).toEqual(["20260715T033000Z"]);
+  expect(result.written.runSummariesV2).toBe(1);
+  const after = JSON.parse(readFileSync(join(home, "state", "publish-watermark.json"), "utf8"));
+  expect(after.runs.alpha).toBe("20260715T033000Z");
+});
+
+test("retention runs on a new run and otherwise at most once a day", async () => {
+  const client = new FakeClient();
+  await publishFleetStatus({ client, now: new Date("2026-07-15T02:00:00.000Z"), runLimit: 5 });
+  expect(retentionQueries(client)).toHaveLength(1);
+
+  await publishFleetStatus({ client, now: new Date("2026-07-15T03:00:00.000Z"), runLimit: 5 });
+  await publishFleetStatus({ client, now: new Date("2026-07-15T04:00:00.000Z"), runLimit: 5 });
+  expect(retentionQueries(client)).toHaveLength(1);
+
+  addRun("20260715T043000Z", "2026-07-15T04:30:00.000Z");
+  await publishFleetStatus({ client, now: new Date("2026-07-15T05:00:00.000Z"), runLimit: 5 });
+  expect(retentionQueries(client)).toHaveLength(2);
+
+  await publishFleetStatus({ client, now: new Date("2026-07-15T06:00:00.000Z"), runLimit: 5 });
+  expect(retentionQueries(client)).toHaveLength(2);
+
+  client.keyQueries = [];
+  await publishFleetStatus({ client, now: new Date("2026-07-16T05:30:00.000Z"), runLimit: 5 });
+  expect(retentionQueries(client)).toHaveLength(3);
+  // The daily pass re-checks every run in the window (self-heal).
+  expect(runQueries(client)).toHaveLength(2);
+});
+
+test("daily full pass repairs a store that lost a run summary", async () => {
+  const client = new FakeClient();
+  await publishFleetStatus({ client, now: new Date("2026-07-15T02:00:00.000Z"), runLimit: 5 });
+  const fresh = new FakeClient();
+  const result = await publishFleetStatus({ client: fresh, now: new Date("2026-07-15T03:00:00.000Z"), runLimit: 5 });
+  expect(result.written.runSummariesV2).toBe(0);
+  const healed = await publishFleetStatus({ client: fresh, now: new Date("2026-07-16T03:00:00.000Z"), runLimit: 5 });
+  expect(healed.written.runSummariesV2).toBe(1);
+});
+
+test("a corrupt or mismatched watermark falls back to a full pass", async () => {
+  const client = new FakeClient();
+  mkdirSync(join(home, "state"), { recursive: true });
+  writeFileSync(join(home, "state", "publish-watermark.json"), "{not json");
+  const result = await publishFleetStatus({ client, now: new Date("2026-07-15T02:00:00.000Z"), runLimit: 5 });
+  expect(result.written.runSummariesV2).toBe(1);
+});
+
+test("dry run neither reads nor writes the watermark", async () => {
+  await publishFleetStatus({ client: new FakeClient(), dryRun: true, now: new Date("2026-07-15T02:00:00.000Z") });
+  expect(existsSync(join(home, "state", "publish-watermark.json"))).toBe(false);
 });
 
 test("unchanged publication skips primary status and V2 run writes", async () => {
@@ -665,6 +772,7 @@ class FakeClient implements LastDbPublisherClient {
   }> = [];
   private records = new Map<string, Record<string, string>>();
   hashQueries: Array<{ schemaHash: string; keyHash: string }> = [];
+  keyQueries: Array<{ schemaHash: string; keyHash: string; keyRange?: string }> = [];
   hideNextFleetRow = false;
   failSchemaHash = "";
 
@@ -681,6 +789,7 @@ class FakeClient implements LastDbPublisherClient {
   }
 
   async queryByKey(opts: { schemaHash: string; keyHash: string; keyRange?: string }): Promise<Record<string, string> | null> {
+    this.keyQueries.push({ schemaHash: opts.schemaHash, keyHash: opts.keyHash, keyRange: opts.keyRange });
     return this.record(opts.schemaHash, opts.keyHash, opts.keyRange);
   }
 

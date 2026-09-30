@@ -1,10 +1,11 @@
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { collectStatus, type StatusRow } from "./status.ts";
 import { listRuns, readRun, type RunSummary } from "./runs.ts";
+import { stateDir } from "./paths.ts";
 
 export const ROUTINES_APP_ID = "routines";
 
@@ -18,6 +19,10 @@ export interface PublishStatusOptions {
   runRetentionDays?: number;
   dryRun?: boolean;
   client?: LastDbPublisherClient;
+  /** Override the watermark file path (default: <ROUTINES_HOME>/state/publish-watermark.json). */
+  watermarkPath?: string;
+  /** Set false to ignore and not write the watermark (every run is re-checked, retention runs for all). */
+  useWatermark?: boolean;
 }
 
 export interface FleetPublication {
@@ -386,34 +391,69 @@ export async function publishFleetStatus(options: PublishStatusOptions = {}): Pr
         written.fleetRows += 1;
       }
     }
+    const useWatermark = options.useWatermark !== false;
+    const watermarkPath = options.watermarkPath ?? publishWatermarkPath();
+    const capturedMs = new Date(publication.capturedAt).getTime();
+    const state = useWatermark
+      ? loadPublishWatermark(watermarkPath, schemaHashes.runSummaryV2)
+      : emptyPublishWatermark(schemaHashes.runSummaryV2);
+    const runsById = new Map<string, FieldMap[]>();
     for (const run of publication.runSummaries) {
       const id = requiredField(run, "id");
-      const stamp = requiredField(run, "stamp");
-      const existing = await client.queryByKey({
-        schemaHash: schemaHashes.runSummaryV2,
-        keyHash: id,
-        keyRange: stamp,
-        fields: [...RUN_SUMMARY_V2_FIELDS],
-      });
-      if (!existing) {
-        const fields = Object.fromEntries(RUN_SUMMARY_V2_FIELDS.map((field) => [field, run[field] ?? ""]));
-        await client.mutate({
-          schemaHash: schemaHashes.runSummaryV2,
-          keyHash: id,
-          keyRange: stamp,
-          fields,
-          mutationType: "create",
-        });
-        written.runSummariesV2 += 1;
-      }
+      const list = runsById.get(id) ?? [];
+      list.push(run);
+      runsById.set(id, list);
     }
-    for (const row of publication.rows) {
-      written.deletedRunSummariesV2 += await enforceRunSummaryRetention(client, schemaHashes.runSummaryV2, {
-        id: requiredField(row, "id"),
-        now: new Date(publication.capturedAt),
-        keepCount: positiveInt(options.runRetentionCount, 100),
-        keepDays: positiveInt(options.runRetentionDays, 30),
-      });
+    try {
+      for (const row of publication.rows) {
+        const id = requiredField(row, "id");
+        // Once per RETENTION_INTERVAL_MS a routine gets a full pass: every run in the
+        // window is re-checked (self-heals a wiped store or a lost write) and retention runs.
+        const lastRetentionMs = Date.parse(state.retention[id] ?? "");
+        const fullPass = !useWatermark
+          || !Number.isFinite(lastRetentionMs)
+          || capturedMs - lastRetentionMs >= RETENTION_INTERVAL_MS
+          || capturedMs < lastRetentionMs;
+        const watermark = state.runs[id] ?? "";
+        let created = 0;
+        let maxStamp = watermark;
+        for (const run of runsById.get(id) ?? []) {
+          const stamp = requiredField(run, "stamp");
+          // Run summaries are immutable per id+stamp: at or below the watermark means already published.
+          if (!fullPass && stamp <= watermark) continue;
+          const existing = await client.queryByKey({
+            schemaHash: schemaHashes.runSummaryV2,
+            keyHash: id,
+            keyRange: stamp,
+            fields: [...RUN_SUMMARY_V2_FIELDS],
+          });
+          if (!existing) {
+            const fields = Object.fromEntries(RUN_SUMMARY_V2_FIELDS.map((field) => [field, run[field] ?? ""]));
+            await client.mutate({
+              schemaHash: schemaHashes.runSummaryV2,
+              keyHash: id,
+              keyRange: stamp,
+              fields,
+              mutationType: "create",
+            });
+            written.runSummariesV2 += 1;
+            created += 1;
+          }
+          if (stamp > maxStamp) maxStamp = stamp;
+        }
+        if (maxStamp !== watermark) state.runs[id] = maxStamp;
+        if (fullPass || created > 0) {
+          written.deletedRunSummariesV2 += await enforceRunSummaryRetention(client, schemaHashes.runSummaryV2, {
+            id,
+            now: new Date(publication.capturedAt),
+            keepCount: positiveInt(options.runRetentionCount, 100),
+            keepDays: positiveInt(options.runRetentionDays, 30),
+          });
+          state.retention[id] = publication.capturedAt;
+        }
+      }
+    } finally {
+      if (useWatermark) savePublishWatermark(watermarkPath, state, publication.rows.map((row) => requiredField(row, "id")));
     }
     await upsert(
       client,
@@ -432,6 +472,61 @@ export async function publishFleetStatus(options: PublishStatusOptions = {}): Pr
     dryRun: options.dryRun === true,
     written,
   };
+}
+
+const RETENTION_INTERVAL_MS = 24 * 60 * 60 * 1000;
+
+interface PublishWatermark {
+  version: 1;
+  /** RoutineRunSummaryV2 schema hash the watermark was recorded against. */
+  schemaHash: string;
+  /** Newest run stamp confirmed present in the store, per routine id. */
+  runs: Record<string, string>;
+  /** ISO time of the last full pass (all window runs re-checked + retention), per routine id. */
+  retention: Record<string, string>;
+}
+
+export function publishWatermarkPath(): string {
+  return join(stateDir(), "publish-watermark.json");
+}
+
+function emptyPublishWatermark(schemaHash: string): PublishWatermark {
+  return { version: 1, schemaHash, runs: {}, retention: {} };
+}
+
+function loadPublishWatermark(path: string, schemaHash: string): PublishWatermark {
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as Partial<PublishWatermark>;
+    if (parsed.version === 1 && parsed.schemaHash === schemaHash && parsed.runs && parsed.retention) {
+      return { version: 1, schemaHash, runs: { ...parsed.runs }, retention: { ...parsed.retention } };
+    }
+  } catch {
+    // Missing or corrupt file: start empty, which means one full pass.
+  }
+  return emptyPublishWatermark(schemaHash);
+}
+
+/** Merge with the on-disk file so two publishers do not erase each other; keep the newer value. */
+function savePublishWatermark(path: string, state: PublishWatermark, currentIds: string[]): void {
+  try {
+    const disk = loadPublishWatermark(path, state.schemaHash);
+    const runs: Record<string, string> = {};
+    const retention: Record<string, string> = {};
+    for (const id of currentIds) {
+      const a = state.runs[id] ?? "";
+      const b = disk.runs[id] ?? "";
+      if (a || b) runs[id] = a > b ? a : b;
+      const ra = state.retention[id] ?? "";
+      const rb = disk.retention[id] ?? "";
+      if (ra || rb) retention[id] = ra > rb ? ra : rb;
+    }
+    mkdirSync(dirname(path), { recursive: true });
+    const tmp = `${path}.${process.pid}.tmp`;
+    writeFileSync(tmp, JSON.stringify({ version: 1, schemaHash: state.schemaHash, runs, retention }, null, 2));
+    renameSync(tmp, path);
+  } catch {
+    // The watermark is an optimization. A failed save only costs one extra full pass.
+  }
 }
 
 async function findStaleRoutineRows(
