@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -7,6 +7,7 @@ import { routeRoutine, ActionError } from "../src/actions.ts";
 import { parseEntry } from "../src/registry.ts";
 import { buildInvocation, filterHarnessEnv } from "../src/adapters.ts";
 import { validateModel, ModelValidationError } from "../src/models.ts";
+import { runRoutine } from "../src/runner.ts";
 
 let home: string;
 const savedEnv = { ...process.env };
@@ -82,6 +83,7 @@ test("Defect 2: Grok filters Codex-specific environment variables", () => {
     HOME: "/home/test",
     CODEX_SANDBOX_WORKSPACE_DIR: "/tmp/codex",
     CODEX_SANDBOX_FALLBACK_DIR: "/tmp/fallback",
+    CODEX_THREAD_ID: "thread-abc123",
     ROUTINES_HOME: "/home/test/.routines",
     PATH: "/usr/bin",
   };
@@ -91,6 +93,10 @@ test("Defect 2: Grok filters Codex-specific environment variables", () => {
   // Codex-specific vars should be removed from Grok environment
   expect(filtered.CODEX_SANDBOX_WORKSPACE_DIR).toBeUndefined();
   expect(filtered.CODEX_SANDBOX_FALLBACK_DIR).toBeUndefined();
+  // papercut-routines-grok-inherits-codex-shell-identity-20260923: this is
+  // the variable the papercut's own repro named as the actual trigger — the
+  // two CODEX_SANDBOX_* vars above were the first (insufficient) guess.
+  expect(filtered.CODEX_THREAD_ID).toBeUndefined();
 
   // Other vars should survive
   expect(filtered.HOME).toBe("/home/test");
@@ -103,6 +109,7 @@ test("Defect 2: Non-Grok harnesses do not filter environment", () => {
     HOME: "/home/test",
     CODEX_SANDBOX_WORKSPACE_DIR: "/tmp/codex",
     CODEX_SANDBOX_FALLBACK_DIR: "/tmp/fallback",
+    CODEX_THREAD_ID: "thread-abc123",
     ROUTINES_HOME: "/home/test/.routines",
   };
 
@@ -112,6 +119,54 @@ test("Defect 2: Non-Grok harnesses do not filter environment", () => {
   // Claude and Codex should not filter these vars
   expect(filteredClaude.CODEX_SANDBOX_WORKSPACE_DIR).toBe("/tmp/codex");
   expect(filteredCodex.CODEX_SANDBOX_WORKSPACE_DIR).toBe("/tmp/codex");
+  expect(filteredClaude.CODEX_THREAD_ID).toBe("thread-abc123");
+  expect(filteredCodex.CODEX_THREAD_ID).toBe("thread-abc123");
+});
+
+// papercut-routines-grok-inherits-codex-shell-identity-20260923: the above
+// two tests prove the env MAP no longer carries CODEX_THREAD_ID, but the
+// original defect was a real shell side effect silently not happening (exit
+// 0, no output) when a Grok routine's child process still saw the var. This
+// test drives the actual dispatch path (runRoutine -> filterHarnessEnv ->
+// spawn) with a stub "grok" binary standing in for the real CLI's reported
+// breakage: the stub only writes its probe file when CODEX_THREAD_ID is
+// absent from ITS OWN environment, exactly mirroring the papercut's
+// echo/file-write repro. If the filter regresses, the probe file silently
+// stops appearing, the same way the real symptom silently stopped happening.
+test("Defect 2: a Grok routine dispatched from a Codex-parented shell still produces its real side effect", async () => {
+  const home = mkdtempSync(join(tmpdir(), "grok-e2e-"));
+  const probeFile = join(home, "probe.txt");
+  const stubPath = join(home, "stub-grok");
+  writeFileSync(
+    stubPath,
+    [
+      "#!/bin/sh",
+      // Simulate the reported real-world breakage: silently no-op (exit 0,
+      // no output, no side effect) if CODEX_THREAD_ID leaked through.
+      'if [ -n "$CODEX_THREAD_ID" ]; then exit 0; fi',
+      `echo "ran" > ${JSON.stringify(probeFile)}`,
+      "exit 0",
+    ].join("\n"),
+  );
+  chmodSync(stubPath, 0o755);
+
+  process.env.ROUTINES_ALLOW_HARNESS_BIN_OVERRIDES = "1";
+  process.env.ROUTINES_GROK_BIN = stubPath;
+  process.env.ROUTINES_HOME = home;
+  // Simulate being dispatched from inside a Codex-parented shell, same as
+  // the papercut's original repro.
+  process.env.CODEX_THREAD_ID = "thread-parent-codex-session";
+
+  try {
+    const e = entry("grok", "grok-4.6");
+    e.sourcePath = join(home, "grok-e2e.toml");
+    await runRoutine(e, { quiet: true, trigger: "manual" });
+
+    expect(existsSync(probeFile)).toBe(true);
+    expect(readFileSync(probeFile, "utf8").trim()).toBe("ran");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
 });
 
 test("Defect 3: Grok adapter still builds invocation with valid model", () => {
