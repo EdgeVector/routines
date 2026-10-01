@@ -689,7 +689,17 @@ export function recordMissedDailyFire(
     timedOut: false,
     startedAt: startedAt.toISOString(),
     finishedAt: finishedAt.toISOString(),
-    durationMs: Math.max(0, finishedAt.getTime() - startedAt.getTime()),
+    // ZERO, not finishedAt - startedAt. `startedAt` is the missed CALENDAR
+    // occurrence (the run stamp), not an instant anything began: nothing ran,
+    // so the execution time is zero. Subtracting them measured the AGE OF THE
+    // GAP and published it as a run duration — four back-filled records on
+    // 2026-10-01 reached the fleet heartbeat log as `error ... dur=179951.5s`
+    // (50h) with `timedOut: false`, which reads as a two-day hang. Every
+    // duration consumer takes this field (heartbeat line, `routines show`,
+    // the HTML run list, the LastDB run summary's duration_ms), so the lie
+    // has to die here and not in one renderer. The gap is not lost: the
+    // outcome detail carries since= / first= / coalesced_to= exactly.
+    durationMs: 0,
     heartbeat: { attempted: false, ok: true },
     outcome: { kind: "error", detail, source: "sink" },
     harnessPid: null,

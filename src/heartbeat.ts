@@ -48,6 +48,15 @@ function heartbeatLine(entry: RoutineEntry, result: RunResult): string {
   // Stable fleet token for Claude OAuth / auth harness deaths (card VERIFY +
   // multi-routine storm collapse). Prefer outcome detail; fall back to kind.
   const detail = result.outcome.detail ?? "";
+  // A back-filled missed FREQ=DAILY occurrence. Nothing ran — routinesd never
+  // started the tick — and the reason lived ONLY in the run directory, so
+  // `grep missed-fire routine-heartbeats.log` answered 0 across the whole log
+  // while four such lines sat in it. On this surface the line was
+  // indistinguishable from a routine that ran and failed, and that is the
+  // surface CLAUDE.md points every fleet reader at. Name it on the line.
+  if (/^missed-fire\b/.test(detail) && !/\breason=missed-fire\b/.test(line)) {
+    line += " reason=missed-fire";
+  }
   if (
     /reason=harness-auth-expired|harness-auth-expired|authentication_failed|oauth session expired|failed to authenticate/i.test(
       detail,
