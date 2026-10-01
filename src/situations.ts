@@ -2,8 +2,26 @@
 //
 // Before spawning a run, the daemon asks F-Situations for the active
 // operational posture and skips any routine whose id matches an active
-// Situation's `scope_routines` glob. Routines also self-check per workspace
-// rules; this fence is defense in depth at the scheduler boundary.
+// Situation's `scope_routines` glob — but only when that Situation is p0 or
+// p1. Routines also self-check per workspace rules; this fence is defense in
+// depth at the scheduler boundary for genuine emergencies.
+//
+// `scope_routines` is informational metadata in the F-Situations app's own
+// contract (its record validators document "scope_routines is not a panic
+// button" — the real hazard belongs in `blocked_actions`/
+// `requires_human_clearance`, which this fence does not currently read). A
+// p2/p3 Situation naming a routine in Scope for context must not silently
+// stall it. Fixed 2026-10-01 (papercut
+// papercut-routines-fence-ignores-blocked-actions-scope-routines-hard-skip-20261001):
+// an active p2 Situation (lastdb-brain-cleanout-use-gbrain-20260923, whose
+// `blocked_actions` never named either routine) hard-fenced
+// last-stack-milestone-driver and last-stack-north-star-driver — the only
+// routines that turn North Stars into milestones and todo cards — for 2+
+// days straight, starving the kanban board's todo column. A severity gate
+// keeps the safety net for real incidents (almost always filed p0/p1)
+// without letting informational Scope mentions silently stall routines
+// indefinitely. A Situation with no severity (or an unrecognized one) still
+// fences, fail-safe, same as before this fix.
 //
 // Separately, every dispatched prompt gets a short **notices** banner
 // (non-blocking FYI: upgrades/restarts) so agents attribute flapping instead
@@ -17,9 +35,14 @@
 
 import { spawn, spawnSync } from "node:child_process";
 
+/** Severities whose active Situations may hard-fence a routine via scope_routines. */
+const FENCING_SEVERITIES = new Set(["p0", "p1"]);
+
 export interface ActiveSituation {
   slug: string;
   scope_routines: string[];
+  /** "p0"..."p3", or "" when the record omitted/malformed it (fences fail-safe). */
+  severity: string;
 }
 
 export interface SituationCheck {
@@ -206,7 +229,8 @@ function normalizeSituations(parsed: unknown): ActiveSituation[] {
     const scope = Array.isArray(rec.scope_routines)
       ? rec.scope_routines.filter((x): x is string => typeof x === "string")
       : [];
-    out.push({ slug, scope_routines: scope });
+    const severity = typeof rec.severity === "string" ? rec.severity : "";
+    out.push({ slug, scope_routines: scope, severity });
   }
   return out;
 }
@@ -217,9 +241,16 @@ export interface FenceResult {
   pattern?: string;
 }
 
-/** Return the first active Situation whose scope_routines glob matches the id. */
+/**
+ * Return the first active, p0/p1 Situation whose scope_routines glob matches
+ * the id. A p2/p3 (or otherwise non-fencing) match is informational only —
+ * see the file-top comment and papercut
+ * papercut-routines-fence-ignores-blocked-actions-scope-routines-hard-skip-20261001.
+ * A Situation with no severity set still fences (fail-safe default).
+ */
 export function fenceFor(id: string, situations: ActiveSituation[]): FenceResult {
   for (const s of situations) {
+    if (s.severity && !FENCING_SEVERITIES.has(s.severity)) continue;
     for (const glob of s.scope_routines) {
       if (globMatch(glob, id)) {
         return { fenced: true, situationSlug: s.slug, pattern: glob };

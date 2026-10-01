@@ -25,7 +25,7 @@ const MATRIX = {
 };
 
 function outage(harness: string): ActiveSituation {
-  return { slug: `harness-outage-${harness}`, scope_routines: ["*"] };
+  return { slug: `harness-outage-${harness}`, scope_routines: ["*"], severity: "p1" };
 }
 
 /** Record a local outage expiry, the retry hint the engine reports. */

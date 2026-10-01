@@ -688,7 +688,11 @@ function upsertSituation(
       (reset ? ` (provider reset hint: ${reset})` : "") +
       `. Filed by routinesd harness-outage; Tom paged via Telegram.`,
     status: "active",
-    severity: "high",
+    // Schema vocabulary is p0|p1|p2|p3 (`situations schema`), not "high" —
+    // a non-conforming severity here silently opts a real harness outage out
+    // of the fence's p0/p1 severity gate (src/situations.ts fenceFor). p1:
+    // this blocks real dispatch but is not an unqualified catastrophe.
+    severity: "p1",
     scope_systems: [`harness:${entry.harness}`],
     scope_routines: scopeRoutines,
     blocked_actions: [`dispatch-${entry.harness}-agents`],

@@ -62,10 +62,10 @@ const { routeForAvailability } = await import("../src/daemon.ts");
 const { resolveDifficulty, DIFFICULTIES } = await import("../src/difficulty-matrix.ts");
 const { ROUTE_MODES } = await import("../src/route-engine.ts");
 
-type Situation = { slug: string; status: string; scope_routines: string[] };
+type Situation = { slug: string; status: string; scope_routines: string[]; severity: string };
 
 function outage(harness: string): Situation {
-  return { slug: `harness-outage-${harness}`, status: "active", scope_routines: ["*"] };
+  return { slug: `harness-outage-${harness}`, status: "active", scope_routines: ["*"], severity: "p1" };
 }
 
 const FENCES: { name: string; situations: Situation[] }[] = [
