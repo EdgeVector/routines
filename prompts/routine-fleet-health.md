@@ -104,9 +104,33 @@ routines hygiene --json 2>/dev/null | head -c 4000 || true
    board-pipeline lines older than ~45 min while those routines are `active`
    means stall.
 5. `$ROUTINES_HOME/error-escalate/*.json` — map `id → lastCardSlug` for dedupe.
+6. **Active-count regression (mass-pause detector).** A bulk edit of
+   `$ROUTINES_HOME/registry/*.toml` can flip many routines to
+   `status=paused` with `next=-` and **zero** `lastOutcome=error` rows — a
+   silent fleet stop that `reds` alone never sees (measured 2026-10-01: 38
+   routines paused in one ~4 min window, `reds` stayed 0 the whole time).
+   Each pass:
+   - Count `active_count` = routines with `status=active` in
+     `routines list --json`.
+   - Read the prior `active_count` from Automation memory (last line
+     matching `active_count=<n>` from a prior pass; absent on a fresh
+     memory file — record and skip the comparison this pass).
+   - Append `active_count=<n> <ISO>` to Automation memory this pass,
+     always, even on noop.
+   - **Mass-pause regression**: current `active_count` is at least 5 lower
+     than the prior recorded value AND down by more than 15%. Treat this as
+     a true red regardless of `reds`, and do not stop at a memory note:
+     continue past the noop shortcut below into Step 4 and file/update a P1
+     `routine-fleet-active-count-regression-<date>` card the same pass (cap
+     and dedupe rules below still apply). Name the dropped ids (`routines
+     list --json` status diff) in the card evidence. A deliberate planned
+     pause (matching Situations notice, or Tom-authored `.bak-<reason>-*`
+     sibling files next to the newly paused registry entries) is not a
+     regression — skip filing and note the exemption in memory instead.
 
 Count `reds` = routines with lastOutcome=error (not running).
-If ALL clean **and** no healed cards to close: heartbeat `noop`, exit.
+If ALL clean, no mass-pause regression this pass, **and** no healed cards to
+close: heartbeat `noop`, exit.
 
 ## Step 2 — Auto-close healed routine-error cards (board hygiene)
 For each open board card whose slug is `routine-error-<id>` (or title clearly
