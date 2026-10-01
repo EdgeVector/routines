@@ -221,12 +221,14 @@ routines doctor               # validate registry + environment (+ configuration
 routines daemon               # the scheduler loop (launchd entrypoint); --once, --catchup <s>
 routines install-daemon       # install + load the launchd user agent
 routines install-hygiene      # install + load hourly mechanical hygiene launchd agent
+routines install-freeze-watch  # install + load the OUT-OF-FLEET fleet-freeze watchdog
+routines freeze-watch         # one freeze check; exit 0 ok, 1 frozen, 3 cannot judge
 routines print-plist          # preview the launchd plist
 ```
 
 ### Fleet hygiene (automatic cleanup)
 
-Two complementary layers:
+Three complementary layers:
 
 1. **`routines hygiene`** (mechanical, no LLM) — prunes old run dirs under
    `~/.routines/runs` (keep last 20 per id **or** last 7 days), truncates
@@ -238,7 +240,31 @@ Two complementary layers:
    `routines install-hygiene` (label `com.edgevector.routines-hygiene`), which
    writes a stable launcher at `~/.routines/daemon/run-hygiene.sh`. Shell
    wrapper for manual runs: `scripts/routines-hygiene.sh`.
-2. **`routine-fleet-health`** (agent, hourly) — closes healed
+2. **`routines freeze-watch`** (mechanical, no LLM, **not a routine**) — the
+   out-of-fleet watchdog. Every other detector that watched routinesd was
+   dispatched BY routinesd, so each shared the fate of its subject: on
+   2026-10-01 routinesd dispatched nothing for 59h48m across four daemon
+   generations, and separately 38 active routines flipped to
+   `status = "paused"` and the fleet stopped for 81 minutes. Both were reported
+   by nothing; `last-stack-why-stopped` and `routine-fleet-health` each ran
+   minutes after one ended and answered `ok`, because both are routines.
+   This check reads two files — the heartbeat log and `registry/*.toml` — and
+   nothing else: no node, no board, no daemon, no dispatch. launchd fires it
+   every 15 minutes via `routines install-freeze-watch` (label
+   `com.edgevector.routines-freeze-watch`). Two conditions:
+   - `dispatch-stale` — the newest routinesd-written heartbeat line is older
+     than 6 h (`--bound-seconds` to override). 6 h is derived from this host's
+     own gap distribution over 18085 dispatches: p99 is 3432 s, 17 lulls exceed
+     2 h, and all 8 gaps above 6 h were real freezes.
+   - `no-active-routines` — routines are registered and *none* is active. Needs
+     no bound and cannot false-positive, so a mass pause surfaces on the next
+     tick instead of waiting out the 6 h.
+   It never heals. A mass pause and a scheduler freeze want different repairs,
+   and resuming all 80 registry files would activate the ~40 that are
+   legitimately paused/retired/dogfood-only. It posts one `situations notice`
+   per episode (plus one on recovery) and exits `3`, never `0`, when it cannot
+   read what it needs to judge.
+3. **`routine-fleet-health`** (agent, hourly) — closes healed
    `routine-error-*` cards, safe registry timeout bumps for chronic 124s,
    dedupes against error-escalate, files pickup cards only when needed.
    Canonical prompt: `prompts/routine-fleet-health.md` (copy into

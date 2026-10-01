@@ -6,7 +6,7 @@
 
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { parseArgs } from "node:util";
 
 import pkg from "../package.json" with { type: "json" };
@@ -36,6 +36,9 @@ import {
   readFallbackChainFromLocalEnv,
   renderPlist,
   uninstallDaemon,
+  installFreezeWatch,
+  uninstallFreezeWatch,
+  renderFreezeWatchPlist,
 } from "./launchd.ts";
 import {
   installHygieneDaemon,
@@ -43,6 +46,14 @@ import {
   uninstallHygieneDaemon,
   type HygieneResult,
 } from "./hygiene.ts";
+import {
+  decideSurfacing,
+  freezeStatePath,
+  observeFreeze,
+  renderFreezeLine,
+  type FreezeState,
+  type FreezeVerdict,
+} from "./freeze-watch.ts";
 import { loadActiveSituations } from "./situations.ts";
 import { isRouteMode, routeAgent, ROUTE_MODES } from "./route-engine.ts";
 import { DIFFICULTIES, difficultyMatrixSource, isDifficulty } from "./difficulty-matrix.ts";
@@ -119,6 +130,10 @@ Commands:
   uninstall-daemon            unload + remove the launchd user agent
   install-hygiene             install + load hourly mechanical hygiene launchd agent
   uninstall-hygiene           unload the hygiene launchd agent
+  install-freeze-watch        install + load the OUT-OF-FLEET fleet-freeze watchdog agent
+  uninstall-freeze-watch      unload the freeze-watch launchd agent
+  freeze-watch                one freeze check (no node, no daemon); --bound-seconds <n>,
+                              --json, --notify; exit 0 ok, 1 frozen, 3 cannot judge
   print-plist                 print the launchd plist that install-daemon would write
   version                     print version
   help                        print this help
@@ -229,6 +244,12 @@ async function main(argv: string[]): Promise<number> {
       return cmdInstallHygiene();
     case "uninstall-hygiene":
       return cmdUninstallHygiene();
+    case "install-freeze-watch":
+      return cmdInstallFreezeWatch();
+    case "uninstall-freeze-watch":
+      return cmdUninstallFreezeWatch();
+    case "freeze-watch":
+      return cmdFreezeWatch(rest);
     case "print-plist":
       return cmdPrintPlist();
     default:
@@ -1118,6 +1139,141 @@ function printHygieneHuman(r: HygieneResult): void {
     for (const it of r.items) console.log(`    [${it.kind}] ${it.path} — ${it.detail}`);
   } else if (r.items.length > 30) {
     console.log(`  items: ${r.items.length} (use --json for full list)`);
+  }
+}
+
+function cmdInstallFreezeWatch(): number {
+  const res = installFreezeWatch({
+    runtime: process.execPath,
+    program: selfProgram(),
+    env: launchdEnv(),
+  });
+  console.log(`plist: ${res.plistPath}`);
+  console.log(res.message);
+  return res.loaded ? 0 : 1;
+}
+
+function cmdUninstallFreezeWatch(): number {
+  const res = uninstallFreezeWatch();
+  console.log(res.message);
+  return 0;
+}
+
+/**
+ * One out-of-fleet freeze check. READ-ONLY about the fleet: it never pauses,
+ * resumes, restarts, or heals anything. A mass pause and a scheduler freeze
+ * have different correct repairs, and resuming 80 registry files blindly would
+ * activate the ~42 that are legitimately paused/retired/dogfood-only.
+ *
+ * Exit codes are the contract for the LaunchAgent and for a hand run:
+ *   0 ok, 1 frozen, 3 cannot judge, 2 bad usage.
+ * `3` is deliberately NOT `0`: a watchdog whose dependency is missing and whose
+ * exit code says healthy is the failure mode that let both 2026-10-01 incidents
+ * run unreported.
+ */
+function cmdFreezeWatch(rest: string[]): number {
+  const { values } = parseArgs({
+    args: rest,
+    options: {
+      "bound-seconds": { type: "string" },
+      json: { type: "boolean" },
+      notify: { type: "boolean" },
+    },
+    allowPositionals: false,
+  });
+  let boundMs: number | undefined;
+  const raw = values["bound-seconds"];
+  if (raw != null && raw !== "") {
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n <= 0) {
+      console.error(`--bound-seconds must be a positive number, got ${JSON.stringify(raw)}`);
+      return 2;
+    }
+    boundMs = n * 1000;
+  }
+
+  const nowIso = new Date().toISOString();
+  const verdict = observeFreeze({ boundMs });
+  const line = renderFreezeLine(verdict, nowIso);
+
+  if (values.notify === true) {
+    const prev = readFreezeState();
+    const decision = decideSurfacing(prev, verdict, nowIso);
+    if (decision.kind !== "none") postFreezeNotice(decision.kind, verdict, nowIso);
+    writeFreezeState(decision.next);
+  }
+
+  if (values.json === true) {
+    console.log(JSON.stringify({ at: nowIso, line, ...verdict }, null, 2));
+  } else {
+    console.log(line);
+  }
+  if (verdict.frozen) return 1;
+  if (verdict.unknown) return 3;
+  return 0;
+}
+
+function readFreezeState(): FreezeState {
+  try {
+    return JSON.parse(readFileSync(freezeStatePath(), "utf8")) as FreezeState;
+  } catch {
+    return {};
+  }
+}
+
+function writeFreezeState(next: FreezeState): void {
+  // Best-effort: losing the stamp costs one duplicate notice, never a missed
+  // detection, so it must not fail the check.
+  try {
+    const p = freezeStatePath();
+    mkdirSync(dirname(p), { recursive: true });
+    writeFileSync(p, `${JSON.stringify(next, null, 2)}\n`, "utf8");
+  } catch {
+    /* ignore */
+  }
+}
+
+/**
+ * Surface, do not just log.
+ *
+ * A warning written only to a launchd .out.log reaches nobody: 14 consecutive
+ * hygiene warnings went unread through an 8h53m fleet outage
+ * (papercut-hygiene-sees-unloaded-routinesd-and-never-heals-it). `situations
+ * notice` lands on the timeline that every routine and every agent reads in its
+ * own first step, and it needs no routine to be dispatching.
+ */
+function postFreezeNotice(kind: string, v: FreezeVerdict, nowIso: string): void {
+  const title =
+    kind === "recovered"
+      ? "routinesd fleet dispatch recovered"
+      : kind === "unknown"
+        ? "freeze-watch cannot judge the routine fleet"
+        : `routinesd fleet frozen (${v.conditions.join(",")})`;
+  const summary =
+    kind === "recovered"
+      ? `dispatching again as of ${nowIso}; active=${v.census.active}/${v.census.registered}`
+      : v.reasons.join("; ");
+  try {
+    execFileSync(
+      process.env.ROUTINES_SITUATIONS_BIN || "situations",
+      [
+        "notice",
+        "--title",
+        title,
+        "--kind",
+        "other",
+        "--system",
+        "routinesd",
+        "--actor",
+        "launchagent:routines-freeze-watch",
+        "--summary",
+        summary,
+      ],
+      { stdio: "pipe", timeout: 20_000 },
+    );
+  } catch (err) {
+    // Never fatal. The exit code and the printed line already carry the verdict.
+    console.error(`freeze-watch: notice failed: ${(err as Error).message}`);
   }
 }
 

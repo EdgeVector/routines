@@ -360,3 +360,124 @@ export function uninstallDaemon(): InstallResult {
   }
   return { plistPath: p, loaded: false, message: msg + (existsSync(p) ? ` (plist left at ${p})` : "") };
 }
+
+/**
+ * The out-of-fleet freeze watchdog's launchd label.
+ *
+ * A SECOND agent, deliberately. Every detector that watched routinesd was
+ * dispatched BY routinesd, so each shared the fate of its subject: on
+ * 2026-10-01 a 59h48m dispatch freeze and an 81-minute mass pause were both
+ * reported by nothing, and `why-stopped` / `routine-fleet-health` answered `ok`
+ * minutes after each one ended. launchd fires this job whether or not the
+ * scheduler is dispatching, which is the only way the watcher outlives the
+ * outage it exists to catch.
+ *
+ * `ProcessType` is `SCHEDULER_PROCESS_TYPE` for the reason stated on that
+ * constant: a job whose correctness depends on firing ON TIME must never ask
+ * for the throttled band.
+ */
+export const FREEZE_WATCH_LAUNCHD_LABEL = "com.edgevector.routines-freeze-watch";
+
+export function freezeWatchPlistPath(): string {
+  return join(homedir(), "Library", "LaunchAgents", `${FREEZE_WATCH_LAUNCHD_LABEL}.plist`);
+}
+
+export function renderFreezeWatchPlist(opts: {
+  program: string;
+  runtime?: string;
+  intervalSec?: number;
+  env?: Record<string, string>;
+}): string {
+  const runtime = opts.runtime ?? process.execPath;
+  const interval = opts.intervalSec ?? 900;
+  const logDir = daemonLogDir();
+  const args = [runtime, opts.program, "freeze-watch", "--notify"];
+  const argXml = args.map((a) => `    <string>${xmlEscape(a)}</string>`).join("\n");
+  const env = { ROUTINES_HOME: routinesHome(), ...(opts.env ?? {}) };
+  const envXml = Object.entries(env)
+    .map(([k, v]) => `    <key>${xmlEscape(k)}</key>\n    <string>${xmlEscape(v)}</string>`)
+    .join("\n");
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>${FREEZE_WATCH_LAUNCHD_LABEL}</string>
+  <key>ProgramArguments</key>
+  <array>
+${argXml}
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+${envXml}
+  </dict>
+  <key>StartInterval</key>
+  <integer>${interval}</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>ProcessType</key>
+  <string>${SCHEDULER_PROCESS_TYPE}</string>
+  <key>StandardOutPath</key>
+  <string>${xmlEscape(join(logDir, "freeze-watch.out.log"))}</string>
+  <key>StandardErrorPath</key>
+  <string>${xmlEscape(join(logDir, "freeze-watch.err.log"))}</string>
+</dict>
+</plist>
+`;
+}
+
+export function installFreezeWatch(opts: {
+  program: string;
+  runtime?: string;
+  intervalSec?: number;
+  env?: Record<string, string>;
+}): InstallResult {
+  const p = freezeWatchPlistPath();
+  mkdirSync(join(homedir(), "Library", "LaunchAgents"), { recursive: true });
+  mkdirSync(daemonLogDir(), { recursive: true });
+  writeFileSync(p, renderFreezeWatchPlist(opts));
+  const uid = process.getuid?.() ?? 0;
+  try {
+    try {
+      execFileSync("launchctl", ["bootout", `gui/${uid}/${FREEZE_WATCH_LAUNCHD_LABEL}`], {
+        stdio: "ignore",
+      });
+    } catch {
+      /* not loaded */
+    }
+    execFileSync("launchctl", ["bootstrap", `gui/${uid}`, p], { stdio: "pipe" });
+    return {
+      plistPath: p,
+      loaded: true,
+      message: `bootstrapped gui/${uid}/${FREEZE_WATCH_LAUNCHD_LABEL}`,
+    };
+  } catch (err) {
+    return {
+      plistPath: p,
+      loaded: false,
+      message:
+        `wrote plist but launchctl bootstrap failed: ${(err as Error).message}. ` +
+        `Load manually: launchctl bootstrap gui/${uid} ${p}`,
+    };
+  }
+}
+
+export function uninstallFreezeWatch(): InstallResult {
+  const p = freezeWatchPlistPath();
+  const uid = process.getuid?.() ?? 0;
+  let msg: string;
+  try {
+    execFileSync("launchctl", ["bootout", `gui/${uid}/${FREEZE_WATCH_LAUNCHD_LABEL}`], {
+      stdio: "pipe",
+    });
+    msg = `booted out gui/${uid}/${FREEZE_WATCH_LAUNCHD_LABEL}`;
+  } catch {
+    msg = `${FREEZE_WATCH_LAUNCHD_LABEL} was not loaded`;
+  }
+  return {
+    plistPath: p,
+    loaded: false,
+    message: msg + (existsSync(p) ? ` (plist left at ${p})` : ""),
+  };
+}
