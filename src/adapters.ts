@@ -234,6 +234,12 @@ export function filterHarnessEnv(harness: Harness, env: NodeJS.ProcessEnv): Node
     // Codex's shell identity when running after a Codex routine.
     delete out["CODEX_SANDBOX_WORKSPACE_DIR"];
     delete out["CODEX_SANDBOX_FALLBACK_DIR"];
+    // papercut-routines-grok-inherits-codex-shell-identity-20260923: a Grok
+    // routine dispatched from a Codex-parented shell silently no-ops (exit 0,
+    // no output, no side effects) until CODEX_THREAD_ID is unset. The two
+    // CODEX_SANDBOX_* vars above were the first guess; the repro's own
+    // reproduction named this one as the actual trigger.
+    delete out["CODEX_THREAD_ID"];
   }
 
   return out;
