@@ -606,6 +606,22 @@ Prior memory:
     expect(filtered).toContain("another line stays");
   });
 
+  test("filters benign Codex model-cache TTL warning for a different missing field", () => {
+    // Codex's schema has dropped supports_reasoning_summaries, then later
+    // supports_parallel_tool_calls, under the same error shape with no code
+    // change on our side between occurrences. The filter matches the shape,
+    // not one hardcoded field-name literal.
+    const text = [
+      "real failure detail stays",
+      "ERROR codex_models_manager::manager: failed to renew cache TTL: missing field `supports_parallel_tool_calls` at line 140 column 5",
+      "another line stays",
+    ].join("\n");
+    const filtered = filterBenignHarnessNoise(text);
+    expect(filtered).not.toContain("supports_parallel_tool_calls");
+    expect(filtered).toContain("real failure detail stays");
+    expect(filtered).toContain("another line stays");
+  });
+
   test("benign Codex cache warning does not override real routine result", () => {
     const text = `
 ERROR codex_models_manager::manager: failed to renew cache TTL: missing field supports_reasoning_summaries at line 86 column 5
