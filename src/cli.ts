@@ -38,7 +38,6 @@ import {
   uninstallDaemon,
   installFreezeWatch,
   uninstallFreezeWatch,
-  renderFreezeWatchPlist,
 } from "./launchd.ts";
 import {
   installHygieneDaemon,
@@ -1144,8 +1143,8 @@ function printHygieneHuman(r: HygieneResult): void {
 
 function cmdInstallFreezeWatch(): number {
   const res = installFreezeWatch({
-    runtime: process.execPath,
-    program: selfProgram(),
+    execPath: process.execPath,
+    entrypoint: selfProgram(),
     env: launchdEnv(),
   });
   console.log(`plist: ${res.plistPath}`);
