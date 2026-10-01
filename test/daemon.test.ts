@@ -535,6 +535,30 @@ describe("daemon evaluateOnce", () => {
     expect(missedDir).toBeDefined();
     const liveSink = readFileSync(join(results[0]!.runDir, "outcome.txt"), "utf8");
     expect(liveSink).toMatch(/^noop all-routes-fenced harnesses=/m);
+
+    // The back-filled record must claim ZERO execution time. `startedAt` is the
+    // missed calendar occurrence, 48h back in this fixture, and nothing ran at
+    // it; `finishedAt - startedAt` is the age of the GAP. Publishing that as a
+    // duration put `dur=179951.5s` (50h) on four real fleet heartbeat lines
+    // with `timedOut: false`, and it reads as a two-day hang.
+    const missedMeta = JSON.parse(readFileSync(join(missedDir!, "meta.json"), "utf8"));
+    expect(missedMeta.durationMs).toBe(0);
+    expect(missedMeta.timedOut).toBe(false);
+    // The gap itself is not lost — the detail states it exactly.
+    expect(missedMeta.outcomeDetail).toMatch(
+      /^missed-fire since=\S+ first=\S+ coalesced_to=\S+$/,
+    );
+
+    // ... and the heartbeat line, the surface every fleet reader uses, must
+    // both carry zero and NAME the reason. `grep missed-fire` over the real log
+    // answered 0 across its whole history while four such lines sat in it.
+    const missedHb = readFileSync(heartbeatOut, "utf8")
+      .trim()
+      .split("\n")
+      .filter((line) => line.includes(missedDir!));
+    expect(missedHb).toHaveLength(1);
+    expect(missedHb[0]).toContain(" dur=0.0s ");
+    expect(missedHb[0]).toContain("reason=missed-fire");
   });
 
   test("dispatch envelope uses registry id for automation memory, not prompt frontmatter name", async () => {
