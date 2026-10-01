@@ -243,7 +243,7 @@ export function plistOptionsForEntrypoint(opts: {
   if (wrapper && isExecutable(wrapper)) {
     return { program: wrapper, direct: true, wrapper: true, env: opts.env };
   }
-  if (opts.entrypoint.startsWith("/$bunfs/") || opts.entrypoint.startsWith("$bunfs/")) {
+  if (isBunfsEntrypoint(opts.entrypoint)) {
     return { program: stableHostTrackExecutable(opts.execPath), direct: true, env: opts.env };
   }
   return {
@@ -251,6 +251,79 @@ export function plistOptionsForEntrypoint(opts: {
     runtime: opts.execPath,
     env: opts.env,
   };
+}
+
+/**
+ * True for Bun's embedded entrypoint pseudo-path.
+ *
+ * One spelling, so every launchd caller tests it the same way. Two callers
+ * disagreeing on this is what shipped an unrunnable watchdog agent.
+ */
+export function isBunfsEntrypoint(entrypoint: string): boolean {
+  return entrypoint.startsWith("/$bunfs/") || entrypoint.startsWith("$bunfs/");
+}
+
+/** A path inside one immutable host-track version tree, for any app. */
+const HOST_TRACK_VERSION_PATH = /\/\.host-track\/apps\/[^/]+\/versions\/[0-9a-f]{64}\//;
+
+/**
+ * argv for a launchd job that runs `routines <verb…>` as a one-shot.
+ *
+ * Both hazards it resolves were already named in this file, and the
+ * `freeze-watch` installer reintroduced both by hand-building its argv from
+ * `process.execPath` + `process.argv[1]` instead of coming through here:
+ *
+ * 1. A compiled Bun program reports an embedded `/$bunfs/...` argv[1], which
+ *    the binary reads back as a user argument (see `plistOptionsForEntrypoint`).
+ *    Measured 2026-10-01 against the shipped artifact, running the exact argv
+ *    the installer would have written:
+ *
+ *      $ <binary> '/$bunfs/root/cli.ts' freeze-watch
+ *      unknown command: /$bunfs/root/cli.ts          (exit 2)
+ *
+ *    So that agent would have exited 2 every 15 min and never run one check.
+ * 2. A path inside one `versions/<digest>/` tree dies when host-track prunes
+ *    it, and never picks up a later fix to the job itself (see
+ *    `stableHostTrackExecutable`).
+ *
+ * Any further launchd one-shot must come through this function.
+ */
+export function launchdArgvForVerb(opts: {
+  execPath: string;
+  entrypoint: string;
+  verb: readonly string[];
+}): string[] {
+  const runtime = stableHostTrackExecutable(opts.execPath);
+  const argv = isBunfsEntrypoint(opts.entrypoint)
+    ? [runtime, ...opts.verb]
+    : [runtime, stableHostTrackExecutable(opts.entrypoint), ...opts.verb];
+  assertRunnableLaunchdArgv(argv);
+  return argv;
+}
+
+/**
+ * Refuse an argv launchd cannot run, or that rots at the next prune.
+ *
+ * A structural guard rather than a comment, because the unrunnable form was
+ * written while this file already documented why it does not work. Throwing is
+ * correct here: the alternative is a loaded agent that reports nothing, which
+ * is the exact failure the watchdog exists to end.
+ */
+export function assertRunnableLaunchdArgv(argv: readonly string[]): void {
+  const pseudo = argv.find((a) => isBunfsEntrypoint(a));
+  if (pseudo != null) {
+    throw new Error(
+      `launchd argv names Bun's embedded pseudo-path, which the binary reads as a ` +
+        `user argument: ${pseudo}`,
+    );
+  }
+  const pinned = argv.find((a) => HOST_TRACK_VERSION_PATH.test(a));
+  if (pinned != null) {
+    throw new Error(
+      `launchd argv is pinned to one host-track version tree, which dies at the ` +
+        `next prune: ${pinned}`,
+    );
+  }
 }
 
 /**
@@ -382,17 +455,25 @@ export function freezeWatchPlistPath(): string {
   return join(homedir(), "Library", "LaunchAgents", `${FREEZE_WATCH_LAUNCHD_LABEL}.plist`);
 }
 
+/** The verb the watchdog agent runs. `--notify` is what surfaces an episode. */
+export const FREEZE_WATCH_VERB: readonly string[] = ["freeze-watch", "--notify"];
+
+/**
+ * Render the watchdog plist from an ALREADY RESOLVED argv.
+ *
+ * It takes argv rather than a program path on purpose: resolving it here would
+ * be a second resolver, and the first thing a second resolver did was ship an
+ * agent that could not run. Callers use `launchdArgvForVerb`.
+ */
 export function renderFreezeWatchPlist(opts: {
-  program: string;
-  runtime?: string;
+  argv: readonly string[];
   intervalSec?: number;
   env?: Record<string, string>;
 }): string {
-  const runtime = opts.runtime ?? process.execPath;
   const interval = opts.intervalSec ?? 900;
   const logDir = daemonLogDir();
-  const args = [runtime, opts.program, "freeze-watch", "--notify"];
-  const argXml = args.map((a) => `    <string>${xmlEscape(a)}</string>`).join("\n");
+  assertRunnableLaunchdArgv(opts.argv);
+  const argXml = opts.argv.map((a) => `    <string>${xmlEscape(a)}</string>`).join("\n");
   const env = { ROUTINES_HOME: routinesHome(), ...(opts.env ?? {}) };
   const envXml = Object.entries(env)
     .map(([k, v]) => `    <key>${xmlEscape(k)}</key>\n    <string>${xmlEscape(v)}</string>`)
@@ -428,15 +509,20 @@ ${envXml}
 }
 
 export function installFreezeWatch(opts: {
-  program: string;
-  runtime?: string;
+  execPath: string;
+  entrypoint: string;
   intervalSec?: number;
   env?: Record<string, string>;
 }): InstallResult {
+  const argv = launchdArgvForVerb({
+    execPath: opts.execPath,
+    entrypoint: opts.entrypoint,
+    verb: FREEZE_WATCH_VERB,
+  });
   const p = freezeWatchPlistPath();
   mkdirSync(join(homedir(), "Library", "LaunchAgents"), { recursive: true });
   mkdirSync(daemonLogDir(), { recursive: true });
-  writeFileSync(p, renderFreezeWatchPlist(opts));
+  writeFileSync(p, renderFreezeWatchPlist({ ...opts, argv }));
   const uid = process.getuid?.() ?? 0;
   try {
     try {

@@ -23,7 +23,14 @@ import {
   type FreezeState,
   type RegistryCensus,
 } from "../src/freeze-watch.ts";
-import { isThrottledProcessType, readProcessType, renderFreezeWatchPlist } from "../src/launchd.ts";
+import {
+  assertRunnableLaunchdArgv,
+  FREEZE_WATCH_VERB,
+  isThrottledProcessType,
+  launchdArgvForVerb,
+  readProcessType,
+  renderFreezeWatchPlist,
+} from "../src/launchd.ts";
 
 // Real lines, copied from ~/.last-stack/logs/routine-heartbeats.log. The
 // non-routinesd producers share the file and are the whole reason the matcher
@@ -239,8 +246,73 @@ describe("decideSurfacing", () => {
   });
 });
 
+// The two argv shapes the INSTALLED artifact actually produces. The original
+// test fixture was `{program: "/opt/routines/cli.ts", runtime: "/bin/bun"}` — a
+// source-checkout shape that exercises neither, which is why an agent that could
+// not run shipped green.
+const COMPILED = {
+  // `process.execPath` of the installed artifact, and the `process.argv[1]` a
+  // compiled Bun binary reports. Both read off the live host 2026-10-01.
+  execPath:
+    "/Users/tomtang/.host-track/apps/routines/versions/" +
+    "0f961583dbd30590942e874b349c05e2c82194e0f6cec7222d8d2d9d2eb97736/dist/routines",
+  entrypoint: "/$bunfs/root/cli.ts",
+};
+const STABLE = "/Users/tomtang/.host-track/apps/routines/current/dist/routines";
+
+describe("launchdArgvForVerb", () => {
+  test("a compiled artifact runs the binary DIRECTLY, never its own pseudo-path", () => {
+    // Measured against the shipped artifact: passing the pseudo-path back gives
+    // `unknown command: /$bunfs/root/cli.ts`, exit 2 — every tick, forever.
+    const argv = launchdArgvForVerb({ ...COMPILED, verb: FREEZE_WATCH_VERB });
+    expect(argv).toEqual([STABLE, "freeze-watch", "--notify"]);
+    expect(argv.join(" ")).not.toContain("$bunfs");
+  });
+
+  test("the runtime path is the stable `current` link, not one version tree", () => {
+    const argv = launchdArgvForVerb({ ...COMPILED, verb: FREEZE_WATCH_VERB });
+    expect(argv[0]).toContain("/current/");
+    expect(argv[0]).not.toMatch(/\/versions\/[0-9a-f]{64}\//);
+  });
+
+  test("a source checkout still runs runtime + entrypoint", () => {
+    const argv = launchdArgvForVerb({
+      execPath: "/bin/bun",
+      entrypoint: "/opt/routines/cli.ts",
+      verb: FREEZE_WATCH_VERB,
+    });
+    expect(argv).toEqual(["/bin/bun", "/opt/routines/cli.ts", "freeze-watch", "--notify"]);
+  });
+});
+
+describe("assertRunnableLaunchdArgv", () => {
+  test("refuses a Bun pseudo-path anywhere in argv", () => {
+    expect(() =>
+      assertRunnableLaunchdArgv(["/bin/bun", "/$bunfs/root/cli.ts", "freeze-watch"]),
+    ).toThrow(/pseudo-path/);
+  });
+
+  test("refuses a path pinned to one host-track version tree", () => {
+    expect(() => assertRunnableLaunchdArgv([COMPILED.execPath, "freeze-watch"])).toThrow(
+      /pinned to one host-track version tree/,
+    );
+  });
+
+  test("accepts the resolved form", () => {
+    expect(() => assertRunnableLaunchdArgv([STABLE, "freeze-watch", "--notify"])).not.toThrow();
+  });
+});
+
 describe("renderFreezeWatchPlist", () => {
-  const xml = renderFreezeWatchPlist({ program: "/opt/routines/cli.ts", runtime: "/bin/bun" });
+  const xml = renderFreezeWatchPlist({
+    argv: launchdArgvForVerb({ ...COMPILED, verb: FREEZE_WATCH_VERB }),
+  });
+
+  test("the rendered argv is one the binary can run", () => {
+    expect(xml).toContain(`<string>${STABLE}</string>`);
+    expect(xml).not.toContain("$bunfs");
+    expect(xml).not.toMatch(/versions\/[0-9a-f]{64}/);
+  });
 
   test("runs the freeze-watch verb with --notify", () => {
     expect(xml).toContain("<string>freeze-watch</string>");
@@ -257,6 +329,15 @@ describe("renderFreezeWatchPlist", () => {
 
   test("declares a StartInterval so launchd, not routinesd, drives it", () => {
     expect(xml).toMatch(/<key>StartInterval<\/key>\s*<integer>\d+<\/integer>/);
+  });
+
+  test("refuses to WRITE an unrunnable argv, even if a caller hand-builds one", () => {
+    // The renderer is the last point before the bytes reach disk. A future
+    // caller that skips `launchdArgvForVerb` must fail here rather than install
+    // an agent that exits 2 every tick.
+    expect(() =>
+      renderFreezeWatchPlist({ argv: [COMPILED.execPath, COMPILED.entrypoint, "freeze-watch"] }),
+    ).toThrow(/pseudo-path/);
   });
 });
 
