@@ -48,9 +48,14 @@ export interface OutcomeStats {
 
 const DETAIL_MAX = 240;
 
+// Codex's model-cache schema has dropped a field under this exact error
+// shape at least twice (supports_reasoning_summaries, then
+// supports_parallel_tool_calls) with no code change on our side between
+// occurrences. Match the field name generically so the next schema drift
+// does not require a new hardcoded literal here.
 const BENIGN_HARNESS_NOISE_LINES: RegExp[] = [
-  /^\s*(?:\d{4}-\d{2}-\d{2}T[^\s]+\s+)?ERROR\s+codex_models_manager::manager:\s+failed to renew cache TTL:\s+missing field `?supports_reasoning_summaries`?\b.*$/i,
-  /^\s*(?:\d{4}-\d{2}-\d{2}T[^\s]+\s+)?ERROR\s+codex_models_manager::cache:\s+failed to load models cache:\s+missing field `?supports_reasoning_summaries`?\b.*$/i,
+  /^\s*(?:\d{4}-\d{2}-\d{2}T[^\s]+\s+)?ERROR\s+codex_models_manager::manager:\s+failed to renew cache TTL:\s+missing field `?[A-Za-z_][A-Za-z0-9_]*`?\b.*$/i,
+  /^\s*(?:\d{4}-\d{2}-\d{2}T[^\s]+\s+)?ERROR\s+codex_models_manager::cache:\s+failed to load models cache:\s+missing field `?[A-Za-z_][A-Za-z0-9_]*`?\b.*$/i,
 ];
 
 /** Names agents historically put in heartbeats that map to a registry id. */

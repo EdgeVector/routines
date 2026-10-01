@@ -155,7 +155,10 @@ function resolveBenignCodexCacheFallbackOutcome(
   if (meta.outcome !== "error") return null;
   if (
     typeof meta.outcomeDetail !== "string" ||
-    !/\bcodex_models_manager::(?:manager|cache):\s+failed to (?:renew cache TTL|load models cache):\s+missing field `?supports_reasoning_summaries`?\b/i.test(
+    // Generic on the field name: this schema has dropped a different
+    // field under the identical error shape before (supports_reasoning_summaries,
+    // then supports_parallel_tool_calls) with no code change on our side.
+    !/\bcodex_models_manager::(?:manager|cache):\s+failed to (?:renew cache TTL|load models cache):\s+missing field `?[A-Za-z_][A-Za-z0-9_]*`?\b/i.test(
       meta.outcomeDetail,
     )
   ) {
