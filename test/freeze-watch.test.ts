@@ -8,7 +8,7 @@
 // fired condition is load-bearing.
 
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync, chmodSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -18,8 +18,12 @@ import {
   decideSurfacing,
   DEFAULT_DISPATCH_BOUND_MS,
   episodeKey,
+  newestDaemonDispatchAt,
   newestDispatchAt,
+  observeFreeze,
   renderFreezeLine,
+  routinesdLogPath,
+  tailBytes,
   type FreezeState,
   type RegistryCensus,
 } from "../src/freeze-watch.ts";
@@ -357,5 +361,266 @@ describe("tailBytes", () => {
     const text = [ROUTINESD_LINE, ...OTHER_PRODUCER_LINES].join("\n");
     const window = text.slice(-120);
     expect(newestDispatchAt(window)).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The authoritative dispatch source: routinesd's OWN log.
+//
+// The defect these guard against was measured on 2026-10-02. `freeze-watch`
+// inferred scheduler liveness ONLY from the heartbeat log, and `writeHeartbeat`
+// appends there only when a routine sets `heartbeat_slug` — 28 of 81 entries,
+// and 0 of the 3 routines the fleet had been deliberately narrowed to. So the
+// watchdog read FROZEN dispatch-stale age=76084s while routinesd's own log held
+// 11 dispatches in the preceding 2 h and a `complete` 100 s before the probe.
+// A watchdog crying freeze at a healthy fleet is the one failure that trains an
+// operator to stop reading it.
+// ---------------------------------------------------------------------------
+
+// Real lines, copied from ~/.routines/daemon/routinesd.err.log.
+const DAEMON_DISPATCH =
+  '{"ts":"2026-10-02T21:15:05.460Z","kind":"dispatch","id":"last-stack-fkanban-pickup-w2",' +
+  '"detail":"grok/grok-4.7-build-fast"}';
+const DAEMON_COMPLETE =
+  '{"ts":"2026-10-02T21:16:10.928Z","kind":"complete","id":"last-stack-fkanban-pickup-w2",' +
+  '"detail":"exit=0 run=/Users/tomtang/.routines/runs/last-stack-fkanban-pickup-w2/2026-10-02T21-15-05-550Z"}';
+const DAEMON_TICKS = [
+  '{"ts":"2026-10-02T21:17:00.668Z","kind":"tick","detail":"81 routines in_flight=0 unspawned=0 stagger=60000ms"}',
+  '{"ts":"2026-10-02T21:17:20.103Z","kind":"tick","detail":"81 routines in_flight=0 unspawned=0 stagger=60000ms"}',
+  '{"ts":"2026-10-02T21:17:42.336Z","kind":"tick","detail":"81 routines in_flight=0 unspawned=0 stagger=60000ms"}',
+];
+
+describe("newestDaemonDispatchAt", () => {
+  test("returns the newest dispatch/complete record", () => {
+    const text = [DAEMON_DISPATCH, DAEMON_COMPLETE, ...DAEMON_TICKS].join("\n");
+    expect(newestDaemonDispatchAt(text)).toBe("2026-10-02T21:16:10.928Z");
+  });
+
+  test("a log of ONLY ticks names no dispatch — a tick is not a dispatch", () => {
+    // THE load-bearing case. Through the 59h48m freeze the daemon kept ticking
+    // `80 routines in_flight=0` and dispatched nothing. A matcher that accepted
+    // ticks would read that log as fresh forever and mask the exact outage this
+    // module exists to catch, while looking healthier than the old code did.
+    expect(newestDaemonDispatchAt(DAEMON_TICKS.join("\n"))).toBeNull();
+  });
+
+  test("key order is not load-bearing", () => {
+    expect(
+      newestDaemonDispatchAt('{"kind":"dispatch","ts":"2026-10-02T21:15:05.460Z","id":"x"}'),
+    ).toBe("2026-10-02T21:15:05.460Z");
+  });
+
+  test("empty text and non-JSON text name no dispatch", () => {
+    expect(newestDaemonDispatchAt("")).toBeNull();
+    expect(newestDaemonDispatchAt("not json at all\nnor this")).toBeNull();
+  });
+});
+
+describe("classifyFreeze — the two dispatch sources", () => {
+  const recent = new Date(NOW - 100_000).toISOString();
+  const ancient = new Date(NOW - 21 * 3600_000).toISOString();
+
+  test("THE REGRESSION: a fresh daemon dispatch clears a stale heartbeat log", () => {
+    // 2026-10-02 verbatim: heartbeat silent for 21 h because no active routine
+    // sets `heartbeat_slug`, daemon dispatched 100 s ago. The old code read
+    // only the heartbeat source and answered FROZEN.
+    const v = classifyFreeze({
+      nowMs: NOW,
+      census: census({ registered: 81, active: 3, paused: 78 }),
+      dispatchLogReadable: true,
+      newestDispatchAt: ancient,
+      daemonLogReadable: true,
+      daemonDispatchAt: recent,
+    });
+    expect(v.frozen).toBe(false);
+    expect(v.unknown).toBe(false);
+    expect(v.conditions).toEqual([]);
+    expect(v.dispatchAgeMs).toBe(100_000);
+  });
+
+  test("a fresh heartbeat line clears a stale daemon log — the reverse also holds", () => {
+    const v = classifyFreeze({
+      nowMs: NOW,
+      census: census(),
+      dispatchLogReadable: true,
+      newestDispatchAt: recent,
+      daemonLogReadable: true,
+      daemonDispatchAt: ancient,
+    });
+    expect(v.frozen).toBe(false);
+    expect(v.dispatchAgeMs).toBe(100_000);
+  });
+
+  test("BOTH sources stale still fires — a real freeze is still a freeze", () => {
+    // The whole point of the change is to remove a false POSITIVE without
+    // buying a false negative. Nothing may clear a freeze both sources saw.
+    const v = classifyFreeze({
+      nowMs: NOW,
+      census: census(),
+      dispatchLogReadable: true,
+      newestDispatchAt: ancient,
+      daemonLogReadable: true,
+      daemonDispatchAt: ancient,
+    });
+    expect(v.frozen).toBe(true);
+    expect(v.conditions).toEqual(["dispatch-stale"]);
+  });
+
+  test("a missing daemon log is not a fault when the heartbeat log answers", () => {
+    // Hosts whose launchd rotated the daemon log away must not go UNKNOWN on
+    // that alone; the heartbeat source is exactly why it is kept.
+    const v = classifyFreeze({
+      nowMs: NOW,
+      census: census(),
+      dispatchLogReadable: true,
+      newestDispatchAt: recent,
+      daemonLogReadable: false,
+      daemonDispatchAt: null,
+    });
+    expect(v.frozen).toBe(false);
+    expect(v.unknown).toBe(false);
+  });
+
+  test("a daemon dispatch alone is enough — no heartbeat log at all", () => {
+    const v = classifyFreeze({
+      nowMs: NOW,
+      census: census(),
+      dispatchLogReadable: false,
+      newestDispatchAt: null,
+      daemonLogReadable: true,
+      daemonDispatchAt: recent,
+    });
+    expect(v.frozen).toBe(false);
+    expect(v.unknown).toBe(false);
+  });
+
+  test("NO source usable is UNKNOWN, never OK, and names every source", () => {
+    const v = classifyFreeze({
+      nowMs: NOW,
+      census: census(),
+      dispatchLogReadable: true,
+      newestDispatchAt: null,
+      daemonLogReadable: false,
+      daemonDispatchAt: null,
+    });
+    expect(v.unknown).toBe(true);
+    expect(v.frozen).toBe(false);
+    const reasons = v.reasons.join(" ");
+    expect(reasons).toContain("routinesd daemon log");
+    expect(reasons).toContain("heartbeat log");
+    expect(renderFreezeLine(v, "2026-10-02T21:00:00.000Z")).toContain("UNKNOWN");
+  });
+
+  test("omitting the daemon fields entirely keeps the old single-source behaviour", () => {
+    // Callers that predate the second source must not silently go UNKNOWN.
+    const v = classifyFreeze({
+      nowMs: NOW,
+      census: census(),
+      dispatchLogReadable: true,
+      newestDispatchAt: ancient,
+    });
+    expect(v.frozen).toBe(true);
+    expect(v.conditions).toEqual(["dispatch-stale"]);
+  });
+});
+
+describe("tailBytes seeks instead of slurping", () => {
+  test("returns only the tail window of a file larger than it", () => {
+    const dir = mkdtempSync(join(tmpdir(), "freeze-tail-"));
+    const path = join(dir, "big.log");
+    // 'a' * 5000 then a marker: a 64-byte window must hold the marker ONLY.
+    writeFileSync(path, "a".repeat(5000) + "MARKER-AT-THE-END");
+    const got = tailBytes(path, 17);
+    expect(got).toBe("MARKER-AT-THE-END");
+    expect(got!.length).toBe(17);
+  });
+
+  test("a window larger than the file returns the whole file", () => {
+    const dir = mkdtempSync(join(tmpdir(), "freeze-tail-"));
+    const path = join(dir, "small.log");
+    writeFileSync(path, "short");
+    expect(tailBytes(path, 4_194_304)).toBe("short");
+  });
+
+  test("an unreadable path is null, not a throw", () => {
+    expect(tailBytes(join(tmpdir(), "freeze-tail-does-not-exist", "x.log"), 64)).toBeNull();
+  });
+
+  test("routinesdLogPath resolves under the routines daemon log dir", () => {
+    // Derived from `daemonLogDir()`, the same helper that writes routinesd's
+    // StandardErrorPath, so the reader cannot drift from the writer.
+    expect(routinesdLogPath().endsWith("/daemon/routinesd.err.log")).toBe(true);
+  });
+});
+
+describe("observeFreeze wiring — the caller, not just the classifier", () => {
+  // Found by a mutation probe: deleting the daemon read from `observeFreeze`
+  // broke NO test, because every case above feeds `classifyFreeze` directly.
+  // Testing the function is not testing its caller, and the caller is where
+  // "which files do we actually read" lives — which is the whole fix.
+  function host(opts: { daemon?: string; heartbeat?: string; active?: number }) {
+    const dir = mkdtempSync(join(tmpdir(), "freeze-observe-"));
+    const registry = join(dir, "registry");
+    mkdirSync(registry, { recursive: true });
+    for (let i = 0; i < (opts.active ?? 3); i++) {
+      writeFileSync(join(registry, `r${i}.toml`), 'status = "active"\n');
+    }
+    const daemonLogPath = join(dir, "routinesd.err.log");
+    const logPath = join(dir, "heartbeats.log");
+    writeFileSync(daemonLogPath, opts.daemon ?? "");
+    writeFileSync(logPath, opts.heartbeat ?? "");
+    return { registry, daemonLogPath, logPath };
+  }
+
+  const NOW_MS = Date.parse("2026-10-02T21:25:54.000Z");
+  const freshDaemon =
+    '{"ts":"2026-10-02T21:16:10.928Z","kind":"complete","id":"last-stack-fkanban-pickup-w2","detail":"exit=0"}';
+  const staleHeartbeat =
+    "2026-10-02T00:08:50.426Z last-stack-revenant-watch error harness=codex model=gpt-6-luna " +
+    "exit=1 dur=9.0s run=/x";
+
+  test("reads routinesd's log, so a fresh dispatch there clears a stale heartbeat log", () => {
+    const h = host({ daemon: freshDaemon, heartbeat: staleHeartbeat });
+    const v = observeFreeze({ ...h, nowMs: NOW_MS });
+    expect(v.frozen).toBe(false);
+    expect(v.unknown).toBe(false);
+    // 21:25:54 - 21:16:10.928 = 583.072s -> 584s after Math.round of the age.
+    expect(Math.round(v.dispatchAgeMs! / 1000)).toBe(583);
+  });
+
+  test("still reads the heartbeat log, so it alone can clear a freeze", () => {
+    const h = host({
+      daemon: '{"ts":"2026-10-02T21:17:42.336Z","kind":"tick","detail":"81 routines in_flight=0"}',
+      heartbeat:
+        "2026-10-02T21:16:10.928Z last-stack-fkanban-pickup ok harness=codex model=x exit=0 dur=1.0s run=/x",
+    });
+    const v = observeFreeze({ ...h, nowMs: NOW_MS });
+    expect(v.frozen).toBe(false);
+    // `unknown` must be false too, or this case passes when the heartbeat read
+    // is deleted: a dropped source degrades to UNKNOWN, which is also not
+    // `frozen`. A mutation probe caught exactly that — asserting one field of a
+    // three-state verdict tests less than it looks like it does.
+    expect(v.unknown).toBe(false);
+    expect(Math.round(v.dispatchAgeMs! / 1000)).toBe(583);
+  });
+
+  test("both logs stale still FROZEN through the real read path", () => {
+    const h = host({
+      daemon: '{"ts":"2026-09-29T04:00:00.000Z","kind":"dispatch","id":"x","detail":"y"}',
+      heartbeat: staleHeartbeat,
+    });
+    const v = observeFreeze({ ...h, nowMs: NOW_MS });
+    expect(v.frozen).toBe(true);
+    expect(v.conditions).toEqual(["dispatch-stale"]);
+  });
+
+  test("a daemon log of only ticks does not clear a freeze through the read path", () => {
+    const h = host({
+      daemon: '{"ts":"2026-10-02T21:17:42.336Z","kind":"tick","detail":"81 routines in_flight=0"}',
+      heartbeat: "",
+    });
+    const v = observeFreeze({ ...h, nowMs: NOW_MS });
+    expect(v.unknown).toBe(true);
+    expect(v.frozen).toBe(false);
   });
 });

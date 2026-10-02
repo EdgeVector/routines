@@ -19,18 +19,29 @@
 //
 // Both records name the same missing half: a watcher with NO dependency on
 // routinesd dispatching anything. This module is that watcher's decision logic.
-// It reads two files and nothing else — no node, no board, no daemon, no
-// dispatch — so it keeps working during exactly the outage it exists to catch.
+// It reads files and nothing else — no node, no board, no daemon, no dispatch —
+// so it keeps working during exactly the outage it exists to catch.
+//
+// DISPATCH LIVENESS COMES FROM TWO SOURCES, NEWEST WINS
+//
+// routinesd's own log (`daemon/routinesd.err.log`) is authoritative: the daemon
+// writes a `dispatch` record for every dispatch, unconditionally. The heartbeat
+// log is corroboration only — `writeHeartbeat` fires solely when a routine sets
+// `heartbeat_slug`, so it misses 53 of this host's 81 entries, and on
+// 2026-10-02 it missed all 3 active ones and reported a 21 h freeze on a
+// scheduler that had dispatched 100 s earlier. Keeping both and taking the
+// newest removes that blind spot without ever inventing liveness: each source
+// only reports dispatches it actually saw.
 //
 // It deliberately does NOT heal. A mass pause and a scheduler freeze have
 // different correct repairs, and resuming 80 registry files blindly would
 // activate the 42 that are legitimately paused/retired/dogfood-only. Surfacing
 // is the whole job.
 
-import { readFileSync, readdirSync } from "node:fs";
+import { closeSync, fstatSync, openSync, readFileSync, readdirSync, readSync } from "node:fs";
 import { join } from "node:path";
 
-import { registryDir, routinesHome } from "./paths.ts";
+import { daemonLogDir, registryDir, routinesHome } from "./paths.ts";
 
 /**
  * Staleness bound for condition A, in milliseconds.
@@ -64,6 +75,54 @@ export function newestDispatchAt(text: string): string | null {
   const lines = text.split("\n");
   for (let i = lines.length - 1; i >= 0; i--) {
     const m = ROUTINESD_LINE.exec(lines[i] ?? "");
+    if (m) return m[1]!;
+  }
+  return null;
+}
+
+/**
+ * A routinesd-written record in the daemon's OWN log, as `routinesd` emits it:
+ * `{"ts":"<ISO>","kind":"dispatch","id":"<routine>","detail":"<harness/model>"}`
+ *
+ * WHY THIS SOURCE EXISTS, AND WHY IT IS THE AUTHORITATIVE ONE
+ *
+ * The heartbeat log above is NOT a complete record of dispatching. `writeHeartbeat`
+ * in `src/heartbeat.ts` appends a line only when the routine's registry entry sets
+ * `heartbeat_slug`, so the signal is opt-in PER ROUTINE. Measured 2026-10-02:
+ * 28 of 81 registry entries set it, and **0 of the 3 then-active routines did**.
+ * The fleet had been deliberately narrowed to those 3 by
+ * `decision-2026-10-02-factory-drives-logical-resident-set-only`, so no dispatch
+ * could reach the matcher at all:
+ *
+ *   routinesd daemon log, 19:08Z-21:17Z   11 dispatch + 11 complete
+ *   newest heartbeat `harness=` line      2026-10-02T00:08:50.426Z
+ *   `routines freeze-watch` verdict       FROZEN dispatch-stale age=76084s active=3/81
+ *
+ * The scheduler had dispatched 100 s before that probe. The arm had been false
+ * since ~06:09Z (bound 21600 s), roughly 15 h, and would have stayed false for
+ * as long as the posture held — a watchdog crying freeze at a healthy fleet,
+ * which is the one failure that trains an operator to stop reading it.
+ * (papercut-freeze-watch-dispatch-staleness-reads-an-opt-in-heartbeat-signal-20261002)
+ *
+ * routinesd writes these records itself, unconditionally, for every dispatch.
+ * No registry opt-in, no cooperation from the dispatched agent.
+ *
+ * `tick` is deliberately NOT matched. During the 59h48m freeze the daemon kept
+ * ticking `80 routines in_flight=0` and dispatched nothing; a matcher that
+ * accepted ticks would read that log as fresh and mask the exact outage this
+ * module exists to catch. A tick proves the daemon is alive, never that it
+ * dispatched. `kind` is tested separately from `ts` so key order is not load-bearing.
+ */
+const DAEMON_DISPATCH_KIND = /"kind"\s*:\s*"(?:dispatch|complete)"/;
+const DAEMON_TS = /"ts"\s*:\s*"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)"/;
+
+/** Newest routinesd dispatch/complete timestamp in a daemon log, or null. */
+export function newestDaemonDispatchAt(text: string): string | null {
+  const lines = text.split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i] ?? "";
+    if (!DAEMON_DISPATCH_KIND.test(line)) continue;
+    const m = DAEMON_TS.exec(line);
     if (m) return m[1]!;
   }
   return null;
@@ -122,10 +181,24 @@ export type FreezeCondition = "dispatch-stale" | "no-active-routines";
 
 export interface FreezeInput {
   nowMs: number;
-  /** Newest routinesd dispatch, ISO, or null when the log named none. */
+  /**
+   * Newest dispatch seen in the HEARTBEAT log, ISO, or null when it named none.
+   *
+   * Incomplete by construction — see `DAEMON_DISPATCH_KIND`. Kept as a source
+   * because it is the only one on a host whose daemon log has been rotated
+   * away, and because a heartbeat line is independent corroboration that a
+   * dispatched routine actually ran its work.
+   */
   newestDispatchAt: string | null;
-  /** Why the dispatch timestamp is absent, when it is. */
+  /** Whether the heartbeat log could be read at all. */
   dispatchLogReadable: boolean;
+  /**
+   * Newest dispatch seen in routinesd's OWN daemon log, ISO, or null.
+   * Authoritative: routinesd writes it for every dispatch with no opt-in.
+   */
+  daemonDispatchAt?: string | null;
+  /** Whether the daemon log could be read at all. */
+  daemonLogReadable?: boolean;
   census: RegistryCensus;
   boundMs?: number;
 }
@@ -155,26 +228,51 @@ export function classifyFreeze(input: FreezeInput): FreezeVerdict {
   let dispatchAgeMs: number | null = null;
 
   // Condition A — the scheduler is not dispatching.
-  if (!input.dispatchLogReadable) {
+  //
+  // Two independent sources, and the NEWEST wins. Either one naming a recent
+  // dispatch is positive proof the scheduler dispatched, so taking the newest
+  // cannot invent liveness that neither source saw — it can only stop one
+  // source's blind spot from reading as a freeze. The blind spots are real and
+  // different: the heartbeat log misses every routine without `heartbeat_slug`,
+  // and the daemon log is absent on a host where launchd rotated it away.
+  //
+  // `unknown` still wins over OK whenever NO source produced a usable
+  // timestamp, so a watchdog that cannot see still says so.
+  const sources: { name: string; readable: boolean; at: string | null }[] = [
+    { name: "routinesd daemon log", readable: input.daemonLogReadable ?? false, at: input.daemonDispatchAt ?? null },
+    { name: "heartbeat log", readable: input.dispatchLogReadable, at: input.newestDispatchAt },
+  ];
+  const unreadable = sources.filter((s) => !s.readable).map((s) => s.name);
+  const silent = sources.filter((s) => s.readable && s.at == null).map((s) => s.name);
+  const unparseable = sources.filter(
+    (s) => s.readable && s.at != null && !Number.isFinite(Date.parse(s.at)),
+  );
+  const parsed = sources
+    .filter((s) => s.readable && s.at != null && Number.isFinite(Date.parse(s.at)))
+    .map((s) => Date.parse(s.at!));
+
+  if (parsed.length === 0) {
     unknown = true;
-    reasons.push("cannot judge dispatch recency: heartbeat log unreadable");
-  } else if (input.newestDispatchAt == null) {
-    unknown = true;
-    reasons.push("cannot judge dispatch recency: no routinesd-written line in the window read");
+    if (unreadable.length > 0) {
+      reasons.push(`cannot judge dispatch recency: unreadable (${unreadable.join(", ")})`);
+    }
+    if (silent.length > 0) {
+      reasons.push(
+        `cannot judge dispatch recency: no routinesd-written line in the window read ` +
+          `(${silent.join(", ")})`,
+      );
+    }
+    for (const s of unparseable) {
+      reasons.push(`cannot judge dispatch recency: unparseable timestamp ${s.at} (${s.name})`);
+    }
   } else {
-    const t = Date.parse(input.newestDispatchAt);
-    if (!Number.isFinite(t)) {
-      unknown = true;
-      reasons.push(`cannot judge dispatch recency: unparseable timestamp ${input.newestDispatchAt}`);
-    } else {
-      dispatchAgeMs = input.nowMs - t;
-      if (dispatchAgeMs > boundMs) {
-        conditions.push("dispatch-stale");
-        reasons.push(
-          `scheduler freeze: last routinesd dispatch ${Math.round(dispatchAgeMs / 1000)}s ago ` +
-            `(bound ${Math.round(boundMs / 1000)}s)`,
-        );
-      }
+    dispatchAgeMs = input.nowMs - Math.max(...parsed);
+    if (dispatchAgeMs > boundMs) {
+      conditions.push("dispatch-stale");
+      reasons.push(
+        `scheduler freeze: last routinesd dispatch ${Math.round(dispatchAgeMs / 1000)}s ago ` +
+          `(bound ${Math.round(boundMs / 1000)}s)`,
+      );
     }
   }
 
@@ -222,32 +320,78 @@ export function heartbeatsLogPath(): string {
  * minutes must not read all of it. A window that holds no routinesd line is
  * reported as `unknown`, never as healthy — so a window too small degrades to
  * "I did not look", which is the honest answer.
+ *
+ * This SEEKS. The first version read the whole file with `readFileSync` and
+ * then sliced the tail off it, which did the thing the paragraph above says not
+ * to do — the comment was right and the code did not implement it. It mattered
+ * once routinesd's own log became a source: measured 2026-10-02, the heartbeat
+ * log is 10.4 MB and `~/.routines/daemon/routinesd.err.log` is **132.8 MB**, so
+ * a slicing read would have pulled 143 MB through memory every 900 s to look at
+ * 8 MB of it.
+ *
+ * A tail window can cut a line in half. That only ever drops the OLDEST line in
+ * the window, which cannot change a "newest" answer that any later line
+ * provides, and when the window holds nothing else the verdict degrades to
+ * `unknown` rather than to OK.
  */
 export function tailBytes(path: string, bytes: number = DEFAULT_TAIL_BYTES): string | null {
+  let fd: number | null = null;
   try {
-    const buf = readFileSync(path);
-    return buf.subarray(Math.max(0, buf.length - bytes)).toString("utf8");
+    fd = openSync(path, "r");
+    const size = fstatSync(fd).size;
+    const want = Math.min(size, Math.max(0, bytes));
+    const buf = Buffer.allocUnsafe(want);
+    let read = 0;
+    while (read < want) {
+      const n = readSync(fd, buf, read, want - read, size - want + read);
+      if (n <= 0) break;
+      read += n;
+    }
+    return buf.subarray(0, read).toString("utf8");
   } catch {
     return null;
+  } finally {
+    if (fd != null) {
+      try {
+        closeSync(fd);
+      } catch {
+        /* a close failure cannot change the verdict */
+      }
+    }
   }
+}
+
+/**
+ * routinesd's own log, resolved through the SAME helper `src/launchd.ts` uses to
+ * write the daemon's `StandardErrorPath`. Deriving it from `daemonLogDir()`
+ * rather than re-spelling the path is what keeps the reader and the writer from
+ * drifting apart.
+ */
+export function routinesdLogPath(): string {
+  return process.env.ROUTINESD_LOG_FILE || join(daemonLogDir(), "routinesd.err.log");
 }
 
 export interface FreezeWatchOptions {
   nowMs?: number;
   boundMs?: number;
   logPath?: string;
+  /** routinesd's own log. Defaults to `routinesdLogPath()`. */
+  daemonLogPath?: string;
   registry?: string;
   tailBytes?: number;
 }
 
-/** Read the live host and classify. No writes, no node, no daemon. */
+/** Read the live host and classify. No writes, no node, no daemon process. */
 export function observeFreeze(opts: FreezeWatchOptions = {}): FreezeVerdict {
-  const logPath = opts.logPath ?? heartbeatsLogPath();
-  const text = tailBytes(logPath, opts.tailBytes ?? DEFAULT_TAIL_BYTES);
+  const window = opts.tailBytes ?? DEFAULT_TAIL_BYTES;
+  const text = tailBytes(opts.logPath ?? heartbeatsLogPath(), window);
+  const daemon = tailBytes(opts.daemonLogPath ?? routinesdLogPath(), window);
   return classifyFreeze({
     nowMs: opts.nowMs ?? Date.now(),
     dispatchLogReadable: text != null,
     newestDispatchAt: text == null ? null : newestDispatchAt(text),
+    daemonLogReadable: daemon != null,
+    daemonDispatchAt: daemon == null ? null : newestDaemonDispatchAt(daemon),
     census: censusRegistry(opts.registry ?? registryDir()),
     boundMs: opts.boundMs,
   });
