@@ -108,6 +108,28 @@ ordinary agent error does not, so a bad prompt cannot take a provider out of the
 fleet's route. A durable `--pin` is not a preference: when the pinned provider is
 fenced the route is empty rather than silently falling to another provider.
 
+### Report an external provider failure
+
+Loom and land-card run the provider CLI outside routinesd. When that CLI
+fails, the caller reports the stderr:
+
+```sh
+routines agent-exec report-failure --provider grok \
+  --evidence "API error (status 402 Payment Required): Grok Build usage balance exhausted" \
+  --request-id loom-canary-heal
+```
+
+The command calls `classifyHarnessOutage`. A match upserts the same
+`harness-outage-<provider>` Situation that the route engine already reads.
+Other text does nothing. The command does not file a card.
+
+Call it when the caller's own heal result is not `fixed` or `noop`. The
+verb still ignores text that is not an outage, so an extra call is safe.
+The call is best-effort. Exit 0 means accepted. Exit 2 is a usage error.
+Stdout is one JSON object with `matched`, `reported`, `provider`, `kind`,
+`situationSlug`, and `detail`. `reported: false` with `matched: true` means
+the Situation upsert failed.
+
 Optional `gate_command` runs **before** the LLM harness (zero-LLM):
 
 | exit | meaning |

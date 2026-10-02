@@ -34,8 +34,9 @@ import { join } from "node:path";
 
 import { claudeKeychainReadRefused, DEFAULT_CLAUDE_OAUTH_LOCATOR } from "./claude-auth.ts";
 import { buildRouteChain, type RouteStep } from "./fallback.ts";
-import { loadAll, type RoutineEntry } from "./registry.ts";
+import { isHarness, loadAll, type Harness, type RoutineEntry } from "./registry.ts";
 import { routinesHome } from "./paths.ts";
+import { parseRRule } from "./rrule.ts";
 import type { RunResult } from "./runner.ts";
 
 /**
@@ -883,5 +884,153 @@ export function handleHarnessOutage(
     return { escalated: true, detail };
   } catch (err) {
     return { escalated: false, detail: `harness-outage threw: ${(err as Error).message}` };
+  }
+}
+
+export interface ExternalHarnessReport {
+  /** True when classifyHarnessOutage recognized the evidence. */
+  matched: boolean;
+  /**
+   * True when the harness-outage Situation was upserted, or a fresh one
+   * already covers this provider. False on no match and on upsert failure.
+   */
+  reported: boolean;
+  provider: string;
+  kind: HarnessOutageKind | null;
+  situationSlug: string | null;
+  /** The classifier's evidence line, when matched. */
+  evidence: string | null;
+  requestId: string | null;
+  detail: string;
+}
+
+export interface ExternalReportOptions extends HarnessOutageOptions {
+  /** Caller token recorded on the Situation (loom node id, heal script, …). */
+  requestId?: string;
+}
+
+function externalReportId(requestId: string | undefined): string {
+  const raw = (requestId ?? "agent-exec").trim();
+  const safe = raw.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 64);
+  return `external-${safe || "agent-exec"}`;
+}
+
+function externalReportEntry(provider: Harness, requestId: string | undefined): RoutineEntry {
+  const id = externalReportId(requestId);
+  return {
+    id,
+    harness: provider,
+    model: "external",
+    resolvedBy: "pin",
+    rrule: "FREQ=HOURLY",
+    parsedRrule: parseRRule("FREQ=HOURLY"),
+    cwd: routinesHome(),
+    status: "active",
+    timeoutMin: 1,
+    sourcePath: join(routinesHome(), STATE_DIR_NAME, "external-report.toml"),
+  };
+}
+
+function unmatchedReport(
+  provider: string,
+  requestId: string | null,
+  detail: string,
+): ExternalHarnessReport {
+  return {
+    matched: false,
+    reported: false,
+    provider,
+    kind: null,
+    situationSlug: null,
+    evidence: null,
+    requestId,
+    detail,
+  };
+}
+
+/**
+ * Report a provider-CLI failure from a host that ran the CLI outside
+ * routinesd (Loom, land-card). Uses the same pair as escalateRoutineError:
+ * classifyHarnessOutage, then handleHarnessOutage. A non-match does not
+ * file a Situation, a card, or a papercut.
+ *
+ * The synthetic run uses outcome source "exit". The classifier treats a
+ * routine-authored sink as proof the harness was alive. An external CLI
+ * has no routine sink, so that short-circuit must not apply here.
+ *
+ * Best-effort and never throws. `reported` is false when the text is not
+ * an outage or the Situation upsert failed. Callers do not use this result
+ * as their own exit status.
+ */
+export function reportExternalHarnessOutage(
+  provider: string,
+  evidence: string,
+  opts: ExternalReportOptions = {},
+): ExternalHarnessReport {
+  const requestId = opts.requestId?.trim() || null;
+  try {
+    if (!isHarness(provider)) {
+      return unmatchedReport(provider, requestId, `unknown provider: ${provider}`);
+    }
+    if (evidence.trim() === "") {
+      return unmatchedReport(provider, requestId, "not a recognized harness outage");
+    }
+
+    // classifyHarnessOutage reads the last TAIL_BYTES of stderr.log. Keep
+    // that window so a long caller log cannot change what matches.
+    const body = evidence.length > TAIL_BYTES ? evidence.slice(-TAIL_BYTES) : evidence;
+    // Latest attempt only. The Situation and the outage state file are the
+    // durable record. This directory feeds the classifier and holds the
+    // breadcrumb.
+    const runDir = join(outageStateDir(), "reports", provider);
+    rmSync(runDir, { recursive: true, force: true });
+    mkdirSync(runDir, { recursive: true });
+    writeFileSync(join(runDir, "stderr.log"), body);
+    writeFileSync(join(runDir, "stdout.log"), "");
+
+    const nowMs = opts.nowMs ?? Date.now();
+    const now = new Date(nowMs).toISOString();
+    const result: RunResult = {
+      id: externalReportId(requestId ?? undefined),
+      runDir,
+      invocation: { bin: "external", args: [], display: "external" },
+      exitCode: 1,
+      signal: null,
+      timedOut: false,
+      startedAt: now,
+      finishedAt: now,
+      durationMs: 0,
+      heartbeat: { attempted: false, ok: true },
+      // Source stays "exit" even when the pasted log contains a
+      // ROUTINE_RESULT trailer. That trailer belongs to the caller's
+      // transcript, not to a routine sink this process wrote.
+      outcome: { kind: "error", detail: "external provider CLI failed", source: "exit" },
+      harnessPid: null,
+    };
+
+    const outage = classifyHarnessOutage(result, opts);
+    if (!outage) {
+      return unmatchedReport(provider, requestId, "not a recognized harness outage");
+    }
+
+    const handled = handleHarnessOutage(externalReportEntry(provider, requestId ?? undefined), result, outage, {
+      ...opts,
+      nowMs,
+      quiet: opts.quiet ?? true,
+      fenceRoutines: opts.fenceRoutines !== false,
+    });
+    const reported = handled.escalated && !handled.detail.includes("situation FAILED");
+    return {
+      matched: true,
+      reported,
+      provider,
+      kind: outage.kind,
+      situationSlug: outageSituationSlug(provider),
+      evidence: outage.evidence,
+      requestId,
+      detail: handled.detail,
+    };
+  } catch (err) {
+    return unmatchedReport(provider, requestId, `report failed: ${(err as Error).message}`);
   }
 }

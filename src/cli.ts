@@ -55,6 +55,7 @@ import {
 } from "./freeze-watch.ts";
 import { loadActiveSituations } from "./situations.ts";
 import { isRouteMode, routeAgent, ROUTE_MODES } from "./route-engine.ts";
+import { reportExternalHarnessOutage } from "./harness-outage.ts";
 import { DIFFICULTIES, difficultyMatrixSource, isDifficulty } from "./difficulty-matrix.ts";
 import { HARNESSES, isHarness } from "./registry.ts";
 import { loadAll, loadEntry, resolvePrompt, type RoutineEntry } from "./registry.ts";
@@ -109,6 +110,10 @@ Commands:
                               Optional: --pin <provider>, --timeout-ms <n>,
                               --request-id <id>. Exit 3 = empty route (every
                               candidate provider is fenced; do not start one).
+                              report-failure --provider <p> --evidence <text>
+                              reports an external CLI failure. A match files
+                              harness-outage-<p>. Other text is a no-op.
+                              Exit 0. Best-effort; does not fail the caller.
   logs <id>                   show recent runs for a routine (--json, --path, --tail)
   probe-path <id>              print the installed path for a versioned probe harness
   publish-status              write slim fleet status records to LastDB (--json)
@@ -439,6 +444,7 @@ function cmdRoute(rest: string[]): number {
  * an empty route (exit 3) is how a provider fence prevents process creation.
  */
 function cmdAgentExec(rest: string[]): number {
+  if (rest[0] === "report-failure") return cmdAgentExecReportFailure(rest.slice(1));
   let values;
   try {
     ({ values } = parseArgs({
@@ -510,7 +516,56 @@ function cmdAgentExec(rest: string[]): number {
 const AGENT_EXEC_USAGE = `usage: routines agent-exec --difficulty ${DIFFICULTIES.join("|")} --mode ${ROUTE_MODES.join("|")}
                         [--pin ${HARNESSES.join("|")}] [--timeout-ms <n>] [--request-id <id>]
 
+Also: routines agent-exec report-failure --provider ${HARNESSES.join("|")} --evidence <text>
+
 Exit codes: 0 route selected · 2 usage error · 3 empty route (all fenced)`;
+
+const AGENT_EXEC_REPORT_USAGE = `usage: routines agent-exec report-failure --provider ${HARNESSES.join("|")} --evidence <text>
+                                     [--request-id <id>]
+
+Best-effort report of an external provider CLI failure. A match files the
+harness-outage-<provider> Situation. Other text does nothing.
+
+Exit codes: 0 accepted (matched, no-op, or upsert failed) · 2 usage error`;
+
+function cmdAgentExecReportFailure(rest: string[]): number {
+  let values;
+  try {
+    ({ values } = parseArgs({
+      args: rest,
+      options: {
+        provider: { type: "string" },
+        evidence: { type: "string" },
+        "request-id": { type: "string" },
+      },
+      allowPositionals: false,
+    }));
+  } catch (err) {
+    console.error(`${(err as Error).message}\n`);
+    console.error(AGENT_EXEC_REPORT_USAGE);
+    return 2;
+  }
+
+  const provider = values.provider?.trim();
+  if (!provider || !isHarness(provider)) {
+    console.error(`--provider must be one of ${HARNESSES.join("|")}\n`);
+    console.error(AGENT_EXEC_REPORT_USAGE);
+    return 2;
+  }
+  const evidence = values.evidence;
+  if (evidence === undefined || evidence.trim() === "") {
+    console.error("--evidence is required\n");
+    console.error(AGENT_EXEC_REPORT_USAGE);
+    return 2;
+  }
+
+  const report = reportExternalHarnessOutage(provider, evidence, {
+    requestId: values["request-id"]?.trim() || undefined,
+    quiet: true,
+  });
+  console.log(JSON.stringify(report, null, 2));
+  return 0;
+}
 
 function cmdImport(rest: string[]): number {
   const { values } = parseArgs({
