@@ -1213,6 +1213,10 @@ export function escalateRoutineError(
     // out of service, so a per-routine card is board noise and a triage
     // agent on the same harness cannot even start. Fence the fleet via a
     // Situation, mark needs-human, and page Tom instead.
+    //
+    // External hosts (Loom, land-card) take the same classify + handle pair
+    // through reportExternalHarnessOutage. A non-match there must not fall
+    // through into the card or papercut path below.
     const outage = classifyHarnessOutage(result, {
       nowMs: opts.nowMs,
       ...opts.harnessOutage,

@@ -15,6 +15,10 @@
 // error must not prevent process creation, so the local outage-state files
 // (which classify agent errors) are read for retry timing only — never to add
 // a fence. See design `design-loom-use-routines-global-agent-route`.
+//
+// A host that runs the provider CLI itself reports that failure with
+// `routines agent-exec report-failure`. A recognized outage upserts the
+// Situation this fence reads. It does not add a second fence store.
 
 import {
   DifficultyMatrixError,
