@@ -183,6 +183,60 @@ test("publishFleetStatus declares schemas and writes only bounded fleet records"
   });
 });
 
+test("N seeded status rows use one HashKeys query and mutateBatch, with zero per-id queryByKey", async () => {
+  const ids = ["alpha", "r1", "r2", "r3", "r4", "r5", "r6", "r7"];
+  for (const id of ids.slice(1)) {
+    writeFileSync(
+      join(home, "registry", `${id}.toml`),
+      [
+        'harness = "codex"',
+        'model = "gpt-5.5"',
+        'effort = "medium"',
+        'rrule = "FREQ=HOURLY"',
+        'prompt = "do not publish this prompt"',
+        `cwd = "${home}"`,
+        "timeout_min = 5",
+        "",
+      ].join("\n"),
+    );
+  }
+  const client = new FakeClient();
+  const first = await publishFleetStatus({
+    client,
+    now: new Date("2026-07-15T02:00:00.000Z"),
+    runLimit: 1,
+  });
+
+  expect(first.written.rows).toBe(ids.length);
+  expect(first.written.fleetRows).toBe(ids.length);
+  expect(statusHashKeysQueries(client)).toHaveLength(1);
+  expect(statusHashKeysQueries(client)[0]!.keyHashes).toEqual([...ids].sort());
+  expect(statusKeyQueries(client)).toHaveLength(0);
+  expect(client.batchMutations.length).toBeGreaterThanOrEqual(1);
+  expect(client.batchMutations[0]!.filter((op) => op.schemaHash === "hash-RoutineStatus")).toHaveLength(ids.length);
+  expect(client.writes.filter((write) => write.schemaHash === "hash-RoutineStatus" && write.mutationType === "create")).toHaveLength(ids.length);
+  expect(client.writes.some((write) => write.schemaHash === "hash-RoutineStatus" && write.mutationType === "create")).toBe(true);
+
+  client.hashKeysQueries = [];
+  client.keyQueries = [];
+  client.batchMutations = [];
+  const writeStart = client.writes.length;
+  const second = await publishFleetStatus({
+    client,
+    now: new Date("2026-07-15T02:00:00.000Z"),
+    runLimit: 1,
+  });
+
+  expect(second.written.rows).toBe(0);
+  expect(second.written.fleetRows).toBe(0);
+  expect(statusHashKeysQueries(client)).toHaveLength(1);
+  expect(statusHashKeysQueries(client)[0]!.keyHashes).toEqual([...ids].sort());
+  expect(statusKeyQueries(client)).toHaveLength(0);
+  expect(client.writes.slice(writeStart).some((write) => write.schemaHash === "hash-RoutineStatus")).toBe(false);
+  expect(client.writes.slice(writeStart).some((write) => write.schemaHash === "hash-FleetRoutineStatusV2")).toBe(false);
+  expect(client.batchMutations.some((batch) => batch.some((op) => op.schemaHash === "hash-RoutineStatus"))).toBe(false);
+});
+
 test("FleetSummary is the last write and a failed row pass does not advance it", async () => {
   const client = new FakeClient();
   client.failSchemaHash = "hash-RoutineRunSummaryV2";
@@ -238,8 +292,11 @@ function addRun(stamp: string, startedAt: string): void {
   writeFileSync(join(runDir, "stderr.log"), "");
 }
 
-const runQueries = (c: FakeClient) => c.keyQueries.filter((q) => q.schemaHash === "hash-RoutineRunSummaryV2");
+const runQueries = (c: FakeClient) => c.hashRangeKeyQueries.filter((q) => q.schemaHash === "hash-RoutineRunSummaryV2");
+const runQueryStamps = (c: FakeClient) => runQueries(c).flatMap((q) => q.keys.map((key) => key.range));
 const retentionQueries = (c: FakeClient) => c.hashQueries.filter((q) => q.schemaHash === "hash-RoutineRunSummaryV2");
+const statusKeyQueries = (c: FakeClient) => c.keyQueries.filter((q) => q.schemaHash === "hash-RoutineStatus" || q.schemaHash === "hash-FleetRoutineStatusV2");
+const statusHashKeysQueries = (c: FakeClient) => c.hashKeysQueries.filter((q) => q.schemaHash === "hash-RoutineStatus");
 
 test("watermark path publishes the same fleet output as the full path", async () => {
   const oldClient = new FakeClient();
@@ -273,13 +330,13 @@ test("watermark persists and later publishes read only newer runs", async () => 
   const saved = JSON.parse(readFileSync(join(home, "state", "publish-watermark.json"), "utf8"));
   expect(saved.runs.alpha).toBe("20260715T010203Z");
 
-  client.keyQueries = [];
+  client.hashRangeKeyQueries = [];
   await publishFleetStatus({ client, now: new Date("2026-07-15T03:00:00.000Z"), runLimit: 5 });
   expect(runQueries(client)).toHaveLength(0);
 
   addRun("20260715T033000Z", "2026-07-15T03:30:00.000Z");
   const result = await publishFleetStatus({ client, now: new Date("2026-07-15T04:00:00.000Z"), runLimit: 5 });
-  expect(runQueries(client).map((q) => q.keyRange)).toEqual(["20260715T033000Z"]);
+  expect(runQueryStamps(client)).toEqual(["20260715T033000Z"]);
   expect(result.written.runSummariesV2).toBe(1);
   const after = JSON.parse(readFileSync(join(home, "state", "publish-watermark.json"), "utf8"));
   expect(after.runs.alpha).toBe("20260715T033000Z");
@@ -301,11 +358,12 @@ test("retention runs on a new run and otherwise at most once a day", async () =>
   await publishFleetStatus({ client, now: new Date("2026-07-15T06:00:00.000Z"), runLimit: 5 });
   expect(retentionQueries(client)).toHaveLength(2);
 
-  client.keyQueries = [];
+  client.hashRangeKeyQueries = [];
   await publishFleetStatus({ client, now: new Date("2026-07-16T05:30:00.000Z"), runLimit: 5 });
   expect(retentionQueries(client)).toHaveLength(3);
-  // The daily pass re-checks every run in the window (self-heal).
-  expect(runQueries(client)).toHaveLength(2);
+  // The daily pass re-checks every run in the window (self-heal) with one HashRangeKeys query.
+  expect(runQueries(client)).toHaveLength(1);
+  expect(runQueryStamps(client).sort()).toEqual(["20260715T010203Z", "20260715T043000Z"]);
 });
 
 test("daily full pass repairs a store that lost a run summary", async () => {
@@ -725,6 +783,62 @@ test("LastDB publisher sends exact HashRange query and mutation keys", async () 
   });
 });
 
+test("LastDB publisher sends HashKeys queries and mutations/batch writes", async () => {
+  const socketPath = join(home, "lastdb.sock");
+  writeFileSync(socketPath, "");
+  const requests: Array<{ url: string; init: RequestInit & { unix?: string } }> = [];
+  const client = newLastDbPublisherClient({
+    socketPath,
+    fetchImpl: async (input, init = {}) => {
+      requests.push({ url: String(input), init });
+      if (String(input).endsWith("/api/system/auto-identity")) return Response.json({ user_hash: "user-1" });
+      if (String(input).endsWith("/api/query")) {
+        return Response.json({
+          results: [
+            { key: { hash: "alpha", range: null }, fields: { id: "alpha" } },
+            { key: { hash: "beta", range: null }, fields: { id: "beta" } },
+          ],
+        });
+      }
+      return Response.json({ count: 2 });
+    },
+  });
+
+  await client.autoIdentity();
+  const rows = await client.queryByKeys({
+    schemaHash: "schema-1",
+    keyHashes: ["beta", "alpha"],
+    fields: ["id"],
+  });
+  await client.mutateBatch([
+    {
+      schemaHash: "schema-1",
+      keyHash: "alpha",
+      fields: { id: "alpha" },
+      mutationType: "create",
+    },
+    {
+      schemaHash: "schema-1",
+      keyHash: "beta",
+      fields: { id: "beta" },
+      mutationType: "update",
+    },
+  ]);
+
+  expect(rows.map((row) => row.keyHash).sort()).toEqual(["alpha", "beta"]);
+  expect(JSON.parse(String(requests[1]!.init.body))).toMatchObject({
+    filter: { HashKeys: ["alpha", "beta"] },
+    limit: 2,
+  });
+  expect(requests[2]!.url).toBe("http://localhost/api/mutations/batch");
+  expect(JSON.parse(String(requests[2]!.init.body))).toMatchObject({
+    mutations: [
+      { schema: "schema-1", key_value: { hash: "alpha", range: null }, mutation_type: "create" },
+      { schema: "schema-1", key_value: { hash: "beta", range: null }, mutation_type: "update" },
+    ],
+  });
+});
+
 test("LastDB delivery identifies explicit loopback requests", async () => {
   const requests: Array<{ url: string; init: RequestInit & { unix?: string } }> = [];
   const client = newLastDbDeliveryClient({
@@ -773,6 +887,15 @@ class FakeClient implements LastDbPublisherClient {
   private records = new Map<string, Record<string, string>>();
   hashQueries: Array<{ schemaHash: string; keyHash: string }> = [];
   keyQueries: Array<{ schemaHash: string; keyHash: string; keyRange?: string }> = [];
+  hashKeysQueries: Array<{ schemaHash: string; keyHashes: string[] }> = [];
+  hashRangeKeyQueries: Array<{ schemaHash: string; keys: Array<{ hash: string; range: string }> }> = [];
+  batchMutations: Array<Array<{
+    schemaHash: string;
+    keyHash: string;
+    keyRange?: string;
+    fields: Record<string, string>;
+    mutationType: "create" | "update" | "delete";
+  }>> = [];
   hideNextFleetRow = false;
   failSchemaHash = "";
 
@@ -791,6 +914,29 @@ class FakeClient implements LastDbPublisherClient {
   async queryByKey(opts: { schemaHash: string; keyHash: string; keyRange?: string }): Promise<Record<string, string> | null> {
     this.keyQueries.push({ schemaHash: opts.schemaHash, keyHash: opts.keyHash, keyRange: opts.keyRange });
     return this.record(opts.schemaHash, opts.keyHash, opts.keyRange);
+  }
+
+  async queryByKeys(opts: { schemaHash: string; keyHashes: string[] }): Promise<Array<{ keyHash: string; fields: Record<string, string> }>> {
+    this.hashKeysQueries.push({ schemaHash: opts.schemaHash, keyHashes: [...opts.keyHashes] });
+    const out: Array<{ keyHash: string; fields: Record<string, string> }> = [];
+    for (const keyHash of opts.keyHashes) {
+      const fields = this.record(opts.schemaHash, keyHash);
+      if (fields) out.push({ keyHash, fields });
+    }
+    return out;
+  }
+
+  async queryByHashRangeKeys(opts: {
+    schemaHash: string;
+    keys: Array<{ hash: string; range: string }>;
+  }): Promise<Array<{ keyHash: string; keyRange: string; fields: Record<string, string> }>> {
+    this.hashRangeKeyQueries.push({ schemaHash: opts.schemaHash, keys: opts.keys.map((key) => ({ ...key })) });
+    const out: Array<{ keyHash: string; keyRange: string; fields: Record<string, string> }> = [];
+    for (const key of opts.keys) {
+      const fields = this.record(opts.schemaHash, key.hash, key.range);
+      if (fields) out.push({ keyHash: key.hash, keyRange: key.range, fields });
+    }
+    return out;
   }
 
   async mutate(opts: {
@@ -812,6 +958,18 @@ class FakeClient implements LastDbPublisherClient {
         sharedFields,
       );
     }
+  }
+
+  async mutateBatch(ops: Array<{
+    schemaHash: string;
+    keyHash: string;
+    keyRange?: string;
+    fields: Record<string, string>;
+    mutationType: "create" | "update" | "delete";
+  }>): Promise<void> {
+    if (ops.length === 0) return;
+    this.batchMutations.push(ops.map((op) => ({ ...op, fields: { ...op.fields } })));
+    for (const op of ops) await this.mutate(op);
   }
 
   async queryByHash(opts: { schemaHash: string; keyHash: string; maxRows: number }) {

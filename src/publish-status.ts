@@ -48,12 +48,27 @@ export interface PublishStatusResult extends FleetPublication {
   dryRun: boolean;
 }
 
+export interface PublisherMutation {
+  schemaHash: string;
+  keyHash: string;
+  keyRange?: string;
+  fields: FieldMap;
+  mutationType: "create" | "update" | "delete";
+}
+
 export interface LastDbPublisherClient {
   autoIdentity(): Promise<{ userHash: string }>;
   declareAppSchema(appId: string, schema: SchemaDefinition): Promise<{ canonical: string; schemaName: string }>;
   queryByKey(opts: { schemaHash: string; keyHash: string; keyRange?: string; fields: string[] }): Promise<FieldMap | null>;
+  queryByKeys(opts: { schemaHash: string; keyHashes: string[]; fields: string[] }): Promise<Array<{ keyHash: string; fields: FieldMap }>>;
   queryByHash(opts: { schemaHash: string; keyHash: string; fields: string[]; maxRows: number }): Promise<Array<{ keyRange: string; fields: FieldMap }>>;
-  mutate(opts: { schemaHash: string; keyHash: string; keyRange?: string; fields: FieldMap; mutationType: "create" | "update" | "delete" }): Promise<void>;
+  queryByHashRangeKeys(opts: {
+    schemaHash: string;
+    keys: Array<{ hash: string; range: string }>;
+    fields: string[];
+  }): Promise<Array<{ keyHash: string; keyRange: string; fields: FieldMap }>>;
+  mutate(opts: PublisherMutation): Promise<void>;
+  mutateBatch(ops: PublisherMutation[]): Promise<void>;
 }
 
 export interface LastDbDeliveryClient {
@@ -208,6 +223,10 @@ const RUN_SUMMARY_FIELDS = [
 
 export const ROUTINES_FLEET_ID = "routines";
 export const FLEET_STATUS_BUCKET_COUNT = 16;
+/** LastDB `/api/query` page cap (`MAX_QUERY_LIMIT`). Chunk HashKeys / HashRangeKeys at this size. */
+const QUERY_KEYS_PAGE = 1000;
+/** Conservative `/api/mutations/batch` chunk. One fleet publish stays in one chunk. */
+const MUTATION_BATCH_PAGE = 500;
 export const ROUTINE_STATUS_MAX_BYTES = 8 * 1024;
 export const LAST_OUTCOME_DETAIL_MAX_BYTES = 1024;
 export const FLEET_SUMMARY_MAX_BYTES = 4 * 1024;
@@ -331,66 +350,11 @@ export async function publishFleetStatus(options: PublishStatusOptions = {}): Pr
         sk: requiredField(row, "sk"),
       },
     ]));
-    const staleRows = await findStaleRoutineRows(client, schemaHashes.fleetStatus, currentAddresses);
-    for (const stale of staleRows) {
-      const { id } = stale;
-      if (!currentAddresses.has(id)) {
-        const existing = await client.queryByKey({
-          schemaHash: schemaHashes.status,
-          keyHash: id,
-          fields: ["id"],
-        });
-        if (existing) {
-          await client.mutate({
-            schemaHash: schemaHashes.status,
-            keyHash: id,
-            fields: {},
-            mutationType: "delete",
-          });
-        }
-      }
-      await client.mutate({
-        schemaHash: schemaHashes.fleetStatus,
-        keyHash: stale.fleetBucket,
-        keyRange: stale.sk,
-        fields: {},
-        mutationType: "delete",
-      });
-      written.deletedStatusRows += 1;
-    }
-    for (const prepared of preparedRows) {
-      const existing = await client.queryByKey({
-        schemaHash: schemaHashes.status,
-        keyHash: requiredField(prepared, "id"),
-        fields: [...STATUS_FIELDS],
-      });
-      if (existing?.content_digest !== prepared.content_digest) {
-        await client.mutate({
-          schemaHash: schemaHashes.status,
-          keyHash: requiredField(prepared, "id"),
-          fields: primaryStatusFields(prepared),
-          mutationType: existing ? "update" : "create",
-        });
-        written.rows += 1;
-      }
-
-      const existingFleet = await client.queryByKey({
-        schemaHash: schemaHashes.fleetStatus,
-        keyHash: requiredField(prepared, "fleet_bucket"),
-        keyRange: requiredField(prepared, "sk"),
-        fields: [...FLEET_ROUTINE_STATUS_FIELDS],
-      });
-      if (existingFleet?.content_digest !== prepared.content_digest) {
-        await client.mutate({
-          schemaHash: schemaHashes.fleetStatus,
-          keyHash: requiredField(prepared, "fleet_bucket"),
-          keyRange: requiredField(prepared, "sk"),
-          fields: prepared,
-          mutationType: existingFleet ? "update" : "create",
-        });
-        written.fleetRows += 1;
-      }
-    }
+    const { stale: staleRows, fleetByAddress } = await findStaleRoutineRows(
+      client,
+      schemaHashes.fleetStatus,
+      currentAddresses,
+    );
     const useWatermark = options.useWatermark !== false;
     const watermarkPath = options.watermarkPath ?? publishWatermarkPath();
     const capturedMs = new Date(publication.capturedAt).getTime();
@@ -404,54 +368,113 @@ export async function publishFleetStatus(options: PublishStatusOptions = {}): Pr
       list.push(run);
       runsById.set(id, list);
     }
+    const runPlans = publication.rows.map((row) => planRoutineRuns(row, runsById, state, useWatermark, capturedMs));
+    const statusIds = uniqueSortedIds([
+      ...preparedRows.map((row) => requiredField(row, "id")),
+      ...staleRows.filter((stale) => !currentAddresses.has(stale.id)).map((stale) => stale.id),
+    ]);
+    const runKeys = uniqueHashRangeKeys(
+      runPlans.flatMap((plan) => plan.candidates.map((run) => ({ hash: plan.id, range: requiredField(run, "stamp") }))),
+    );
     try {
-      for (const row of publication.rows) {
-        const id = requiredField(row, "id");
-        // Once per RETENTION_INTERVAL_MS a routine gets a full pass: every run in the
-        // window is re-checked (self-heals a wiped store or a lost write) and retention runs.
-        const lastRetentionMs = Date.parse(state.retention[id] ?? "");
-        const fullPass = !useWatermark
-          || !Number.isFinite(lastRetentionMs)
-          || capturedMs - lastRetentionMs >= RETENTION_INTERVAL_MS
-          || capturedMs < lastRetentionMs;
-        const watermark = state.runs[id] ?? "";
-        let created = 0;
-        let maxStamp = watermark;
-        for (const run of runsById.get(id) ?? []) {
-          const stamp = requiredField(run, "stamp");
-          // Run summaries are immutable per id+stamp: at or below the watermark means already published.
-          if (!fullPass && stamp <= watermark) continue;
-          const existing = await client.queryByKey({
+      const [statusRows, existingRuns] = await Promise.all([
+        statusIds.length === 0
+          ? Promise.resolve([] as Array<{ keyHash: string; fields: FieldMap }>)
+          : client.queryByKeys({
+            schemaHash: schemaHashes.status,
+            keyHashes: statusIds,
+            fields: [...STATUS_FIELDS],
+          }),
+        runKeys.length === 0
+          ? Promise.resolve([] as Array<{ keyHash: string; keyRange: string; fields: FieldMap }>)
+          : client.queryByHashRangeKeys({
             schemaHash: schemaHashes.runSummaryV2,
-            keyHash: id,
-            keyRange: stamp,
+            keys: runKeys,
             fields: [...RUN_SUMMARY_V2_FIELDS],
+          }),
+      ]);
+      const existingStatus = new Map(statusRows.map((row) => [row.keyHash, row.fields]));
+      const existingRunKeys = new Set(existingRuns.map((row) => `${row.keyHash}\0${row.keyRange}`));
+      const mutations: PublisherMutation[] = [];
+      for (const stale of staleRows) {
+        const { id } = stale;
+        if (!currentAddresses.has(id) && existingStatus.has(id)) {
+          mutations.push({
+            schemaHash: schemaHashes.status,
+            keyHash: id,
+            fields: {},
+            mutationType: "delete",
           });
-          if (!existing) {
-            const fields = Object.fromEntries(RUN_SUMMARY_V2_FIELDS.map((field) => [field, run[field] ?? ""]));
-            await client.mutate({
-              schemaHash: schemaHashes.runSummaryV2,
-              keyHash: id,
-              keyRange: stamp,
-              fields,
-              mutationType: "create",
-            });
-            written.runSummariesV2 += 1;
-            created += 1;
-          }
-          if (stamp > maxStamp) maxStamp = stamp;
         }
-        if (maxStamp !== watermark) state.runs[id] = maxStamp;
-        if (fullPass || created > 0) {
-          written.deletedRunSummariesV2 += await enforceRunSummaryRetention(client, schemaHashes.runSummaryV2, {
-            id,
-            now: new Date(publication.capturedAt),
-            keepCount: positiveInt(options.runRetentionCount, 100),
-            keepDays: positiveInt(options.runRetentionDays, 30),
+        mutations.push({
+          schemaHash: schemaHashes.fleetStatus,
+          keyHash: stale.fleetBucket,
+          keyRange: stale.sk,
+          fields: {},
+          mutationType: "delete",
+        });
+        written.deletedStatusRows += 1;
+      }
+      for (const prepared of preparedRows) {
+        const id = requiredField(prepared, "id");
+        const existing = existingStatus.get(id);
+        if (existing?.content_digest !== prepared.content_digest) {
+          mutations.push({
+            schemaHash: schemaHashes.status,
+            keyHash: id,
+            fields: primaryStatusFields(prepared),
+            mutationType: existing ? "update" : "create",
           });
-          state.retention[id] = publication.capturedAt;
+          written.rows += 1;
+        }
+        const fleetBucket = requiredField(prepared, "fleet_bucket");
+        const sk = requiredField(prepared, "sk");
+        const existingFleet = fleetByAddress.get(fleetAddressKey(fleetBucket, sk));
+        if (existingFleet?.content_digest !== prepared.content_digest) {
+          mutations.push({
+            schemaHash: schemaHashes.fleetStatus,
+            keyHash: fleetBucket,
+            keyRange: sk,
+            fields: prepared,
+            mutationType: existingFleet ? "update" : "create",
+          });
+          written.fleetRows += 1;
         }
       }
+      const createdById = new Map<string, number>();
+      for (const plan of runPlans) {
+        for (const run of plan.candidates) {
+          const stamp = requiredField(run, "stamp");
+          if (existingRunKeys.has(`${plan.id}\0${stamp}`)) continue;
+          mutations.push({
+            schemaHash: schemaHashes.runSummaryV2,
+            keyHash: plan.id,
+            keyRange: stamp,
+            fields: Object.fromEntries(RUN_SUMMARY_V2_FIELDS.map((field) => [field, run[field] ?? ""])),
+            mutationType: "create",
+          });
+          written.runSummariesV2 += 1;
+          createdById.set(plan.id, (createdById.get(plan.id) ?? 0) + 1);
+        }
+      }
+      await client.mutateBatch(mutations);
+      for (const plan of runPlans) {
+        if (plan.maxStamp !== plan.watermark) state.runs[plan.id] = plan.maxStamp;
+      }
+      const retentionIds = runPlans
+        .filter((plan) => plan.fullPass || (createdById.get(plan.id) ?? 0) > 0)
+        .map((plan) => plan.id);
+      const retentionDeletes = (
+        await Promise.all(retentionIds.map((id) => collectRunSummaryRetentionDeletes(client, schemaHashes.runSummaryV2, {
+          id,
+          now: new Date(publication.capturedAt),
+          keepCount: positiveInt(options.runRetentionCount, 100),
+          keepDays: positiveInt(options.runRetentionDays, 30),
+        })))
+      ).flat();
+      written.deletedRunSummariesV2 += retentionDeletes.length;
+      for (const id of retentionIds) state.retention[id] = publication.capturedAt;
+      await client.mutateBatch(retentionDeletes);
     } finally {
       if (useWatermark) savePublishWatermark(watermarkPath, state, publication.rows.map((row) => requiredField(row, "id")));
     }
@@ -529,33 +552,89 @@ function savePublishWatermark(path: string, state: PublishWatermark, currentIds:
   }
 }
 
+function fleetAddressKey(fleetBucket: string, sk: string): string {
+  return `${fleetBucket}\0${sk}`;
+}
+
+interface StaleRoutineScan {
+  stale: Array<{ id: string; fleetBucket: string; sk: string }>;
+  fleetByAddress: Map<string, FieldMap>;
+}
+
 async function findStaleRoutineRows(
   client: LastDbPublisherClient,
   fleetStatusSchemaHash: string,
   currentAddresses: Map<string, { fleetBucket: string; sk: string }>,
-): Promise<Array<{ id: string; fleetBucket: string; sk: string }>> {
+): Promise<StaleRoutineScan> {
   const stale = new Map<string, { id: string; fleetBucket: string; sk: string }>();
-  for (let bucket = 0; bucket < FLEET_STATUS_BUCKET_COUNT; bucket += 1) {
-    const fleetBucket = fleetBucketKey(ROUTINES_FLEET_ID, bucket);
-    const page = await client.queryByHash({
-      schemaHash: fleetStatusSchemaHash,
-      keyHash: fleetBucket,
-      fields: ["id", "sk"],
-      maxRows: 100_000,
-    });
+  const fleetByAddress = new Map<string, FieldMap>();
+  const pages = await Promise.all(
+    Array.from({ length: FLEET_STATUS_BUCKET_COUNT }, async (_, bucket) => {
+      const fleetBucket = fleetBucketKey(ROUTINES_FLEET_ID, bucket);
+      const page = await client.queryByHash({
+        schemaHash: fleetStatusSchemaHash,
+        keyHash: fleetBucket,
+        fields: ["id", "sk", "content_digest"],
+        maxRows: 100_000,
+      });
+      return { fleetBucket, page };
+    }),
+  );
+  for (const { fleetBucket, page } of pages) {
     for (const item of page) {
       const id = item.fields.id;
       const sk = item.fields.sk || item.keyRange;
       if (!id || !sk) continue;
+      const address = fleetAddressKey(fleetBucket, sk);
+      fleetByAddress.set(address, item.fields);
       const current = currentAddresses.get(id);
       if (!current || current.fleetBucket !== fleetBucket || current.sk !== sk) {
-        stale.set(`${fleetBucket}\0${sk}`, { id, fleetBucket, sk });
+        stale.set(address, { id, fleetBucket, sk });
       }
     }
   }
-  return [...stale.values()].sort((a, b) =>
-    a.id.localeCompare(b.id) || a.fleetBucket.localeCompare(b.fleetBucket) || a.sk.localeCompare(b.sk)
-  );
+  return {
+    stale: [...stale.values()].sort((a, b) =>
+      a.id.localeCompare(b.id) || a.fleetBucket.localeCompare(b.fleetBucket) || a.sk.localeCompare(b.sk)
+    ),
+    fleetByAddress,
+  };
+}
+
+interface RoutineRunPlan {
+  id: string;
+  fullPass: boolean;
+  watermark: string;
+  maxStamp: string;
+  candidates: FieldMap[];
+}
+
+function planRoutineRuns(
+  row: FieldMap,
+  runsById: Map<string, FieldMap[]>,
+  state: PublishWatermark,
+  useWatermark: boolean,
+  capturedMs: number,
+): RoutineRunPlan {
+  const id = requiredField(row, "id");
+  // Once per RETENTION_INTERVAL_MS a routine gets a full pass: every run in the
+  // window is re-checked (self-heals a wiped store or a lost write) and retention runs.
+  const lastRetentionMs = Date.parse(state.retention[id] ?? "");
+  const fullPass = !useWatermark
+    || !Number.isFinite(lastRetentionMs)
+    || capturedMs - lastRetentionMs >= RETENTION_INTERVAL_MS
+    || capturedMs < lastRetentionMs;
+  const watermark = state.runs[id] ?? "";
+  let maxStamp = watermark;
+  const candidates: FieldMap[] = [];
+  for (const run of runsById.get(id) ?? []) {
+    const stamp = requiredField(run, "stamp");
+    // Run summaries are immutable per id+stamp: at or below the watermark means already published.
+    if (!fullPass && stamp <= watermark) continue;
+    candidates.push(run);
+    if (stamp > maxStamp) maxStamp = stamp;
+  }
+  return { id, fullPass, watermark, maxStamp, candidates };
 }
 
 export async function deliverFleetStatus(options: DeliverStatusOptions): Promise<DeliverStatusResult> {
@@ -847,10 +926,26 @@ function uniqueSortedIds(ids: string[]): string[] {
   return [...new Set(ids.map((id) => id.trim()).filter(Boolean))].sort();
 }
 
+function uniqueHashRangeKeys(keys: Array<{ hash: string; range: string }>): Array<{ hash: string; range: string }> {
+  const seen = new Set<string>();
+  const out: Array<{ hash: string; range: string }> = [];
+  for (const key of keys) {
+    const id = `${key.hash}\0${key.range}`;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    out.push(key);
+  }
+  return out;
+}
+
 function chunkIds(ids: string[], chunkSize: number): string[][] {
-  const chunks: string[][] = [];
-  for (let offset = 0; offset < ids.length; offset += chunkSize) {
-    chunks.push(ids.slice(offset, offset + chunkSize));
+  return chunkItems(ids, chunkSize);
+}
+
+function chunkItems<T>(items: T[], chunkSize: number): T[][] {
+  const chunks: T[][] = [];
+  for (let offset = 0; offset < items.length; offset += chunkSize) {
+    chunks.push(items.slice(offset, offset + chunkSize));
   }
   return chunks;
 }
@@ -995,11 +1090,11 @@ function fleetContentDigest(rows: FieldMap[]): string {
   return createHash("sha256").update(JSON.stringify(normalized)).digest("hex");
 }
 
-async function enforceRunSummaryRetention(
+async function collectRunSummaryRetentionDeletes(
   client: LastDbPublisherClient,
   schemaHash: string,
   opts: { id: string; now: Date; keepCount: number; keepDays: number },
-): Promise<number> {
+): Promise<PublisherMutation[]> {
   const rows = await client.queryByHash({
     schemaHash,
     keyHash: opts.id,
@@ -1008,21 +1103,20 @@ async function enforceRunSummaryRetention(
   });
   rows.sort((a, b) => b.keyRange.localeCompare(a.keyRange));
   const cutoffMs = opts.now.getTime() - opts.keepDays * 24 * 60 * 60 * 1000;
-  let deleted = 0;
+  const deletes: PublisherMutation[] = [];
   for (const [index, row] of rows.entries()) {
     const startedMs = Date.parse(row.fields.started_at ?? "");
     const expired = Number.isFinite(startedMs) && startedMs < cutoffMs;
     if (index < opts.keepCount && !expired) continue;
-    await client.mutate({
+    deletes.push({
       schemaHash,
       keyHash: opts.id,
       keyRange: row.keyRange,
       fields: row.fields,
       mutationType: "delete",
     });
-    deleted += 1;
   }
-  return deleted;
+  return deletes;
 }
 
 function contentDigest(fields: FieldMap, excluded: Set<string>): string {
@@ -1150,6 +1244,33 @@ export function newLastDbPublisherClient(opts: LastDbClientOptions = {}): LastDb
       const rows = queryRows(body);
       return rows.find((row) => row.key.hash === keyHash && (keyRange === undefined || row.key.range === keyRange))?.fields ?? null;
     },
+    async queryByKeys({ schemaHash, keyHashes, fields }) {
+      const unique = uniqueSortedIds(keyHashes);
+      if (unique.length === 0) return [];
+      const pages = await Promise.all(
+        chunkIds(unique, QUERY_KEYS_PAGE).map((chunk) =>
+          callJson("POST", "/api/query", {
+            schema_name: schemaHash,
+            fields,
+            filter: { HashKeys: chunk },
+            limit: chunk.length,
+            offset: 0,
+          }, userHash),
+        ),
+      );
+      const wanted = new Set(unique);
+      const out: Array<{ keyHash: string; fields: FieldMap }> = [];
+      const seen = new Set<string>();
+      for (const body of pages) {
+        for (const row of queryRows(body)) {
+          const keyHash = row.key.hash;
+          if (!keyHash || !wanted.has(keyHash) || seen.has(keyHash)) continue;
+          seen.add(keyHash);
+          out.push({ keyHash, fields: row.fields });
+        }
+      }
+      return out;
+    },
     async queryByHash({ schemaHash, keyHash, fields, maxRows }) {
       const pageSize = Math.min(200, maxRows);
       const out: Array<{ keyRange: string; fields: FieldMap }> = [];
@@ -1167,6 +1288,36 @@ export function newLastDbPublisherClient(opts: LastDbClientOptions = {}): LastDb
       }
       return out;
     },
+    async queryByHashRangeKeys({ schemaHash, keys, fields }) {
+      const unique = uniqueHashRangeKeys(keys);
+      if (unique.length === 0) return [];
+      const pages = await Promise.all(
+        chunkItems(unique, QUERY_KEYS_PAGE).map((chunk) =>
+          callJson("POST", "/api/query", {
+            schema_name: schemaHash,
+            fields,
+            filter: { HashRangeKeys: chunk.map((key) => [key.hash, key.range]) },
+            limit: chunk.length,
+            offset: 0,
+          }, userHash),
+        ),
+      );
+      const wanted = new Set(unique.map((key) => `${key.hash}\0${key.range}`));
+      const out: Array<{ keyHash: string; keyRange: string; fields: FieldMap }> = [];
+      const seen = new Set<string>();
+      for (const body of pages) {
+        for (const row of queryRows(body)) {
+          const keyHash = row.key.hash;
+          const keyRange = row.key.range;
+          if (!keyHash || !keyRange) continue;
+          const id = `${keyHash}\0${keyRange}`;
+          if (!wanted.has(id) || seen.has(id)) continue;
+          seen.add(id);
+          out.push({ keyHash, keyRange, fields: row.fields });
+        }
+      }
+      return out;
+    },
     async mutate({ schemaHash, keyHash, keyRange, fields, mutationType }) {
       await callJson("POST", "/api/mutation", {
         type: "mutation",
@@ -1175,6 +1326,20 @@ export function newLastDbPublisherClient(opts: LastDbClientOptions = {}): LastDb
         key_value: { hash: keyHash, range: keyRange ?? null },
         mutation_type: mutationType,
       }, userHash);
+    },
+    async mutateBatch(ops) {
+      if (ops.length === 0) return;
+      for (const chunk of chunkItems(ops, MUTATION_BATCH_PAGE)) {
+        await callJson("POST", "/api/mutations/batch", {
+          mutations: chunk.map((op) => ({
+            type: "mutation",
+            schema: op.schemaHash,
+            fields_and_values: op.fields,
+            key_value: { hash: op.keyHash, range: op.keyRange ?? null },
+            mutation_type: op.mutationType,
+          })),
+        }, userHash);
+      }
     },
   };
 }
