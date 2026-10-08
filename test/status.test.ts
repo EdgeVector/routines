@@ -8,6 +8,7 @@ import { collectStatus } from "../src/status.ts";
 
 let home: string;
 let situationsBin: string;
+let prevSituationsCli: string | undefined;
 
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), "routines-status-"));
@@ -16,7 +17,11 @@ beforeEach(() => {
   situationsBin = join(home, "situations");
   writeFileSync(situationsBin, "#!/bin/sh\necho '[]'\n");
   chmodSync(situationsBin, 0o755);
+  // fsituationsBinary() prefers ROUTINES_SITUATIONS_CLI. A routine runner sets
+  // that to the real CLI, which then bypasses the stub below.
+  prevSituationsCli = process.env.ROUTINES_SITUATIONS_CLI;
   process.env.ROUTINES_FSITUATIONS_BIN = situationsBin;
+  process.env.ROUTINES_SITUATIONS_CLI = situationsBin;
 
   mkdirSync(join(home, "registry"), { recursive: true });
 });
@@ -24,6 +29,8 @@ beforeEach(() => {
 afterEach(() => {
   delete process.env.ROUTINES_HOME;
   delete process.env.ROUTINES_FSITUATIONS_BIN;
+  if (prevSituationsCli === undefined) delete process.env.ROUTINES_SITUATIONS_CLI;
+  else process.env.ROUTINES_SITUATIONS_CLI = prevSituationsCli;
   rmSync(home, { recursive: true, force: true });
 });
 
