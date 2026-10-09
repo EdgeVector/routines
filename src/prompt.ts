@@ -71,6 +71,24 @@ export function formatAttributionTrailers(env: {
   return lines.join("\n");
 }
 
+/**
+ * Foreground-ownership addendum for the Claude harness only.
+ *
+ * `timeout` is an argument of the Claude Code Bash tool. The other harnesses do
+ * not take that argument, so naming it for them would be wrong guidance.
+ * `entry.harness` is the effective harness of the route leg: runner.ts hands
+ * `runOnce` an `entryForRoute` copy, so a fallback leg gets the text that
+ * matches the tool it actually runs.
+ */
+const CLAUDE_BASH_TIMEOUT_LINES = [
+  "A command that outlasts the Bash tool `timeout` (default 120000 ms, maximum",
+  "600000 ms) is moved to the background with no error, which is exactly the",
+  "case above. For any poll, wait, or CI-watch command that can run longer than",
+  "two minutes, pass an explicit `timeout` sized to its worst case. Without it",
+  "the command becomes a background task this dispatch can never read back.",
+  "",
+];
+
 type DispatchEnvelopeOptions = {
   /** When set, skip live `situations notices` (tests / offline). */
   noticesBanner?: string;
@@ -133,12 +151,7 @@ export function buildDispatchEnvelope(
     "finish inside the routine timeout, write the sink and the trailer FIRST with",
     "what you already know, then stop.",
     "",
-    "A command that outlasts the Bash tool `timeout` (default 120000 ms, maximum",
-    "600000 ms) is moved to the background with no error, which is exactly the",
-    "case above. For any poll, wait, or CI-watch command that can run longer than",
-    "two minutes, pass an explicit `timeout` sized to its worst case. Without it",
-    "the command becomes a background task this dispatch can never read back.",
-    "",
+    ...(entry.harness === "claude" ? CLAUDE_BASH_TIMEOUT_LINES : []),
     "## Explicit routine outcome (required)",
     "",
     "Before exiting, write exactly one single-line verdict to",
