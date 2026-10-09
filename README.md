@@ -292,6 +292,38 @@ Three complementary layers:
    Canonical prompt: `prompts/routine-fleet-health.md` (copy into
    `~/.routines/prompts/` and/or last-stack as needed).
 
+### Registry audit log
+
+`routines pause|resume|route` and the dashboard buttons all rewrite a registry
+TOML through `src/edit.ts`. Each key written appends one JSON line to
+`~/.routines/registry-audit.log`. The log sits beside `registry/`, not in it, so
+the scheduler and `freeze-watch` never scan it. A line has `ts`, `id`, `file`,
+`key`, `from`, `to`, `pid`, `ppid`, `argv` (first three words), and `caller`
+(`cli`, `web`, or `unknown`). `from` is the value the file held when it was
+rewritten (`null` for an appended key), not what the caller believed. A `web`
+line also has `client`, the HTTP User-Agent, because the dashboard has no auth;
+its `pid` is the web server's, not the client's.
+
+The log is best effort: if it cannot be written, the write to the registry still
+happens and `routines` prints one line on stderr. It records only writes made
+through `setKeys`. A flip with no line was made by something else (a `sed -i`
+loop, another program), which narrows the search.
+
+There is no backup copy of the registry file. `setKeys` changes only the keys it
+is given, so the logged `from` values are everything needed to undo a write. A
+one-generation copy would be overwritten by the next write, including the
+`routines resume` that heals a mass pause, which is the forensic loss this log
+exists to prevent. To list the routines last flipped `active` to `paused` since
+a given time:
+
+```sh
+jq -rs --arg since "2026-10-01T18:40" '[.[] | select(.key=="status" and .ts >= $since)]
+  | group_by(.id) | map(last) | map(select(.from=="active" and .to=="paused") | .id) | .[]' \
+  ~/.routines/registry-audit.log
+```
+
+The log is never rotated. A line is about 350 bytes, so 80 routines paused 100 times add under 3 MB.
+
 
 ## Web dashboard
 

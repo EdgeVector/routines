@@ -8,6 +8,7 @@ import { loadEntry, RegistryError } from "./registry.ts";
 import type { StatusSnapshot } from "./status.ts";
 import { listRuns, readRun } from "./runs.ts";
 import { routeRoutine, setStatus, startRunNow, ActionError } from "./actions.ts";
+import type { AuditContext } from "./edit.ts";
 import { PAGE } from "./page.ts";
 import { captureRoutinesException } from "./observability.ts";
 
@@ -151,12 +152,15 @@ async function handle(req: Request, statuses: StatusCollector): Promise<Response
       return json({ started: true, id }, 202);
     }
     // POST .../pause | .../resume
+    // The endpoints have no auth, so the User-Agent is recorded in the registry
+    // audit log as the only hint to who called.
+    const audit: AuditContext = { caller: "web", client: req.headers.get("user-agent") ?? undefined };
     if (sub === "pause" && method === "POST") {
-      const next = setStatus(entry, "paused");
+      const next = setStatus(entry, "paused", audit);
       return json({ id, status: next.status });
     }
     if (sub === "resume" && method === "POST") {
-      const next = setStatus(entry, "active");
+      const next = setStatus(entry, "active", audit);
       return json({ id, status: next.status });
     }
     // POST .../route — { harness?, model? }
@@ -168,7 +172,7 @@ async function handle(req: Request, statuses: StatusCollector): Promise<Response
         return json({ error: "invalid JSON body" }, 400);
       }
       try {
-        const next = routeRoutine(entry, payload);
+        const next = routeRoutine(entry, payload, audit);
         return json({ id, harness: next.harness, model: next.model });
       } catch (err) {
         if (err instanceof ActionError) return json({ error: err.message }, 400);

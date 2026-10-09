@@ -19,6 +19,15 @@ export function registryDir(): string {
   return join(routinesHome(), "registry");
 }
 
+/**
+ * Append-only JSONL of every key `setKeys` writes into a registry file (one
+ * line per key). It sits beside the registry dir, not inside it: the scheduler
+ * and `freeze-watch` scan `registry/` and must never see anything but entries.
+ */
+export function registryAuditLogPath(): string {
+  return join(routinesHome(), "registry-audit.log");
+}
+
 export function runsDir(): string {
   return join(routinesHome(), "runs");
 }
