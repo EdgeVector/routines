@@ -4,15 +4,16 @@
 // the command line: no divergent second implementation to drift.
 
 import { acquireLock, isLocked, releaseLock } from "./daemon.ts";
-import { setKeys } from "./edit.ts";
+import { setKeys, type AuditContext } from "./edit.ts";
 import { isHarness, loadEntry, type RoutineEntry, type Status } from "./registry.ts";
 import { runRoutine, type RunResult } from "./runner.ts";
 import { ModelValidationError, validateModel } from "./models.ts";
 
 /** Pause or resume a routine by rewriting its `status` key in place. Returns the
- * reloaded entry (validates the write round-trips). */
-export function setStatus(entry: RoutineEntry, status: Status): RoutineEntry {
-  setKeys(entry.sourcePath, { status });
+ * reloaded entry (validates the write round-trips). `audit` says who asked; the
+ * write is recorded in the registry audit log (src/edit.ts). */
+export function setStatus(entry: RoutineEntry, status: Status, audit?: AuditContext): RoutineEntry {
+  setKeys(entry.sourcePath, { status }, audit);
   return loadEntry(entry.id);
 }
 
@@ -25,7 +26,7 @@ export class ActionError extends Error {}
 
 /** Re-route a routine's harness and/or model as an explicit pin, writing the
  * registry TOML in place (comments + unrelated lines survive). */
-export function routeRoutine(entry: RoutineEntry, update: RouteUpdate): RoutineEntry {
+export function routeRoutine(entry: RoutineEntry, update: RouteUpdate, audit?: AuditContext): RoutineEntry {
   const updates: Record<string, string | boolean> = { pin: true };
   let targetHarness = entry.harness;
   let targetModel = entry.model;
@@ -54,7 +55,7 @@ export function routeRoutine(entry: RoutineEntry, update: RouteUpdate): RoutineE
     throw err;
   }
 
-  setKeys(entry.sourcePath, updates);
+  setKeys(entry.sourcePath, updates, audit);
   return loadEntry(entry.id);
 }
 

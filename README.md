@@ -292,6 +292,70 @@ Three complementary layers:
    Canonical prompt: `prompts/routine-fleet-health.md` (copy into
    `~/.routines/prompts/` and/or last-stack as needed).
 
+### Registry audit log
+
+`routines pause|resume|route` and the dashboard buttons all rewrite a registry
+TOML through `src/edit.ts`. Each key written appends one JSON line to
+`~/.routines/registry-audit.log`. The log sits beside `registry/`, not in it, so
+the scheduler and `freeze-watch` never scan it. A line has these fields:
+
+- `ts`, `id`, `file`, `key`: when the write finished, and which entry and key.
+- `from`, `to`: the value the file held when it was rewritten (`null` for an
+  appended key), not what the caller believed, and the value written.
+- `prev_mtime`, `prev_size`: the mtime (ISO time) and byte size of the file just
+  before the rewrite. The rewrite replaces the real mtime, so this line is the
+  only place that keeps it. `null` if the stat failed.
+- `caller`: `cli`, `web`, or `unknown`. `client` (web only): the HTTP
+  User-Agent, cut to 200 characters, because the dashboard has no auth.
+- `actor`: the routine identity that the runner puts in the environment of every
+  harness child (`DRIVEN_BY`, `AUTOMATION_ID`, `LASTGIT_ACTOR`,
+  `ROUTINES_RUN_ID`; see `buildRoutineAttributionEnv` in `src/prompt.ts`). Only
+  those four names are copied, each value cut to 200 characters. `{}` means none
+  was set. Together with `cwd`, `pid`, `ppid` and `argv` (first three words) it
+  tells an agent inside a routine dispatch apart from a person at a terminal.
+  An interactive agent session that is not a dispatch sets none of the four
+  names, so it looks like a person.
+
+For a `web` line, `actor`, `cwd`, `pid`, `ppid` and `argv` describe the
+dashboard server process, not the HTTP client. Only `client` says who called.
+
+The log is best effort: if it cannot be written, the write to the registry still
+happens and `routines` prints one line on stderr. It records only writes made
+through `setKeys`. A flip with no line was made by something else (a `sed -i`
+loop, another program), or by a write whose log line failed (the stderr line is
+the only trace of that). This narrows the search. The time of the last such
+outside write is kept: the next `setKeys` write to that file (a `routines
+resume`, for example) logs it as `prev_mtime`. An outside write happened between
+two logged writes when a line's `prev_mtime` is later than the `ts` of the write
+before it for the same file:
+
+```sh
+jq -rs 'group_by(.file)[] | unique_by(.ts) | . as $w | range(1; length) as $i
+  | select($w[$i].prev_mtime > $w[$i-1].ts)
+  | [$w[$i].id, $w[$i].prev_mtime, $w[$i-1].ts] | @tsv' ~/.routines/registry-audit.log
+```
+
+Each row is an entry id, the time of the outside write, and the `ts` of the
+logged write that it followed. A file that never had a logged write before the
+flip has no earlier line to compare with. Its first line still holds the time of
+the last change before that write in `prev_mtime`.
+
+There is no backup copy of the registry file. `setKeys` changes only the keys it
+is given, so the logged `from` values are everything needed to undo a write. A
+one-generation copy would be overwritten by the next write, including the
+`routines resume` that heals a mass pause, which is the forensic loss this log
+exists to prevent. To list the routines last flipped `active` to `paused` since
+a given time:
+
+```sh
+jq -rs --arg since "2026-10-01T18:40" '[.[] | select(.key=="status" and .ts >= $since)]
+  | group_by(.id) | map(last) | map(select(.from=="active" and .to=="paused") | .id) | .[]' \
+  ~/.routines/registry-audit.log
+```
+
+The log is never rotated. A line is about 430 bytes, or about 660 bytes when the
+routine identity is set, so 80 routines paused 100 times add about 5 MB.
+
 
 ## Web dashboard
 

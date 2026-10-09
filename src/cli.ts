@@ -407,7 +407,7 @@ function cmdSetStatus(rest: string[], status: "active" | "paused"): number {
     return 2;
   }
   const entry = loadEntry(id); // validates existence + shape
-  setStatus(entry, status);
+  setStatus(entry, status, { caller: "cli" });
   console.log(`${id}: status = ${status}`);
   return 0;
 }
@@ -425,7 +425,7 @@ function cmdRoute(rest: string[]): number {
   }
   const entry = loadEntry(id);
   try {
-    const next = routeRoutine(entry, { harness: values.harness, model: values.model });
+    const next = routeRoutine(entry, { harness: values.harness, model: values.model }, { caller: "cli" });
     console.log(`${id}: ${next.harness}/${next.model}`);
     return 0;
   } catch (err) {
