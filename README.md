@@ -432,7 +432,7 @@ for older runners and prompts that have not yet adopted the sink.
 
 ```sh
 routines install-daemon                          # bootstrap under launchd
-routines daemon --once --catchup 60              # single evaluation pass (testing / e2e)
+routines daemon --once --catchup 60              # single evaluation pass
 ```
 
 `routines install-daemon` also enables Sentry for the launchd-managed daemon by
@@ -455,7 +455,7 @@ bodies are not sent.
 This repo merges through **GitHub pull requests** (moved from LastGit on
 2026-09-30). Venue: `.last-stack/pr-venue` (`github`). CI gate:
 `.github/workflows/ci-required.yml`; the job `ci-required` is required by branch
-protection on `main`, and its `test` job runs `.lastgit/ci.sh` on a macOS runner.
+protection on `main`, and its `gate` job runs `.lastgit/ci.sh` on a macOS runner.
 Open a PR with `gh pr create`, then `gh pr merge --squash --auto`.
 
 On a push to `main` the `publish` job calls last-stack's reusable workflow, which
@@ -487,20 +487,16 @@ refused classifies as harness outage kind `credential-unreadable`: the fence and
 the Telegram page still fire, but the remedy names the locator instead of
 `claude /login`.
 
-## Test
+## Checks
+
+All tests in this repo are deleted (2026-10-09). The gate runs shell syntax,
+the prompt lint, typecheck, and the artifact build.
 
 ```sh
-bun test            # unit + daemon + dashboard integration (47 tests)
 bun run typecheck   # scripts/typecheck.sh: installs locked devDeps if tsc is
                     # missing, keeps Bun temp files in .cache/bun-tmp, runs tsc --noEmit
-bun run e2e         # full both-adapter dispatch e2e on a throwaway ROUTINES_HOME
+bun run build       # scripts/build-artifact.sh: compile dist/routines
 ```
-
-The e2e stubs the leaf `claude`/`codex`/`grok` binaries by setting
-`ROUTINES_ALLOW_HARNESS_BIN_OVERRIDES=1` plus the relevant `ROUTINES_*_BIN`
-values. It also stubs `fsituations`/`fbrain` via `ROUTINES_FSITUATIONS_BIN` and
-`ROUTINES_FBRAIN_BIN`, so it is hermetic and spends no API credits while
-exercising the full dispatch → spawn → log → heartbeat path that routines owns.
 
 ## Migration (one-time cutover)
 
