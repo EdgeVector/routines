@@ -10,6 +10,7 @@
 import {
   isLocked,
   lockHasLiveOwner,
+  readLockHarnessPid,
   readLockPid,
   reconcileOrphanedRuns,
   releaseLock,
@@ -44,6 +45,7 @@ interface LatestRunDir {
   startedAt: string | null;
   finishedAt: string | null;
   status: string | null;
+  harnessPid: number | null;
   waitingForHarness: string | null;
   waitingSince: string | null;
 }
@@ -69,28 +71,45 @@ function clearDeadLockForCompletedRun(id: string, latest: RunSummary | undefined
   releaseLock(id);
 }
 
-/** Prefer lock file pid; fall back to early meta.harnessPid in the latest run dir. */
-function resolveHarnessPid(id: string, latest: RunSummary | undefined): number | null {
-  const lockPid = readLockPid(id);
-  if (lockPid != null) return lockPid;
-  if (!latest?.stamp) return null;
-  const metaPath = join(runsDir(), id, latest.stamp, "meta.json");
-  if (!existsSync(metaPath)) return null;
-  try {
-    const meta = JSON.parse(readFileSync(metaPath, "utf8")) as { harnessPid?: unknown };
-    const n = Number(meta.harnessPid);
-    return Number.isFinite(n) ? n : null;
-  } catch {
-    return null;
-  }
+/**
+ * Pid of the live harness worker, or null when it is not recorded.
+ *
+ * The lock holds it once setLockOwnerPid has run. Before that (a gate_command
+ * run is here for its whole gate) the lock only names its owner, which is
+ * routinesd. Reporting that as the harness pid invited an operator to kill the
+ * daemon and every in-flight run, so this reads the lock's harnessPid field
+ * only, never readLockPid's owner fallback. The fallback is the in-flight run's
+ * early meta.harnessPid; the previous finished run's pid is dead or recycled.
+ */
+function resolveHarnessPid(id: string, currentRun: LatestRunDir | null): number | null {
+  return readLockHarnessPid(id) ?? currentRun?.harnessPid ?? null;
 }
+
+/** A recorded pid is a positive integer; Number(null) is 0 and must not pass. */
+function recordedPid(value: unknown): number | null {
+  return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : null;
+}
+
+/**
+ * Run dirs are named by the runner's run stamp: an ISO instant with `[:.]`
+ * replaced by `-`, e.g. 2026-07-12T21-05-00-123Z. Anything else under
+ * runs/<id>/ (a memory.md, a dummy.json.err, a scratch dir) is not a run.
+ */
+const RUN_STAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z$/;
 
 function readLatestRunDir(id: string): LatestRunDir | null {
   const idDir = join(runsDir(), id);
   if (!existsSync(idDir)) return null;
   let stamp: string | undefined;
   try {
-    stamp = readdirSync(idDir).sort().at(-1);
+    // Without this filter a stray entry that sorts after the stamps (memory.md,
+    // a letter-initial name) became the "newest run", and currentRun /
+    // currentRunDir / currentStartedAt were published from it.
+    stamp = readdirSync(idDir, { withFileTypes: true })
+      .filter((d) => d.isDirectory() && RUN_STAMP_RE.test(d.name))
+      .map((d) => d.name)
+      .sort()
+      .at(-1);
   } catch {
     return null;
   }
@@ -111,6 +130,7 @@ function readLatestRunDir(id: string): LatestRunDir | null {
     startedAt: typeof meta.startedAt === "string" ? meta.startedAt : null,
     finishedAt: typeof meta.finishedAt === "string" ? meta.finishedAt : null,
     status: typeof meta.status === "string" ? meta.status : null,
+    harnessPid: recordedPid(meta.harnessPid),
     waitingForHarness:
       typeof meta.waitingForHarness === "string" ? meta.waitingForHarness : null,
     waitingSince: typeof meta.waitingSince === "string" ? meta.waitingSince : null,
@@ -154,7 +174,8 @@ export interface StatusRow {
   running: boolean;
   /**
    * Pid of the live harness worker when `running` is true (from the
-   * single-flight lock / early meta). null when not running.
+   * single-flight lock / early meta). null when not running, and null while a
+   * running routine has not recorded its harness yet (never the daemon pid).
    */
   harnessPid: number | null;
   /** Newest on-disk run directory while a routine is actively running. */
@@ -263,7 +284,7 @@ export function collectStatus(now: Date = new Date(), options: StatusOptions = {
     const latest = recent[0];
     const currentRun = activeRunDir(e.id);
     const running = isCurrentlyRunning(e.id, latest, currentRun);
-    const harnessPid = running ? resolveHarnessPid(e.id, latest) : null;
+    const harnessPid = running ? resolveHarnessPid(e.id, currentRun) : null;
     const route = effectiveRoute(e, now.getTime());
     const stateOutcome: OutcomeKind | null =
       st.lastOutcome === "ok" ||

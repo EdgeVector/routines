@@ -188,8 +188,112 @@ Hygiene:
   --memory-lines N            truncate memory.md to last N lines (default 100)
   --escalate-days N           drop error-escalate/*.json older than N days (default 14)`;
 
+const RUN_SYNOPSIS = "routines run <id> [--quiet] [--resume-run <run-dir>]";
+const ROUTE_SYNOPSIS = "routines route <id> [--harness claude|codex|grok|gemini] [--model <model>]";
+
+const LIST_HELP = `Usage: routines list [--json]
+
+List the registered routines, one per line:
+  <id>  <status>  <harness>/<model>  <rrule>  <route source>
+
+Options:
+  --json                      print one JSON object instead of text:
+                                {"entries": [...], "errors": [...]}
+                              entries holds one summary per routine. errors holds
+                              one message per registry file that failed to load.
+                              The top level is an object, not an array: read the
+                              routines with .entries[]
+  -h, --help                  print this help
+
+Exit codes: 0 ok · 1 a registry file failed to load`;
+
+const STATUS_HELP = `Usage: routines status [--json]
+
+Show each routine's schedule, last run, running state, harness and model.
+
+Options:
+  --json                      print one JSON object instead of text:
+                                {"situationsOk": <bool>, "rows": [...],
+                                 "entries": [...], "errors": [...]}
+                              rows holds one record per routine. entries is the
+                              same array under its older name, kept for old
+                              consumers. errors holds registry load errors. The top
+                              level is an object, not an array: read the routines
+                              with .rows[]
+  -h, --help                  print this help
+
+In a row, harnessPid is the process id of the live harness, or null when the
+routine is not running or its harness has not started yet. currentRun,
+currentRunDir and currentStartedAt describe the run in flight.
+
+Exit codes: 0 ok`;
+
+const RUN_HELP = `Usage: ${RUN_SYNOPSIS}
+
+Run one routine now, in the foreground, and wait for it to finish. The run takes
+the routine's single-flight lock, so it cannot overlap a scheduled fire.
+
+Options:
+  --quiet                     do not stream the harness output
+  --resume-run <run-dir>      guarded Codex recovery: resume the run in this dir
+  -h, --help                  print this help
+
+Exit codes: 0 run succeeded · 1 run failed · 2 usage error · 3 already running`;
+
+function setStatusHelp(verb: "pause" | "resume", status: "paused" | "active"): string {
+  return `Usage: routines ${verb} <id>
+
+Set status = ${status} in the routine's registry file. The daemon reads the file on
+its next tick. This does not stop a run that is already in flight.
+
+Options:
+  -h, --help                  print this help
+
+Exit codes: 0 ok · 2 usage error`;
+}
+
+const ROUTE_HELP = `Usage: ${ROUTE_SYNOPSIS}
+
+Pin a routine to a harness and/or model. Give at least one of the two options.
+The change is written to the routine's registry file.
+
+Options:
+  --harness <harness>         claude|codex|grok|gemini
+  --model <model>             model name for that harness
+  -h, --help                  print this help
+
+Exit codes: 0 ok · 2 usage error or invalid harness/model`;
+
+/** Per-subcommand help. Only these commands answer -h/--help themselves. */
+const SUBCOMMAND_HELP = new Map<string, string>([
+  ["list", LIST_HELP],
+  ["status", STATUS_HELP],
+  ["run", RUN_HELP],
+  ["pause", setStatusHelp("pause", "paused")],
+  ["resume", setStatusHelp("resume", "active")],
+  ["route", ROUTE_HELP],
+]);
+
+/**
+ * True when -h/--help appears before a literal `--`. These commands call
+ * parseArgs without a help option, so the flag used to throw "Unknown option"
+ * (list, status, run, route) or be read as a routine id (pause, resume).
+ */
+function wantsHelp(rest: string[]): boolean {
+  for (const arg of rest) {
+    if (arg === "--") return false;
+    if (arg === "-h" || arg === "--help") return true;
+  }
+  return false;
+}
+
 async function main(argv: string[]): Promise<number> {
   const [command, ...rest] = argv;
+  const subcommandHelp = command === undefined ? undefined : SUBCOMMAND_HELP.get(command);
+  if (subcommandHelp !== undefined && wantsHelp(rest)) {
+    console.log(subcommandHelp);
+    return 0;
+  }
   switch (command) {
     case undefined:
     case "help":
@@ -377,7 +481,7 @@ async function cmdRun(rest: string[]): Promise<number> {
   });
   const id = positionals[0];
   if (!id) {
-    console.error("usage: routines run <id> [--quiet] [--resume-run <run-dir>]");
+    console.error(`usage: ${RUN_SYNOPSIS}`);
     return 2;
   }
   const entry = loadEntry(id);
@@ -420,7 +524,7 @@ function cmdRoute(rest: string[]): number {
   });
   const id = positionals[0];
   if (!id || (!values.harness && !values.model)) {
-    console.error("usage: routines route <id> [--harness claude|codex|grok|gemini] [--model <model>]");
+    console.error(`usage: ${ROUTE_SYNOPSIS}`);
     return 2;
   }
   const entry = loadEntry(id);

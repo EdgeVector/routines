@@ -672,6 +672,15 @@ export function readLockPid(id: string): number | null {
   return info.harnessPid ?? info.ownerPid ?? info.pid;
 }
 
+/**
+ * The harness worker pid recorded in a routine's lock, or null when the lock
+ * has none yet. readLockPid falls back to the lock owner (routinesd) for
+ * ownership checks; a caller that reports "the harness pid" must not.
+ */
+export function readLockHarnessPid(id: string): number | null {
+  return readLockInfo(id)?.harnessPid ?? null;
+}
+
 export function lockHasLiveOwner(id: string): boolean {
   return lockInfoHasLiveOwner(readLockInfo(id));
 }
