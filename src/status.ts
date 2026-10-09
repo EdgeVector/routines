@@ -85,12 +85,26 @@ function resolveHarnessPid(id: string, latest: RunSummary | undefined): number |
   }
 }
 
+/**
+ * Run dirs are named by the runner's run stamp: an ISO instant with `[:.]`
+ * replaced by `-`, e.g. 2026-07-12T21-05-00-123Z. Anything else under
+ * runs/<id>/ (a memory.md, a dummy.json.err, a scratch dir) is not a run.
+ */
+const RUN_STAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z$/;
+
 function readLatestRunDir(id: string): LatestRunDir | null {
   const idDir = join(runsDir(), id);
   if (!existsSync(idDir)) return null;
   let stamp: string | undefined;
   try {
-    stamp = readdirSync(idDir).sort().at(-1);
+    // Without this filter a stray entry that sorts after the stamps (memory.md,
+    // a letter-initial name) became the "newest run", and currentRun /
+    // currentRunDir / currentStartedAt were published from it.
+    stamp = readdirSync(idDir, { withFileTypes: true })
+      .filter((d) => d.isDirectory() && RUN_STAMP_RE.test(d.name))
+      .map((d) => d.name)
+      .sort()
+      .at(-1);
   } catch {
     return null;
   }
