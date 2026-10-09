@@ -1,3 +1,0 @@
-[test]
-# Keep the suite off the production heartbeat log (see test/preload.ts).
-preload = ["./test/preload.ts"]

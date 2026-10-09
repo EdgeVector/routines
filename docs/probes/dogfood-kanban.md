@@ -6,8 +6,7 @@ harness. It exercises only the scratch board named by `KSTRESS_BOARD`
 
 The harness must use the live fkanban column schema exactly:
 `backlog,todo,doing,done`. The retired `review` lane is intentionally absent
-from board creation and move-path checks, and the regression test
-`test/kanban-stress-script.test.ts` guards that contract.
+from board creation and move-path checks.
 
 If the scheduler or an outer `timeout` interrupts the harness, the script traps
 the signal, soft-deletes scratch cards created so far, emits `PARTIAL:`, and

@@ -1,9 +1,9 @@
 # Gate of record for EdgeVector/routines: GitHub (moved from LastGit on 2026-09-30).
 # Branch protection on main requires the job named `ci-required`.
 #
-# `test` runs .lastgit/ci.sh on macOS. The gate includes test/build-artifact-codesign.sh
-# (macOS codesign/security stubs and bash 3.2 awk/sed behavior) and `bun run build`
-# (a compiled darwin binary), so a Linux runner would not prove the same thing.
+# `gate` runs .lastgit/ci.sh on macOS: shell syntax, the prompt lint, typecheck and
+# `bun run build` (a compiled darwin binary), so a Linux runner would not prove the
+# same thing. The repo has no tests (deleted 2026-10-09).
 #
 # `publish` runs only on a push to main. It calls last-stack's reusable workflow, which
 # builds the host-track artifact on macOS and uploads the Actions artifact
@@ -28,8 +28,8 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
-  test:
-    name: test
+  gate:
+    name: gate
     runs-on: macos-latest
     timeout-minutes: 30
     steps:
@@ -46,16 +46,16 @@ jobs:
   ci-required:
     name: ci-required
     if: ${{ always() }}
-    needs: [test]
+    needs: [gate]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Require every needed job to succeed
         env:
-          TEST_RESULT: ${{ needs.test.result }}
+          GATE_RESULT: ${{ needs.gate.result }}
         run: |
-          echo "test=$TEST_RESULT"
-          test "$TEST_RESULT" = "success"
+          echo "gate=$GATE_RESULT"
+          test "$GATE_RESULT" = "success"
 
   publish:
     name: publish

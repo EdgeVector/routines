@@ -1,18 +1,19 @@
 #!/usr/bin/env bash
-# routines CI gate — run by the GitHub Actions `test` job (.github/workflows/ci-required.yml,
+# routines CI gate — run by the GitHub Actions `gate` job (.github/workflows/ci-required.yml,
 # macos-latest) on every PR and push; the job `ci-required` that branch protection
 # requires needs it.
 #
 # Keep it cheap (seconds): it runs in a fresh clone per push. Written to be
 # skeleton-tolerant (macOS bash 3.2, no arrays under set -u): loops simply
-# don't execute while the repo has no src/ or test/ yet, and pick the files
-# up automatically as the MVP lands.
+# don't execute while the repo has no src/ yet, and pick the files
+# up automatically as the MVP lands. The repo has no tests (deleted 2026-10-09);
+# the gate is syntax + typecheck + build.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 shopt -s nullglob
 
 # 1. shell syntax of every script
-for f in .lastgit/*.sh scripts/*.sh test/*.sh; do
+for f in .lastgit/*.sh scripts/*.sh; do
   echo "bash -n $f"
   bash -n "$f"
 done
@@ -26,7 +27,7 @@ if [ -f scripts/lint-prompt-closeout.sh ] && [ -d prompts ]; then
 fi
 
 # 2. typecheck / build every TS entrypoint
-for f in src/*.ts test/*.ts; do
+for f in src/*.ts; do
   echo "bun build $f"
   bun build "$f" --target=bun --outfile=/dev/null
 done
@@ -45,35 +46,3 @@ fi
 # 2c. compile host-track artifact binaries (published after green gate)
 echo "== artifact build =="
 bun run build
-
-# 2d. code identity: the build must keep signing dist/routines with a fixed
-# identifier, or macOS treats every new version as a new app and re-prompts the
-# owner for Desktop/Documents/Downloads access — a dialog that also BLOCKS the
-# running command. Host-agnostic: the test stubs codesign/security.
-if [ -f test/build-artifact-codesign.sh ]; then
-  echo "== build-artifact code identity =="
-  bash test/build-artifact-codesign.sh
-fi
-
-# 3. agent-exec ↔ scheduler dispatch parity proof (isolated: temp
-# ROUTINES_HOME, stubbed situations CLI, no live provider or socket reads)
-if [ -f test/agent-exec-parity.ts ]; then
-  echo "== agent-exec parity =="
-  bun test/agent-exec-parity.ts
-fi
-
-# 4. unit tests, once any exist
-found_tests=0
-for f in test/*.test.ts src/*.test.ts; do
-  found_tests=1
-done
-if [ "$found_tests" = 1 ]; then
-  # Some daemon/escalation tests exercise real process dispatch and bounded
-  # retry loops; the default 5s Bun test timeout is too tight under CI load.
-  # 60s per test, not the 30s default: on a loaded CI host (load average 40+ with
-  # lastdbd busy) two subprocess-driven tests ran 34s and 38s and timed out on
-  # the first Forge CI run. Same value on the GitHub macOS runner.
-  bun test --timeout=60000
-else
-  echo "ci: no tests yet (repo skeleton) — gate is syntax + typecheck"
-fi
