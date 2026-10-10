@@ -27,13 +27,13 @@
 // (non-blocking FYI: upgrades/restarts) so agents attribute flapping instead
 // of opening false incidents. Notices never fence a run.
 //
-// The situations binary is overridable (ROUTINES_FSITUATIONS_BIN /
-// ROUTINES_SITUATIONS_CLI) for tests. A failure to reach F-Situations is
-// reported to the caller, which fails open (schedules the run) but logs the
-// degraded check — the same posture the workspace rules take when the
-// Situation check "can't run".
+// The Situations binary accepts explicit caller configuration through
+// ROUTINES_FSITUATIONS_BIN / ROUTINES_SITUATIONS_CLI. A failed read reports
+// unknown posture. The direct route engine refuses a provider in that case.
+// The scheduler handles cached posture separately.
 
 import { spawn, spawnSync } from "node:child_process";
+import { performance } from "node:perf_hooks";
 
 /** Severities whose active Situations may hard-fence a routine via scope_routines. */
 const FENCING_SEVERITIES = new Set(["p0", "p1"]);
@@ -91,31 +91,42 @@ function runSituations(args: string[], timeoutMs = 30_000): {
   error?: string;
 } {
   const bin = fsituationsBinary();
-  const res = spawnSync(bin, args, {
-    encoding: "utf8",
-    timeout: timeoutMs,
-  });
-  if (res.error) {
-    return { ok: false, stdout: "", error: `${bin}: ${res.error.message}` };
-  }
-  if (typeof res.status === "number" && res.status !== 0) {
-    // Older installs only have `fsituations` on PATH.
-    if (bin === "situations") {
-      const fallback = spawnSync("fsituations", args, {
-        encoding: "utf8",
-        timeout: timeoutMs,
-      });
-      if (!fallback.error && fallback.status === 0) {
-        return { ok: true, stdout: fallback.stdout ?? "" };
-      }
+  // One deadline covers the primary process, its output, and the legacy CLI.
+  // Giving the fallback a new timeout could double an external host's budget.
+  const deadline = performance.now() + timeoutMs;
+  const read = (command: string) => {
+    const remainingMs = Math.floor(deadline - performance.now());
+    if (remainingMs <= 0) {
+      return { ok: false, stdout: "", error: `${command}: read timed out after ${timeoutMs}ms` };
     }
-    return {
-      ok: false,
-      stdout: "",
-      error: `${bin} exited ${res.status}: ${res.stderr?.trim() ?? ""}`,
-    };
-  }
-  return { ok: true, stdout: res.stdout ?? "" };
+    const res = spawnSync(command, args, {
+      encoding: "utf8",
+      timeout: remainingMs,
+      // A CLI that ignores SIGTERM must not outlive the caller's route lease.
+      killSignal: "SIGKILL",
+    });
+    if (performance.now() >= deadline) {
+      return { ok: false, stdout: "", error: `${command}: read timed out after ${timeoutMs}ms` };
+    }
+    if (res.error) {
+      return { ok: false, stdout: "", error: `${command}: ${res.error.message}` };
+    }
+    if (res.status !== 0) {
+      return {
+        ok: false,
+        stdout: "",
+        error: `${command} exited ${res.status ?? res.signal ?? "unknown"}: ${res.stderr?.trim() ?? ""}`,
+      };
+    }
+    return { ok: true, stdout: res.stdout ?? "" };
+  };
+  const primary = read(bin);
+  if (primary.ok || bin !== "situations") return primary;
+  // Older installs can provide the legacy CLI. It gets only the time left.
+  const fallback = read("fsituations");
+  return fallback.ok
+    ? fallback
+    : { ok: false, stdout: "", error: `${primary.error}; legacy fallback: ${fallback.error}` };
 }
 
 export function loadActiveSituations(timeoutMs = 30_000): SituationCheck {
@@ -123,14 +134,11 @@ export function loadActiveSituations(timeoutMs = 30_000): SituationCheck {
   if (!res.ok) {
     return { ok: false, situations: [], error: res.error };
   }
-  let parsed: unknown;
   try {
-    parsed = JSON.parse(res.stdout || "[]");
+    return { ok: true, situations: parseSituations(res.stdout) };
   } catch (err) {
     return { ok: false, situations: [], error: `unparseable situations output: ${(err as Error).message}` };
   }
-  const situations = normalizeSituations(parsed);
-  return { ok: true, situations };
 }
 
 /**
@@ -331,7 +339,7 @@ interface CacheSlot<T> {
    * changes the answer. A cached answer belongs to its source, so when the key
    * moves the slot is cold again rather than silently serving another CLI's
    * reply. In production the key never changes; it is what keeps the module
-   * honest for `routines agent-exec`, tests, and any future per-call window.
+   * honest for `routines agent-exec` and any future per-call window.
    */
   key: string;
   lastError?: string;
@@ -345,8 +353,8 @@ function emptySlot<T>(): CacheSlot<T> {
  * The cache is OFF by default and the daemon turns it on at startup.
  *
  * Only a long-lived process has ticks to amortise a cached answer over. A
- * one-shot command (`routines run`, `routines status`, `routines agent-exec`,
- * the test harness) pays the read once and must report the posture as of the
+ * one-shot command (`routines run`, `routines status`, `routines agent-exec`)
+ * pays the read once and must report the posture as of the
  * moment it was asked, so it keeps the direct read and this whole module stays
  * inert for it.
  */
@@ -366,7 +374,7 @@ export function situationsCacheEnabled(): boolean {
 const situationsSlot: CacheSlot<ActiveSituation[]> = emptySlot();
 const noticesSlot: CacheSlot<RecentNotice[]> = emptySlot();
 
-/** Test seam: drop every cached answer. */
+/** Drop every cached answer. */
 export function resetSituationsCache(): void {
   situationsSlot.value = null;
   situationsSlot.at = 0;
@@ -468,7 +476,32 @@ function keySlot<T>(slot: CacheSlot<T>, key: string): void {
 }
 
 function parseSituations(stdout: string): ActiveSituation[] {
-  return normalizeSituations(JSON.parse(stdout || "[]"));
+  const parsed: unknown = JSON.parse(stdout);
+  if (!Array.isArray(parsed)) throw new Error("expected a situations array");
+  for (const [position, item] of parsed.entries()) {
+    const label = `situations entry ${position}`;
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      throw new Error(`${label}: expected an object`);
+    }
+    const rec = item as Record<string, unknown>;
+    if (typeof rec.slug !== "string" || !rec.slug.trim()) {
+      throw new Error(`${label}: expected a nonempty slug`);
+    }
+    // Legacy records omit these fields: status defaults to active and scope
+    // defaults to empty. A supplied malformed value must not erase a fence.
+    if (rec.status !== undefined && (
+      typeof rec.status !== "string" || !rec.status.trim()
+    )) {
+      throw new Error(`${label}: expected a nonempty string status`);
+    }
+    if (rec.scope_routines !== undefined && (
+      !Array.isArray(rec.scope_routines)
+      || rec.scope_routines.some((scope) => typeof scope !== "string")
+    )) {
+      throw new Error(`${label}: expected an array of string scopes`);
+    }
+  }
+  return normalizeSituations(parsed);
 }
 
 function parseNotices(stdout: string): RecentNotice[] {

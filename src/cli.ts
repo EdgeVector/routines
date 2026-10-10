@@ -108,8 +108,8 @@ Commands:
                               active provider fences; prints JSON. Required:
                               --difficulty fast|normal|hard --mode read|write.
                               Optional: --pin <provider>, --timeout-ms <n>,
-                              --request-id <id>. Exit 3 = empty route (every
-                              candidate provider is fenced; do not start one).
+                              --request-id <id>. Exit 3 = empty route (fenced
+                              providers or unknown posture; do not start one).
                               report-failure --provider <p> --evidence <text>
                               reports an external CLI failure. A match files
                               harness-outage-<p>. Other text is a no-op.
@@ -622,7 +622,7 @@ const AGENT_EXEC_USAGE = `usage: routines agent-exec --difficulty ${DIFFICULTIES
 
 Also: routines agent-exec report-failure --provider ${HARNESSES.join("|")} --evidence <text>
 
-Exit codes: 0 route selected · 2 usage error · 3 empty route (all fenced)`;
+Exit codes: 0 route selected · 2 usage error · 3 empty route (fenced or unknown posture)`;
 
 const AGENT_EXEC_REPORT_USAGE = `usage: routines agent-exec report-failure --provider ${HARNESSES.join("|")} --evidence <text>
                                      [--request-id <id>]

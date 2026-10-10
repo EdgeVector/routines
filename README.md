@@ -85,7 +85,17 @@ The scheduler dispatch pass and this command call **one** internal route engine
 (`src/route-engine.ts`), so the two callers cannot pick different providers for
 the same difficulty under the same Situations.
 
-The command resolves and prints JSON on stdout; it starts no agent.
+The command resolves the route and prints JSON on stdout. It starts no agent.
+The direct Situation read uses one 10-second budget for the primary CLI and
+the legacy CLI fallback. The 10-second budget keeps 5 seconds within Loom's
+15-second route limit before its 30-second lease renewal starts.
+`--timeout-ms` specifies the agent work budget. It does not extend the
+Situation read budget.
+
+A failed Situation read returns exit 3, `situationsOk: false`, and no provider
+or model. The reasons include `empty-route=situations-unavailable`. The caller
+must keep the execution parked until a new read succeeds. A provider pin and the
+all-fenced primary policy do not permit a route with unknown posture.
 
 | field | meaning |
 |---|---|
@@ -101,7 +111,7 @@ The command resolves and prints JSON on stdout; it starts no agent.
 |------|---------|
 | **0** | a route was selected |
 | **2** | usage error |
-| **3** | empty route — every candidate provider is fenced; park the node and retry |
+| **3** | empty route — the providers are fenced or the posture is unknown; keep the execution parked and retry |
 
 Only an **active** `harness-outage-<provider>` Situation fences a provider. An
 ordinary agent error does not, so a bad prompt cannot take a provider out of the

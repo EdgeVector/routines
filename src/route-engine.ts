@@ -36,6 +36,14 @@ export type RouteMode = "read" | "write";
 
 export const ROUTE_MODES = ["read", "write"] as const satisfies readonly RouteMode[];
 
+/**
+ * Total budget for a direct posture read, including legacy CLI fallback.
+ * Loom caps agent-exec at 15 s before its 30 s lease renewal starts. Keep
+ * 5 s for process startup, matrix resolution, and the structured refusal.
+ * The agent work budget (`timeoutMs`) is separate and never extends this read.
+ */
+export const ROUTE_SITUATIONS_TIMEOUT_MS = 10_000;
+
 export function isRouteMode(value: string): value is RouteMode {
   return (ROUTE_MODES as readonly string[]).includes(value);
 }
@@ -119,7 +127,7 @@ export interface RouteDecision {
   reasons: string[];
   fenced: FencedProvider[];
   retry: RouteRetryState;
-  /** False when the Situations check itself failed (routing failed open). */
+  /** False when the Situations check failed; no provider may start. */
   situationsOk: boolean;
 }
 
@@ -162,7 +170,7 @@ export function routeAgent(request: RouteRequest): RouteDecision {
   if (request.situations) {
     situations = request.situations;
   } else {
-    const check = loadActiveSituations();
+    const check = loadActiveSituations(ROUTE_SITUATIONS_TIMEOUT_MS);
     situations = check.situations;
     situationsOk = check.ok;
     if (!check.ok) reasons.push(`situations-degraded:${check.error ?? "unknown"}`);
@@ -197,6 +205,23 @@ export function routeAgent(request: RouteRequest): RouteDecision {
     retry,
     situationsOk,
   };
+
+  // Unknown posture cannot prove that any provider is available. Refuse
+  // before pins, the matrix resolver, or the all-fenced primary policy.
+  if (!situationsOk) {
+    reasons.push("empty-route=situations-unavailable");
+    return {
+      ...base,
+      harness: null,
+      model: null,
+      empty: true,
+      pinned: Boolean(request.pin),
+      fallback: false,
+      guardRequired: false,
+      retry: { ...retry, retryable: true },
+      reasons,
+    };
+  }
 
   if (request.pin) {
     reasons.push(`pin=${request.pin}`);
