@@ -148,7 +148,9 @@ Optional `gate_command` runs **before** the LLM harness (zero-LLM):
 | **0** | skip harness; honor `ROUTINE_RESULT outcome=ok\|noop` (missing trailer → noop) |
 | other | fail the run |
 
-Gate wall-clock is `timeout_min` (capped at 15 minutes). For
+Gate wall-clock is the routine's full primary `timeout_min` (a 15-minute cap
+was retired — it silently truncated real work gates well inside their
+declared budget). `ROUTINES_GATE_TIMEOUT_MS` overrides it in milliseconds. For
 `last-stack-north-star-rollup`, set
 `gate_command = "routines-north-star-rollup-gate"` after `scripts/install-shim.sh`
 so the dashboard regenerates without an LLM (avoids false
