@@ -166,16 +166,6 @@ variables. Both probes must succeed; otherwise routinesd injects nothing and
 the helper retains its conservative soft-degrade behavior. The LLM harness is
 never switched to unrestricted sandbox mode.
 
-For `cloud-sync-health-fix`, set
-`gate_command = "routines-cloud-sync-health-fix-gate"` (see
-`examples/cloud-sync-health-fix.toml`) so the default path is a **bounded
-zero-LLM observe** that always heartbeats staging / upload_queue /
-degraded_reasons / backup durability. That stops overnight ×3 exit-124
-(45m harness kill with no metrics) when the agent digresses under load.
-The gate only exits 10 (LLM fix lane) on hard signals (auth/quota, staging
-≥50%, `last_success=never`). Probe timeouts flush
-`outcome=timeout_partial` and exit 0.
-
 For `lastdb-local-smoke-test`, set
 `gate_command = "routines-lastdb-local-smoke-gate"`. The gate resolves only a
 prebuilt `lastdbd`, mirrors the live LaunchAgent's non-home `LASTDB_*` settings,
