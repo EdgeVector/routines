@@ -397,10 +397,10 @@ The JSON API (for scripting): `GET /api/routines`, `GET /api/routines/<id>/runs`
 
 `routines publish-status` writes a bounded fleet view to the local LastDB Mini
 socket. It reuses `collectStatus()` and `listRuns()`, declares the app-owned
-schemas on first run, and writes:
+schemas, and writes:
 
 - `routines/RoutineStatus` key `<routine id>`, only when its content changes
-- `routines/FleetRoutineStatusV2` in 16 stable hash buckets through protein fold
+- `routines/FleetRoutineStatusV2` in 16 stable hash buckets through explicit writes
 - `routines/RoutineRunSummaryV2` key `<routine id>, <run stamp>`, once per run
 - `routines/FleetSummary` key `routines`, last as the publication marker
 
@@ -410,6 +410,12 @@ are redacted before write.
 
 `FleetRoutineStatusV2` has `schema_layout_version=1`. The marker keeps its
 HashRange physical layout separate from the Hash-keyed `RoutineStatus` records.
+The publisher sends separate writes to both schemas when their content changes.
+The fleet summary follows those writes and supplies the publication marker.
+
+Canonical field reuse supplies definitions and types. It does not establish
+shared record values across schemas. A native multi-key conversion remains
+separate work; this documentation change does not convert stored data.
 
 ```sh
 routines publish-status --json
@@ -429,16 +435,10 @@ written by this version.
 CAUTION: Use the primary socket only after the deployment uses this version.
 Do not restart LastDB. Do not write a bulk `rows_json` snapshot.
 
-Review evidence, 2026-09-27:
-
-- `bun test test/publish-status.test.ts test/runner.test.ts` passed: 51 tests.
-- The publisher test declares `FleetRoutineStatusV2` as HashRange and checks
-  direct fleet writes, bounded reads, and no `rows_json` delivery field.
-- The primary socket accepted the V2 schema declaration. Its publish then
-  stopped at a transient 503 persist-queue limit, not at the repaired 409.
-- `com.edgevector.admin-routines-status` is loaded with a 3600-second interval.
-  Its last exit code is 1. `routines hygiene --dry-run` found no unsafe change;
-  it reports a missing routine daemon as its nonzero end state.
+The [September repair record](https://github.com/EdgeVector/routines/blob/982fa5ef93c3f48a90c44280e37ea912b11700a5/README.md#fleet-physical-map-repair)
+describes an earlier deployment. Its observations do not prove the current
+primary state. The primary-reset restrictions in the workspace instructions
+remain in force. Use the current non-test CI checks for source validation.
 
 ## Admin fleet status deliver
 
