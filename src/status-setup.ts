@@ -50,7 +50,7 @@ export function loadStatusSchemas(client: LastDbPublisherClient): Record<SchemaK
   requireValue(raw, "Fleet schemas are not configured. Run init-status, or convert-status-schemas for existing values.");
   const saved = config(JSON.parse(raw.toString()));
   client.bindSchemas(Object.fromEntries(Object.entries(saved.schemas).map(([key, binding]) => [binding!.runtime, { key: key as SchemaKey, canonical: true }])));
-  return { status: saved.schemas.status!.runtime, fleetStatus: saved.schemas.status!.runtime,
+  return { status: saved.schemas.status!.runtime, fleetStatus: saved.schemas.fleetStatus?.runtime ?? "",
     fleetSummary: saved.schemas.fleetSummary!.runtime, runSummaryV2: saved.schemas.runSummaryV2!.runtime,
     snapshot: saved.schemas.snapshot?.runtime ?? "", runSummary: saved.schemas.runSummary?.runtime ?? "" };
 }

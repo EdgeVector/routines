@@ -221,6 +221,20 @@ def register_definitions(args, Node):
         result, _ = call_json(args, args.control_binary, node, home, "publish-status")
         publication(result, set())
         require(len(set(result["schemaHashes"].values())) == 6, "The normal publisher did not declare six distinct schemas")
+        directory = node.call("/api/schemas")[0]
+        require(directory.get("ready") is True, "The actual installed schema directory is not ready")
+        owned = [schema for schema in directory.get("schemas", []) if schema.get("owner_app_id") == "routines"]
+        require(len(owned) == 6 and {schema["name"] for schema in owned} == set(result["schemaHashes"].values()),
+            "The six declared runtimes differ from the actual installed schemas")
+        def metadata(schema):
+            reply = node.call("/api/schema/" + quote(schema["name"], safe=""))[0]["schema"]
+            require(reply.get("name") == schema["name"] and reply.get("identity_hash") == schema.get("identity_hash")
+                and reply.get("owner_app_id") == "routines", "The installed schema metadata returned another runtime or owner")
+            return reply
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            installed = list(pool.map(metadata, owned))
+        save(args.output / "installed-schemas.json", {"directory": directory, "schemas": installed,
+            "scope": "Actual owner metadata after normal DEV legacy admission; no value-authority inference from global definitions"})
         cloud_off(node, "registered")
         save(args.output / "registration.json", {"scope": "DEV normal six-definition admission only; no latency or migration proof",
             "environment": "dev", "schema_hashes": result["schemaHashes"], "actual_registry_records": 0,

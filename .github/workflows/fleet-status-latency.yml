@@ -83,6 +83,8 @@ jobs:
             daemon-before -> target
             daemon-after -> target
           shared-key: routines-fleet-values
+          cache-on-failure: true
+          cache-workspace-crates: true
       - name: Build the exact engines and actual app commands
         env:
           CARGO_BUILD_JOBS: '3'
