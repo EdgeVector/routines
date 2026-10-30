@@ -222,19 +222,23 @@ def register_definitions(args, Node):
         publication(result, set())
         require(len(set(result["schemaHashes"].values())) == 6, "The normal publisher did not declare six distinct schemas")
         directory = node.call("/api/schemas")[0]
-        require(directory.get("ready") is True, "The actual installed schema directory is not ready")
-        owned = [schema for schema in directory.get("schemas", []) if schema.get("owner_app_id") == "routines"]
-        require(len(owned) == 6 and {schema["name"] for schema in owned} == set(result["schemaHashes"].values()),
-            "The six declared runtimes differ from the actual installed schemas")
-        def metadata(schema):
-            reply = node.call("/api/schema/" + quote(schema["name"], safe=""))[0]["schema"]
-            require(reply.get("name") == schema["name"] and reply.get("identity_hash") == schema.get("identity_hash")
-                and reply.get("owner_app_id") == "routines", "The installed schema metadata returned another runtime or owner")
-            return reply
+        def metadata(runtime):
+            try:
+                return {"runtime": runtime, "schema": node.call("/api/schema/" + quote(runtime, safe=""))[0]["schema"]}
+            except Exception as error:
+                return {"runtime": runtime, "error": str(error)}
         with ThreadPoolExecutor(max_workers=6) as pool:
-            installed = list(pool.map(metadata, owned))
-        save(args.output / "installed-schemas.json", {"directory": directory, "schemas": installed,
+            replies = list(pool.map(metadata, result["schemaHashes"].values()))
+        save(args.output / "installed-schemas.json", {"directory": directory, "responses": replies,
             "scope": "Actual owner metadata after normal DEV legacy admission; no value-authority inference from global definitions"})
+        require(directory.get("ready") is True, "The actual installed schema directory is not ready")
+        owned = {schema["name"]: schema for schema in directory.get("schemas", []) if schema.get("owner_app_id") == "routines"}
+        require(len(owned) == 6 and set(owned) == set(result["schemaHashes"].values()),
+            "The six declared runtimes differ from the actual installed schemas")
+        require(all("schema" in reply and reply["schema"].get("name") == reply["runtime"]
+            and reply["schema"].get("identity_hash") == owned[reply["runtime"]].get("identity_hash")
+            and reply["schema"].get("owner_app_id") == "routines" for reply in replies),
+            "The installed schema metadata returned an error or another runtime, identity, or owner")
         cloud_off(node, "registered")
         save(args.output / "registration.json", {"scope": "DEV normal six-definition admission only; no latency or migration proof",
             "environment": "dev", "schema_hashes": result["schemaHashes"], "actual_registry_records": 0,
