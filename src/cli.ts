@@ -65,6 +65,9 @@ import { runRoutine } from "./runner.ts";
 import { startServer } from "./server.ts";
 import { loadProjectConfig } from "./project-config.ts";
 import { clearLegacyFleetSnapshot, deliverFleetStatus, publishFleetStatus, readFleetStatus, type DeliveryRecipient } from "./publish-status.ts";
+import { newLastDbPublisherClient } from "./status-client.ts";
+import { convertStatusSchemas, initializeStatusSchemas } from "./status-setup.ts";
+import { canonicalDefinition, SCHEMAS, type SchemaKey } from "./status-schema.ts";
 import { initRoutinesSentry } from "./observability.ts";
 import { runCapacityControllerTick } from "./capacity-runtime.ts";
 import { resolveProbePath } from "./probes.ts";
@@ -117,6 +120,8 @@ Commands:
   logs <id>                   show recent runs for a routine (--json, --path, --tail)
   probe-path <id>              print the installed path for a versioned probe harness
   publish-status              write slim fleet status records to LastDB (--json)
+  init-status                 explicitly install published schema-owned fleet definitions
+  convert-status-schemas      plan an existing fleet value conversion; --apply --maintenance writes it
   read-status                 read and validate the bounded fleet view (--json)
   deliver-status              publish + stage a fleet-status delivery; --approve sends it
   hygiene                     mechanical cleanup (prune runs/memory, daemon check,
@@ -330,6 +335,10 @@ async function main(argv: string[]): Promise<number> {
       return cmdProbePath(rest);
     case "publish-status":
       return await cmdPublishStatus(rest);
+    case "init-status":
+      return await cmdInitStatus(rest);
+    case "convert-status-schemas":
+      return await cmdConvertStatusSchemas(rest);
     case "read-status":
       return await cmdReadStatus(rest);
     case "deliver-status":
@@ -779,6 +788,26 @@ function cmdImport(rest: string[]): number {
   return 0;
 }
 
+async function cmdInitStatus(rest: string[]): Promise<number> {
+  const { values } = parseArgs({ args: rest, options: { json: { type: "boolean" }, "dry-run": { type: "boolean" } }, allowPositionals: false });
+  if (values["dry-run"]) {
+    for (const key of Object.keys(SCHEMAS) as SchemaKey[]) {
+      console.log(JSON.stringify({ schema: canonicalDefinition(key), mutation_mappers: {}, offer_to_shared_discovery: false }));
+    }
+    return 0;
+  }
+  const result = await initializeStatusSchemas(newLastDbPublisherClient());
+  console.log(values.json ? JSON.stringify(result, null, 2) : "Fleet schemas are configured. Existing values require explicit conversion before the removal upgrade.");
+  return 0;
+}
+
+async function cmdConvertStatusSchemas(rest: string[]): Promise<number> {
+  const { values } = parseArgs({ args: rest, options: { apply: { type: "boolean" }, maintenance: { type: "boolean" }, abort: { type: "boolean" } }, allowPositionals: false });
+  const result = await convertStatusSchemas(newLastDbPublisherClient(), values);
+  console.log(JSON.stringify(result, null, 2));
+  return 0;
+}
+
 async function cmdPublishStatus(rest: string[]): Promise<number> {
   const { values } = parseArgs({
     args: rest,
@@ -823,7 +852,7 @@ async function cmdPublishStatus(rest: string[]): Promise<number> {
     `${action} routines fleet status captured_at=${result.capturedAt} rows=${result.rows.length} run_summaries=${result.runSummaries.length}`,
   );
   console.log(
-    `schemas snapshot=${result.schemaHashes.snapshot} status=${result.schemaHashes.status} run_summary=${result.schemaHashes.runSummary}`,
+    `schemas status=${result.schemaHashes.status} by_fleet=by_fleet run_summary=${result.schemaHashes.runSummaryV2} fleet_summary=${result.schemaHashes.fleetSummary}`,
   );
   if (values["clear-legacy-snapshot"]) console.log(`legacy_snapshot_cleared=${legacySnapshotCleared}`);
   return 0;

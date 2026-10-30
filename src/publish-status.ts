@@ -1,15 +1,24 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
 import { collectStatus, type StatusRow } from "./status.ts";
 import { listRuns, readRun, type RunSummary } from "./runs.ts";
 import { stateDir } from "./paths.ts";
+import { acquireStatusConfigLock, loadStatusSchemas } from "./status-setup.ts";
 
-export const ROUTINES_APP_ID = "routines";
+import { ROUTINES_APP_ID, ROUTINES_FLEET_ID, FLEET_STATUS_BUCKET_COUNT, ROUTINE_STATUS_MAX_BYTES,
+  LAST_OUTCOME_DETAIL_MAX_BYTES, FLEET_SUMMARY_MAX_BYTES, RUN_SUMMARY_V2_MAX_BYTES,
+  RUN_SUMMARY_LOG_TAIL_MAX_BYTES, SNAPSHOT_FIELDS, STATUS_FIELDS,
+  RUN_SUMMARY_V2_FIELDS, FLEET_SUMMARY_FIELDS, wireFields, wireFieldNames, type SchemaKey } from "./status-schema.ts";
+export { ROUTINES_APP_ID, ROUTINES_FLEET_ID, FLEET_STATUS_BUCKET_COUNT, ROUTINE_STATUS_MAX_BYTES,
+  LAST_OUTCOME_DETAIL_MAX_BYTES, FLEET_SUMMARY_MAX_BYTES, RUN_SUMMARY_V2_MAX_BYTES, RUN_SUMMARY_LOG_TAIL_MAX_BYTES } from "./status-schema.ts";
 
-type FieldMap = Record<string, string>;
+import { newLastDbPublisherClient, newLastDbDeliveryClient, LastDbPublishError,
+  type FieldMap, type LastDbPublisherClient, type LastDbDeliveryClient, type DeliveryStageRequest,
+  type DeliveryStageResult, type DeliveryApproveResult, type Mutation } from "./status-client.ts";
+export { newLastDbPublisherClient, newLastDbDeliveryClient, LastDbPublishError } from "./status-client.ts";
+export type { FieldMap, LastDbPublisherClient, LastDbDeliveryClient, DeliveryStageRequest, DeliveryStageResult, DeliveryApproveResult } from "./status-client.ts";
 
 export interface PublishStatusOptions {
   now?: Date;
@@ -46,19 +55,6 @@ export interface PublishStatusResult extends FleetPublication {
     fleetSummaries: number;
   };
   dryRun: boolean;
-}
-
-export interface LastDbPublisherClient {
-  autoIdentity(): Promise<{ userHash: string }>;
-  declareAppSchema(appId: string, schema: SchemaDefinition): Promise<{ canonical: string; schemaName: string }>;
-  queryByKey(opts: { schemaHash: string; keyHash: string; keyRange?: string; fields: string[] }): Promise<FieldMap | null>;
-  queryByHash(opts: { schemaHash: string; keyHash: string; fields: string[]; maxRows: number }): Promise<Array<{ keyRange: string; fields: FieldMap }>>;
-  mutate(opts: { schemaHash: string; keyHash: string; keyRange?: string; fields: FieldMap; mutationType: "create" | "update" | "delete" }): Promise<void>;
-}
-
-export interface LastDbDeliveryClient {
-  stageDelivery(request: DeliveryStageRequest): Promise<DeliveryStageResult>;
-  approveDelivery(deliveryId: string): Promise<DeliveryApproveResult>;
 }
 
 export interface DeliveryRecipient {
@@ -109,183 +105,13 @@ export interface LegacySnapshotOptions {
   schemaHashes?: Record<SchemaKey, string>;
 }
 
-export interface DeliveryStageRequest {
-  recipient_pubkey: string;
-  recipient_display_name?: string;
-  messaging_public_key: string;
-  messaging_pseudonym: string;
-  mode: "snapshot";
-  max_records: number;
-  legs: Array<{
-    schema_name: string;
-    fields: string[];
-    hash_keys?: string[];
-  }>;
-}
-
-export interface DeliveryStageResult {
-  deliveryId: string;
-  recordCount: number;
-  fields: string[];
-  note: string;
-}
-
-export interface DeliveryApproveResult {
-  deliveryId: string;
-  shared: number;
-  messageType: string;
-}
-
-type SchemaKey = "snapshot" | "status" | "runSummary" | "fleetStatus" | "fleetSummary" | "runSummaryV2";
-type FieldType = "String" | { Array: "String" };
-
-export interface SchemaDefinition {
-  name: string;
-  owner_app_id: string;
-  descriptive_name: string;
-  purpose_statement: string;
-  schema_type: "Hash" | "HashRange";
-  key: { hash_field: string; range_field?: string };
-  fields: string[];
-  field_types: Record<string, FieldType>;
-  field_descriptions: Record<string, string>;
-  field_data_classifications: Record<string, { sensitivity_level: number; data_domain: string }>;
-}
-
-const SNAPSHOT_FIELDS = [
-  "slug",
-  "captured_at",
-  "home",
-  "situations_ok",
-  "situations_error",
-  "rows_json",
-  "row_count",
-  "run_summary_count",
-  "schema_hashes_json",
-] as const;
-
-const STATUS_FIELDS = [
-  "fleet_bucket",
-  "sk",
-  "id",
-  "status",
-  "harness",
-  "model",
-  "rrule",
-  "group_id",
-  "group_label",
-  "next_fire",
-  "last_run",
-  "last_exit",
-  "running",
-  "harness_pid",
-  "current_run",
-  "current_run_dir",
-  "current_started_at",
-  "fenced",
-  "last_outcome",
-  "last_outcome_detail",
-  "noop_rate",
-  "useful_rate",
-  "outcome_window",
-  "content_digest",
-  "updated_at",
-] as const;
-
-const RUN_SUMMARY_FIELDS = [
-  "slug",
-  "id",
-  "stamp",
-  "started_at",
-  "finished_at",
-  "exit_code",
-  "outcome",
-  "outcome_detail",
-  "duration_ms",
-  "log_tail",
-  "updated_at",
-] as const;
-
-export const ROUTINES_FLEET_ID = "routines";
-export const FLEET_STATUS_BUCKET_COUNT = 16;
-export const ROUTINE_STATUS_MAX_BYTES = 8 * 1024;
-export const LAST_OUTCOME_DETAIL_MAX_BYTES = 1024;
-export const FLEET_SUMMARY_MAX_BYTES = 4 * 1024;
-export const RUN_SUMMARY_V2_MAX_BYTES = 8 * 1024;
-export const RUN_SUMMARY_LOG_TAIL_MAX_BYTES = 2 * 1024;
-
-// Keep this marker on the HashRange index. It prevents the catalog from
-// reusing the Hash-keyed RoutineStatus layout for the fleet index.
-const FLEET_STATUS_LAYOUT_VERSION = "1";
-const FLEET_STATUS_SCHEMA_NAME = "FleetRoutineStatusV2";
-const FLEET_ROUTINE_STATUS_FIELDS = [...STATUS_FIELDS, "schema_layout_version"] as const;
-
-const FLEET_SUMMARY_FIELDS = [
-  "fleet_id",
-  "captured_at",
-  "layout_version",
-  "bucket_count",
-  "row_count",
-  "active_count",
-  "paused_count",
-  "fenced_count",
-  "running_count",
-  "error_count",
-  "run_summary_count",
-  "situations_ok",
-  "situations_error",
-  "content_digest",
-] as const;
-
-const RUN_SUMMARY_V2_FIELDS = RUN_SUMMARY_FIELDS.filter((field) => field !== "slug");
-
-const SCHEMAS: Record<SchemaKey, SchemaDefinition> = {
-  snapshot: schema(
-    "RoutineFleetSnapshot",
-    "A slim point-in-time routines fleet snapshot safe for admin delivery",
-    [...SNAPSHOT_FIELDS],
-    "slug",
-  ),
-  status: schema(
-    "RoutineStatus",
-    "One slim status row per routine for admin delivery",
-    [...STATUS_FIELDS],
-    "id",
-  ),
-  runSummary: schema(
-    "RoutineRunSummary",
-    "A capped recent run summary for one routine execution, without prompts or full logs",
-    [...RUN_SUMMARY_FIELDS],
-    "slug",
-  ),
-  fleetStatus: hashRangeSchema(
-    FLEET_STATUS_SCHEMA_NAME,
-    `A bounded routine status index split across ${FLEET_STATUS_BUCKET_COUNT} stable fleet buckets; each row stays below ${ROUTINE_STATUS_MAX_BYTES} bytes`,
-    [...FLEET_ROUTINE_STATUS_FIELDS],
-    "fleet_bucket",
-    "sk",
-  ),
-  fleetSummary: schema(
-    "FleetSummary",
-    `A bounded fleet manifest with counts and a digest; each row stays below ${FLEET_SUMMARY_MAX_BYTES} bytes`,
-    [...FLEET_SUMMARY_FIELDS],
-    "fleet_id",
-  ),
-  runSummaryV2: hashRangeSchema(
-    "RoutineRunSummaryV2",
-    `A bounded run summary keyed by routine and run stamp; each row stays below ${RUN_SUMMARY_V2_MAX_BYTES} bytes and log_tail stays below ${RUN_SUMMARY_LOG_TAIL_MAX_BYTES} bytes`,
-    [...RUN_SUMMARY_V2_FIELDS],
-    "id",
-    "stamp",
-  ),
-};
-
 export function buildFleetPublication(options: PublishStatusOptions = {}): FleetPublication {
   const now = options.now ?? new Date();
   const capturedAt = now.toISOString();
   const runLimit = positiveInt(options.runLimit, 5);
   const logTailBytes = positiveInt(options.logTailBytes, 2048);
   const snap = collectStatus(now);
+  if (snap.errors.length) throw new LastDbPublishError("registry_incomplete", "The routine registry is incomplete; no fleet mutation follows this snapshot.");
   const rows = snap.rows.map((row) => statusFields(row, capturedAt));
   const runSummaries = snap.rows.flatMap((row) =>
     listRuns(row.id, runLimit).map((run) => runSummaryFields(row.id, run, capturedAt, logTailBytes)),
@@ -305,173 +131,89 @@ export function buildFleetPublication(options: PublishStatusOptions = {}): Fleet
 }
 
 export async function publishFleetStatus(options: PublishStatusOptions = {}): Promise<PublishStatusResult> {
-  const publication = buildFleetPublication(options);
-  const preparedRows = publication.rows.map(routineStatusFields);
-  const fleetSummary = buildFleetSummary(publication, preparedRows);
-  const client = options.client ?? newLastDbPublisherClient();
-  const schemaHashes = await declareSchemas(client);
-  publication.snapshot.schema_hashes_json = JSON.stringify(schemaHashes);
-
-  const written = {
-    snapshots: 0,
-    rows: 0,
-    deletedStatusRows: 0,
-    runSummaries: 0,
-    fleetRows: 0,
-    runSummariesV2: 0,
-    deletedRunSummariesV2: 0,
-    fleetSummaries: 0,
-  };
-
-  if (!options.dryRun) {
-    const currentAddresses = new Map(preparedRows.map((row) => [
-      requiredField(row, "id"),
-      {
-        fleetBucket: requiredField(row, "fleet_bucket"),
-        sk: requiredField(row, "sk"),
-      },
-    ]));
-    const staleRows = await findStaleRoutineRows(client, schemaHashes.fleetStatus, currentAddresses);
-    for (const stale of staleRows) {
-      const { id } = stale;
-      if (!currentAddresses.has(id)) {
-        const existing = await client.queryByKey({
-          schemaHash: schemaHashes.status,
-          keyHash: id,
-          fields: ["id"],
-        });
-        if (existing) {
-          await client.mutate({
-            schemaHash: schemaHashes.status,
-            keyHash: id,
-            fields: {},
-            mutationType: "delete",
-          });
-        }
-      }
-      await client.mutate({
-        schemaHash: schemaHashes.fleetStatus,
-        keyHash: stale.fleetBucket,
-        keyRange: stale.sk,
-        fields: {},
-        mutationType: "delete",
+  const release = acquireStatusConfigLock();
+  try {
+    const client = options.client ?? newLastDbPublisherClient();
+    const schemaHashes = loadStatusSchemas(client);
+    const publication = buildFleetPublication(options);
+    const preparedRows = publication.rows.map(routineStatusFields);
+    const fleetSummary = buildFleetSummary(publication, preparedRows);
+    publication.snapshot.schema_hashes_json = JSON.stringify(schemaHashes);
+    const written = { snapshots: 0, rows: 0, deletedStatusRows: 0, runSummaries: 0,
+      fleetRows: 0, runSummariesV2: 0, deletedRunSummariesV2: 0, fleetSummaries: 0 };
+    if (!options.dryRun) {
+      const currentIds = new Set(preparedRows.map((row) => requiredField(row, "id")));
+      const [stale, existing] = await Promise.all([
+        findStaleRoutineRows(client, schemaHashes.status, currentIds),
+        client.queryByKeys(preparedRows.map((row) => ({
+          schemaHash: schemaHashes.status, keyHash: requiredField(row, "id"), fields: [...STATUS_FIELDS],
+        }))),
+      ]);
+      const statusWrites: Mutation[] = stale.map((row) => ({
+        schemaHash: schemaHashes.status, keyHash: requiredField(row, "id"), fields: {}, mutationType: "delete",
+        expected: { field: "updated_at", value: requiredField(row, "updated_at") },
+      }));
+      preparedRows.forEach((row, index) => {
+        if (existing[index]?.content_digest === row.content_digest) return;
+        statusWrites.push({ schemaHash: schemaHashes.status, keyHash: requiredField(row, "id"),
+          fields: primaryStatusFields(row), mutationType: existing[index] ? "update" : "create",
+          ...(existing[index] ? { expected: { field: "updated_at", value: requiredField(existing[index]!, "updated_at") } } : {}) });
+        written.rows++;
       });
-      written.deletedStatusRows += 1;
-    }
-    for (const prepared of preparedRows) {
-      const existing = await client.queryByKey({
-        schemaHash: schemaHashes.status,
-        keyHash: requiredField(prepared, "id"),
-        fields: [...STATUS_FIELDS],
-      });
-      if (existing?.content_digest !== prepared.content_digest) {
-        await client.mutate({
-          schemaHash: schemaHashes.status,
-          keyHash: requiredField(prepared, "id"),
-          fields: primaryStatusFields(prepared),
-          mutationType: existing ? "update" : "create",
-        });
-        written.rows += 1;
-      }
+      await client.mutateBatch(statusWrites);
+      written.deletedStatusRows = stale.length;
 
-      const existingFleet = await client.queryByKey({
-        schemaHash: schemaHashes.fleetStatus,
-        keyHash: requiredField(prepared, "fleet_bucket"),
-        keyRange: requiredField(prepared, "sk"),
-        fields: [...FLEET_ROUTINE_STATUS_FIELDS],
+      const useWatermark = options.useWatermark !== false;
+      const watermarkPath = options.watermarkPath ?? publishWatermarkPath();
+      const capturedMs = Date.parse(publication.capturedAt);
+      const state = useWatermark ? loadPublishWatermark(watermarkPath, schemaHashes.runSummaryV2) : emptyPublishWatermark(schemaHashes.runSummaryV2);
+      const fullPass = new Set(publication.rows.map((row) => requiredField(row, "id")).filter((id) => {
+        const previous = Date.parse(state.retention[id] ?? "");
+        return !useWatermark || !Number.isFinite(previous) || capturedMs < previous || capturedMs - previous >= RETENTION_INTERVAL_MS;
+      }));
+      const selectedRuns = publication.runSummaries.filter((run) => fullPass.has(requiredField(run, "id")) ||
+        requiredField(run, "stamp") > (state.runs[requiredField(run, "id")] ?? ""));
+      const savedRuns = await client.queryByKeys(selectedRuns.map((run) => ({ schemaHash: schemaHashes.runSummaryV2,
+        keyHash: requiredField(run, "id"), keyRange: requiredField(run, "stamp"), fields: [...RUN_SUMMARY_V2_FIELDS] })));
+      const runWrites: Mutation[] = [];
+      const retentionIds = new Set(fullPass);
+      selectedRuns.forEach((run, index) => {
+        if (savedRuns[index]) return;
+        const id = requiredField(run, "id");
+        const fields = Object.fromEntries(RUN_SUMMARY_V2_FIELDS.map((field) => [field, run[field] ?? ""]));
+        assertSerializedSize(wireFields("runSummaryV2", fields), RUN_SUMMARY_V2_MAX_BYTES, `RoutineRunSummaryV2/${id}/${requiredField(run, "stamp")}`);
+        runWrites.push({ schemaHash: schemaHashes.runSummaryV2, keyHash: id, keyRange: requiredField(run, "stamp"),
+          fields, mutationType: "create" });
+        retentionIds.add(id);
       });
-      if (existingFleet?.content_digest !== prepared.content_digest) {
-        await client.mutate({
-          schemaHash: schemaHashes.fleetStatus,
-          keyHash: requiredField(prepared, "fleet_bucket"),
-          keyRange: requiredField(prepared, "sk"),
-          fields: prepared,
-          mutationType: existingFleet ? "update" : "create",
-        });
-        written.fleetRows += 1;
+      await client.mutateBatch(runWrites);
+      written.runSummariesV2 = runWrites.length;
+      for (const run of selectedRuns) {
+        const id = requiredField(run, "id"), stamp = requiredField(run, "stamp");
+        if (stamp > (state.runs[id] ?? "")) state.runs[id] = stamp;
       }
-    }
-    const useWatermark = options.useWatermark !== false;
-    const watermarkPath = options.watermarkPath ?? publishWatermarkPath();
-    const capturedMs = new Date(publication.capturedAt).getTime();
-    const state = useWatermark
-      ? loadPublishWatermark(watermarkPath, schemaHashes.runSummaryV2)
-      : emptyPublishWatermark(schemaHashes.runSummaryV2);
-    const runsById = new Map<string, FieldMap[]>();
-    for (const run of publication.runSummaries) {
-      const id = requiredField(run, "id");
-      const list = runsById.get(id) ?? [];
-      list.push(run);
-      runsById.set(id, list);
-    }
-    try {
-      for (const row of publication.rows) {
-        const id = requiredField(row, "id");
-        // Once per RETENTION_INTERVAL_MS a routine gets a full pass: every run in the
-        // window is re-checked (self-heals a wiped store or a lost write) and retention runs.
-        const lastRetentionMs = Date.parse(state.retention[id] ?? "");
-        const fullPass = !useWatermark
-          || !Number.isFinite(lastRetentionMs)
-          || capturedMs - lastRetentionMs >= RETENTION_INTERVAL_MS
-          || capturedMs < lastRetentionMs;
-        const watermark = state.runs[id] ?? "";
-        let created = 0;
-        let maxStamp = watermark;
-        for (const run of runsById.get(id) ?? []) {
-          const stamp = requiredField(run, "stamp");
-          // Run summaries are immutable per id+stamp: at or below the watermark means already published.
-          if (!fullPass && stamp <= watermark) continue;
-          const existing = await client.queryByKey({
-            schemaHash: schemaHashes.runSummaryV2,
-            keyHash: id,
-            keyRange: stamp,
-            fields: [...RUN_SUMMARY_V2_FIELDS],
-          });
-          if (!existing) {
-            const fields = Object.fromEntries(RUN_SUMMARY_V2_FIELDS.map((field) => [field, run[field] ?? ""]));
-            await client.mutate({
-              schemaHash: schemaHashes.runSummaryV2,
-              keyHash: id,
-              keyRange: stamp,
-              fields,
-              mutationType: "create",
-            });
-            written.runSummariesV2 += 1;
-            created += 1;
-          }
-          if (stamp > maxStamp) maxStamp = stamp;
-        }
-        if (maxStamp !== watermark) state.runs[id] = maxStamp;
-        if (fullPass || created > 0) {
-          written.deletedRunSummariesV2 += await enforceRunSummaryRetention(client, schemaHashes.runSummaryV2, {
-            id,
-            now: new Date(publication.capturedAt),
-            keepCount: positiveInt(options.runRetentionCount, 100),
-            keepDays: positiveInt(options.runRetentionDays, 30),
-          });
-          state.retention[id] = publication.capturedAt;
-        }
+      try {
+        const ids = [...retentionIds];
+        const rows = await client.queryByHashes(ids.map((id) => ({ schemaHash: schemaHashes.runSummaryV2, keyHash: id,
+          fields: [...RUN_SUMMARY_V2_FIELDS], maxRows: 100_000 })));
+        const deletes = rows.flatMap((rows, index) => retentionMutations(schemaHashes.runSummaryV2, ids[index]!, rows, {
+          now: new Date(publication.capturedAt), keepCount: positiveInt(options.runRetentionCount, 100), keepDays: positiveInt(options.runRetentionDays, 30),
+        }));
+        await client.mutateBatch(deletes);
+        written.deletedRunSummariesV2 = deletes.length;
+        for (const id of ids) state.retention[id] = publication.capturedAt;
+      } finally {
+        if (useWatermark) savePublishWatermark(watermarkPath, state, publication.rows.map((row) => requiredField(row, "id")));
       }
-    } finally {
-      if (useWatermark) savePublishWatermark(watermarkPath, state, publication.rows.map((row) => requiredField(row, "id")));
+      const [summary] = await client.queryByKeys([{ schemaHash: schemaHashes.fleetSummary,
+        keyHash: requiredField(fleetSummary, "fleet_id"), fields: [...FLEET_SUMMARY_FIELDS] }]);
+      await client.mutateBatch([{ schemaHash: schemaHashes.fleetSummary, keyHash: requiredField(fleetSummary, "fleet_id"),
+        fields: fleetSummary, mutationType: summary ? "update" : "create",
+        ...(summary ? { expected: { field: "captured_at", value: requiredField(summary, "captured_at") } } : {}) }]);
+      written.fleetSummaries = 1;
     }
-    await upsert(
-      client,
-      schemaHashes.fleetSummary,
-      requiredField(fleetSummary, "fleet_id"),
-      fleetSummary,
-      [...FLEET_SUMMARY_FIELDS],
-    );
-    written.fleetSummaries = 1;
-  }
-
-  return {
-    ...publication,
-    schemaHashes,
-    fleetSummary,
-    dryRun: options.dryRun === true,
-    written,
-  };
+    return { ...publication, schemaHashes, fleetSummary, dryRun: options.dryRun === true, written };
+  } finally { release(); }
 }
 
 const RETENTION_INTERVAL_MS = 24 * 60 * 60 * 1000;
@@ -529,33 +271,14 @@ function savePublishWatermark(path: string, state: PublishWatermark, currentIds:
   }
 }
 
-async function findStaleRoutineRows(
-  client: LastDbPublisherClient,
-  fleetStatusSchemaHash: string,
-  currentAddresses: Map<string, { fleetBucket: string; sk: string }>,
-): Promise<Array<{ id: string; fleetBucket: string; sk: string }>> {
-  const stale = new Map<string, { id: string; fleetBucket: string; sk: string }>();
-  for (let bucket = 0; bucket < FLEET_STATUS_BUCKET_COUNT; bucket += 1) {
-    const fleetBucket = fleetBucketKey(ROUTINES_FLEET_ID, bucket);
-    const page = await client.queryByHash({
-      schemaHash: fleetStatusSchemaHash,
-      keyHash: fleetBucket,
-      fields: ["id", "sk"],
-      maxRows: 100_000,
-    });
-    for (const item of page) {
-      const id = item.fields.id;
-      const sk = item.fields.sk || item.keyRange;
-      if (!id || !sk) continue;
-      const current = currentAddresses.get(id);
-      if (!current || current.fleetBucket !== fleetBucket || current.sk !== sk) {
-        stale.set(`${fleetBucket}\0${sk}`, { id, fleetBucket, sk });
-      }
-    }
-  }
-  return [...stale.values()].sort((a, b) =>
-    a.id.localeCompare(b.id) || a.fleetBucket.localeCompare(b.fleetBucket) || a.sk.localeCompare(b.sk)
-  );
+async function findStaleRoutineRows(client: LastDbPublisherClient, schema: string, currentIds: Set<string>): Promise<FieldMap[]> {
+  const pages = await client.queryByHashes(Array.from({ length: FLEET_STATUS_BUCKET_COUNT }, (_, bucket) => ({
+    schemaHash: schema, keyName: "by_fleet" as const, keyHash: fleetBucketKey(ROUTINES_FLEET_ID, bucket),
+    fields: ["id", "fleet_bucket", "sk", "updated_at"], maxRows: 100_000,
+  })));
+  const fields = pages.flat().map((row) => row.fields), ids = fields.map((row) => requiredField(row, "id"));
+  if (new Set(ids).size !== ids.length) throw new LastDbPublishError("fleet_membership_ambiguous", "The fleet alternate contains duplicate routine identifiers.");
+  return fields.filter((row) => !currentIds.has(requiredField(row, "id")));
 }
 
 export async function deliverFleetStatus(options: DeliverStatusOptions): Promise<DeliverStatusResult> {
@@ -618,15 +341,15 @@ export async function deliverFleetStatus(options: DeliverStatusOptions): Promise
 
 export async function readFleetStatus(options: ReadFleetStatusOptions = {}): Promise<FleetReadResult> {
   const client = options.client ?? newLastDbPublisherClient();
-  const schemaHashes = options.schemaHashes ?? await declareSchemas(client);
+  const schemaHashes = configuredSchemas(client, options.schemaHashes);
   const maxAttempts = positiveInt(options.maxAttempts, 3);
   let lastReason = "no attempt";
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    const summary = await client.queryByKey({
+    const [summary] = await client.queryByKeys([{
       schemaHash: schemaHashes.fleetSummary,
       keyHash: ROUTINES_FLEET_ID,
       fields: [...FLEET_SUMMARY_FIELDS],
-    });
+    }]);
     if (!summary) {
       lastReason = "FleetSummary is missing";
       continue;
@@ -637,21 +360,19 @@ export async function readFleetStatus(options: ReadFleetStatusOptions = {}): Pro
       lastReason = "FleetSummary has invalid counts";
       continue;
     }
-    const rows: FieldMap[] = [];
-    for (let bucket = 0; bucket < bucketCount; bucket += 1) {
-      const page = await client.queryByHash({
-        schemaHash: schemaHashes.fleetStatus,
+    const pages = await client.queryByHashes(Array.from({ length: bucketCount }, (_, bucket) => ({
+        schemaHash: schemaHashes.status,
         keyHash: fleetBucketKey(ROUTINES_FLEET_ID, bucket),
-        fields: [...FLEET_ROUTINE_STATUS_FIELDS],
+        keyName: "by_fleet" as const,
+        fields: [...STATUS_FIELDS],
         maxRows: Math.max(expectedRows + bucketCount, 256),
-      });
-      rows.push(...page.map((item) => item.fields));
-    }
-    const stableSummary = await client.queryByKey({
+    })));
+    const rows = pages.flat().map((item) => item.fields);
+    const [stableSummary] = await client.queryByKeys([{
       schemaHash: schemaHashes.fleetSummary,
       keyHash: ROUTINES_FLEET_ID,
       fields: [...FLEET_SUMMARY_FIELDS],
-    });
+    }]);
     if (
       !stableSummary ||
       stableSummary.captured_at !== summary.captured_at ||
@@ -662,6 +383,10 @@ export async function readFleetStatus(options: ReadFleetStatusOptions = {}): Pro
     }
     if (rows.length !== expectedRows) {
       lastReason = `row count mismatch: expected ${expectedRows}, read ${rows.length}`;
+      continue;
+    }
+    if (rows.some((row) => row.content_digest !== contentDigest(row, new Set(["content_digest", "updated_at"])))) {
+      lastReason = "a routine status record differs from its content digest";
       continue;
     }
     const digest = fleetContentDigest(rows);
@@ -685,12 +410,13 @@ export async function readFleetStatus(options: ReadFleetStatusOptions = {}): Pro
 
 export async function readLegacyFleetStatus(options: LegacySnapshotOptions = {}): Promise<LegacyFleetReadResult> {
   const client = options.client ?? newLastDbPublisherClient();
-  const schemaHashes = options.schemaHashes ?? await declareSchemas(client);
-  const snapshot = await client.queryByKey({
+  const schemaHashes = configuredSchemas(client, options.schemaHashes);
+  if (!schemaHashes.snapshot) throw new LastDbPublishError("legacy_fleet_missing", "No historical fleet snapshot schema is configured.");
+  const [snapshot] = await client.queryByKeys([{
     schemaHash: schemaHashes.snapshot,
     keyHash: "fleet-latest",
     fields: [...SNAPSHOT_FIELDS],
-  });
+  }]);
   if (!snapshot) throw new LastDbPublishError("legacy_fleet_missing", "Legacy fleet snapshot is missing.");
   let parsed: unknown;
   try {
@@ -705,23 +431,28 @@ export async function readLegacyFleetStatus(options: LegacySnapshotOptions = {})
 }
 
 export async function clearLegacyFleetSnapshot(options: LegacySnapshotOptions = {}): Promise<boolean> {
-  const client = options.client ?? newLastDbPublisherClient();
-  const schemaHashes = options.schemaHashes ?? await declareSchemas(client);
-  const existing = await client.queryByKey({
-    schemaHash: schemaHashes.snapshot,
-    keyHash: "fleet-latest",
-    fields: [...SNAPSHOT_FIELDS],
-  });
-  if (!existing || !existing.rows_json) return false;
-  const fields = Object.fromEntries(SNAPSHOT_FIELDS.map((field) => [field, existing[field] ?? ""]));
-  fields.rows_json = "";
-  await client.mutate({
-    schemaHash: schemaHashes.snapshot,
-    keyHash: "fleet-latest",
-    fields,
-    mutationType: "update",
-  });
-  return true;
+  const release = acquireStatusConfigLock();
+  try {
+    const client = options.client ?? newLastDbPublisherClient();
+    const schemaHashes = configuredSchemas(client, options.schemaHashes);
+    if (!schemaHashes.snapshot) return false;
+    const [existing] = await client.queryByKeys([{
+      schemaHash: schemaHashes.snapshot,
+      keyHash: "fleet-latest",
+      fields: [...SNAPSHOT_FIELDS],
+    }]);
+    if (!existing || !existing.rows_json) return false;
+    const fields = Object.fromEntries(SNAPSHOT_FIELDS.map((field) => [field, existing[field] ?? ""]));
+    fields.rows_json = "";
+    await client.mutateBatch([{
+      schemaHash: schemaHashes.snapshot,
+      keyHash: "fleet-latest",
+      fields,
+      mutationType: "update",
+      expected: { field: "rows_json", value: existing.rows_json },
+    }]);
+    return true;
+  } finally { release(); }
 }
 
 function assertLegacyReadWindow(now: Date): void {
@@ -782,12 +513,12 @@ export function buildDeliveryStageRequest(opts: {
     legs: [
       {
         schema_name: opts.schemaHashes.snapshot,
-        fields: [...SNAPSHOT_DELIVER_FIELDS],
+        fields: wireFieldNames("snapshot", SNAPSHOT_DELIVER_FIELDS),
         hash_keys: ["fleet-latest"],
       },
       {
         schema_name: opts.schemaHashes.status,
-        fields: [...STATUS_DELIVER_FIELDS],
+        fields: wireFieldNames("status", STATUS_DELIVER_FIELDS),
       },
     ],
   };
@@ -807,9 +538,7 @@ export function buildBoundedDeliveryStageRequest(opts: {
  * RoutineStatus batches of 12 match the last successful live slice size. */
 const STATUS_IDS_PER_DELIVERY_PAGE = 12;
 
-/** Deliver explicit RoutineStatus Hash keys in small pages. Do not query
- * FleetRoutineStatus from delivery: hash_keys on that HashRange schema still
- * sealed the full fleet. */
+/** Deliver explicit primary keys in bounded pages, after the complete by_fleet read. */
 export function buildBoundedDeliveryStageRequests(opts: {
   schemaHashes: Record<SchemaKey, string>;
   recipient: DeliveryRecipient;
@@ -829,14 +558,14 @@ export function buildBoundedDeliveryStageRequests(opts: {
     legs: [
       {
         schema_name: opts.schemaHashes.fleetSummary,
-        fields: [...FLEET_SUMMARY_FIELDS],
+        fields: wireFieldNames("fleetSummary", FLEET_SUMMARY_FIELDS),
         hash_keys: [ROUTINES_FLEET_ID],
       },
       ...(chunk.length === 0
         ? []
         : [{
             schema_name: opts.schemaHashes.status,
-            fields: [...BOUNDED_STATUS_DELIVER_FIELDS],
+            fields: wireFieldNames("status", BOUNDED_STATUS_DELIVER_FIELDS),
             hash_keys: chunk,
           }]),
     ],
@@ -853,32 +582,6 @@ function chunkIds(ids: string[], chunkSize: number): string[][] {
     chunks.push(ids.slice(offset, offset + chunkSize));
   }
   return chunks;
-}
-
-async function declareSchemas(client: LastDbPublisherClient): Promise<Record<SchemaKey, string>> {
-  await client.autoIdentity();
-  const out = {} as Record<SchemaKey, string>;
-  for (const key of Object.keys(SCHEMAS) as SchemaKey[]) {
-    const declared = await client.declareAppSchema(ROUTINES_APP_ID, SCHEMAS[key]);
-    out[key] = declared.canonical;
-  }
-  return out;
-}
-
-async function upsert(
-  client: LastDbPublisherClient,
-  schemaHash: string,
-  keyHash: string,
-  fields: FieldMap,
-  queryFields: string[],
-): Promise<void> {
-  const existing = await client.queryByKey({ schemaHash, keyHash, fields: queryFields });
-  await client.mutate({
-    schemaHash,
-    keyHash,
-    fields,
-    mutationType: existing ? "update" : "create",
-  });
 }
 
 function statusFields(row: StatusRow, capturedAt: string): FieldMap {
@@ -956,10 +659,9 @@ function routineStatusFields(row: FieldMap): FieldMap {
     ...row,
     fleet_bucket: fleetStatusBucket(requiredField(row, "id")),
     sk: fleetStatusSortKey(row),
-    schema_layout_version: FLEET_STATUS_LAYOUT_VERSION,
   };
   fields.content_digest = contentDigest(fields, new Set(["content_digest", "updated_at"]));
-  assertSerializedSize(fields, ROUTINE_STATUS_MAX_BYTES, `RoutineStatus/${requiredField(row, "id")}`);
+  assertSerializedSize(wireFields("status", fields), ROUTINE_STATUS_MAX_BYTES, `RoutineStatus/${requiredField(row, "id")}`);
   return fields;
 }
 
@@ -984,7 +686,7 @@ function buildFleetSummary(publication: FleetPublication, rows: FieldMap[]): Fie
     situations_error: publication.snapshot.situations_error ?? "",
     content_digest: fleetContentDigest(rows),
   };
-  assertSerializedSize(summary, FLEET_SUMMARY_MAX_BYTES, `FleetSummary/${ROUTINES_FLEET_ID}`);
+  assertSerializedSize(wireFields("fleetSummary", summary), FLEET_SUMMARY_MAX_BYTES, `FleetSummary/${ROUTINES_FLEET_ID}`);
   return summary;
 }
 
@@ -995,34 +697,23 @@ function fleetContentDigest(rows: FieldMap[]): string {
   return createHash("sha256").update(JSON.stringify(normalized)).digest("hex");
 }
 
-async function enforceRunSummaryRetention(
-  client: LastDbPublisherClient,
-  schemaHash: string,
-  opts: { id: string; now: Date; keepCount: number; keepDays: number },
-): Promise<number> {
-  const rows = await client.queryByHash({
-    schemaHash,
-    keyHash: opts.id,
-    fields: [...RUN_SUMMARY_V2_FIELDS],
-    maxRows: Math.max(opts.keepCount + 1, 4096),
-  });
-  rows.sort((a, b) => b.keyRange.localeCompare(a.keyRange));
+function retentionMutations(schemaHash: string, id: string, rows: Array<{ keyRange: string; fields: FieldMap }>,
+  opts: { now: Date; keepCount: number; keepDays: number }): Mutation[] {
+  const sorted = [...rows].sort((a, b) => b.keyRange.localeCompare(a.keyRange));
   const cutoffMs = opts.now.getTime() - opts.keepDays * 24 * 60 * 60 * 1000;
-  let deleted = 0;
-  for (const [index, row] of rows.entries()) {
+  return sorted.filter((row, index) => {
     const startedMs = Date.parse(row.fields.started_at ?? "");
-    const expired = Number.isFinite(startedMs) && startedMs < cutoffMs;
-    if (index < opts.keepCount && !expired) continue;
-    await client.mutate({
-      schemaHash,
-      keyHash: opts.id,
-      keyRange: row.keyRange,
-      fields: row.fields,
-      mutationType: "delete",
-    });
-    deleted += 1;
+    return index >= opts.keepCount || (Number.isFinite(startedMs) && startedMs < cutoffMs);
+  }).map((row) => ({ schemaHash, keyHash: id, keyRange: row.keyRange, fields: {}, mutationType: "delete",
+    expected: { field: "updated_at", value: requiredField(row.fields, "updated_at") } }));
+}
+
+function configuredSchemas(client: LastDbPublisherClient, supplied?: Record<SchemaKey, string>): Record<SchemaKey, string> {
+  const configured = loadStatusSchemas(client);
+  if (supplied && Object.entries(configured).some(([key, runtime]) => supplied[key as SchemaKey] !== runtime)) {
+    throw new LastDbPublishError("status_schema_changed", "The fleet schema config changed; repeat the request with its current bindings.");
   }
-  return deleted;
+  return configured;
 }
 
 function contentDigest(fields: FieldMap, excluded: Set<string>): string {
@@ -1042,38 +733,6 @@ function truncateUtf8(input: string, maxBytes: number): string {
 function assertSerializedSize(fields: FieldMap, maxBytes: number, label: string): void {
   const size = new TextEncoder().encode(JSON.stringify(fields)).length;
   if (size > maxBytes) throw new LastDbPublishError("row_too_large", `${label} is ${size} bytes; limit is ${maxBytes}.`);
-}
-
-function schema(name: string, purpose: string, fields: string[], hashField: string): SchemaDefinition {
-  return {
-    name,
-    owner_app_id: ROUTINES_APP_ID,
-    descriptive_name: name,
-    purpose_statement: purpose,
-    schema_type: "Hash",
-    key: { hash_field: hashField },
-    fields,
-    field_types: Object.fromEntries(fields.map((field) => [field, "String"])) as Record<string, FieldType>,
-    field_descriptions: Object.fromEntries(fields.map((field) => [field, field.replaceAll("_", " ")])),
-    field_data_classifications: Object.fromEntries(
-      fields.map((field) => [field, { sensitivity_level: 0, data_domain: "routines" }]),
-    ),
-  };
-}
-
-function hashRangeSchema(
-  name: string,
-  purpose: string,
-  fields: string[],
-  hashField: string,
-  rangeField: string,
-): SchemaDefinition {
-  const definition = schema(name, purpose, fields, hashField);
-  return {
-    ...definition,
-    schema_type: "HashRange",
-    key: { hash_field: hashField, range_field: rangeField },
-  };
 }
 
 function boolString(value: boolean): string {
@@ -1098,235 +757,4 @@ function requiredField(fields: FieldMap, key: string): string {
   const value = fields[key];
   if (value === undefined) throw new Error(`missing required field ${key}`);
   return value;
-}
-
-export class LastDbPublishError extends Error {
-  readonly code: string;
-
-  constructor(code: string, message: string) {
-    super(message);
-    this.name = "LastDbPublishError";
-    this.code = code;
-  }
-}
-
-type FetchInit = RequestInit & { unix?: string };
-type LastDbFetch = (input: Parameters<typeof globalThis.fetch>[0], init?: FetchInit) => Promise<Response>;
-type LastDbClientOptions = {
-  socketPath?: string;
-  nodeUrl?: string;
-  fetchImpl?: LastDbFetch;
-};
-
-export function newLastDbPublisherClient(opts: LastDbClientOptions = {}): LastDbPublisherClient {
-  const callJson = newLastDbJsonCaller(opts);
-  let userHash = "";
-
-  return {
-    async autoIdentity() {
-      const body = await callJson("GET", "/api/system/auto-identity", undefined, userHash);
-      const hash = objectString(body, "user_hash");
-      if (!hash) throw new LastDbPublishError("auto_identity_bad_response", "LastDB auto-identity returned no user_hash.");
-      userHash = hash;
-      return { userHash };
-    },
-    async declareAppSchema(appId, schemaDef) {
-      const body = await callJson("POST", "/api/apps/declare-schema", { app_id: appId, schema: schemaDef }, userHash);
-      const canonical = objectString(body, "canonical") || objectString((body as Record<string, unknown>)?.data, "canonical");
-      const schemaName = objectString(body, "schema") || `${appId}/${schemaDef.name}`;
-      if (!canonical) {
-        throw new LastDbPublishError("schema_declare_bad_response", `LastDB returned no canonical hash for ${appId}/${schemaDef.name}.`);
-      }
-      return { canonical, schemaName };
-    },
-    async queryByKey({ schemaHash, keyHash, keyRange, fields }) {
-      const body = await callJson("POST", "/api/query", {
-        schema_name: schemaHash,
-        fields,
-        filter: keyRange === undefined ? { HashKey: keyHash } : { HashRangeKey: { hash: keyHash, range: keyRange } },
-        limit: 1,
-        offset: 0,
-      }, userHash);
-      const rows = queryRows(body);
-      return rows.find((row) => row.key.hash === keyHash && (keyRange === undefined || row.key.range === keyRange))?.fields ?? null;
-    },
-    async queryByHash({ schemaHash, keyHash, fields, maxRows }) {
-      const pageSize = Math.min(200, maxRows);
-      const out: Array<{ keyRange: string; fields: FieldMap }> = [];
-      for (let offset = 0; out.length < maxRows; offset += pageSize) {
-        const body = await callJson("POST", "/api/query", {
-          schema_name: schemaHash,
-          fields,
-          filter: { HashKey: keyHash },
-          limit: Math.min(pageSize, maxRows - out.length),
-          offset,
-        }, userHash);
-        const rows = queryRows(body).filter((row) => row.key.hash === keyHash && row.key.range);
-        out.push(...rows.map((row) => ({ keyRange: row.key.range!, fields: row.fields })));
-        if (rows.length < pageSize) break;
-      }
-      return out;
-    },
-    async mutate({ schemaHash, keyHash, keyRange, fields, mutationType }) {
-      await callJson("POST", "/api/mutation", {
-        type: "mutation",
-        schema: schemaHash,
-        fields_and_values: fields,
-        key_value: { hash: keyHash, range: keyRange ?? null },
-        mutation_type: mutationType,
-      }, userHash);
-    },
-  };
-}
-
-export function newLastDbDeliveryClient(opts: LastDbClientOptions = {}): LastDbDeliveryClient {
-  const callJson = newLastDbJsonCaller(opts);
-  return {
-    async stageDelivery(request) {
-      const body = await callJson("POST", "/api/sharing/deliver", request);
-      const data = dataObject(body);
-      const delivery = dataObject(data.delivery);
-      const preview = dataObject(delivery.preview);
-      const deliveryId = objectString(delivery, "delivery_id");
-      if (!deliveryId) {
-        throw new LastDbPublishError("delivery_stage_bad_response", "LastDB deliver stage returned no delivery_id.");
-      }
-      return {
-        deliveryId,
-        recordCount: objectNumber(preview, "record_count"),
-        fields: objectStringArray(preview, "fields"),
-        note: objectString(data, "note"),
-      };
-    },
-    async approveDelivery(deliveryId) {
-      const body = await callJson("POST", `/api/sharing/deliveries/${encodeURIComponent(deliveryId)}/approve`);
-      const data = dataObject(body);
-      return {
-        deliveryId: objectString(data, "delivery_id") || deliveryId,
-        shared: objectNumber(data, "shared"),
-        messageType: objectString(data, "message_type"),
-      };
-    },
-  };
-}
-
-function newLastDbJsonCaller(opts: LastDbClientOptions = {}) {
-  const socketPath = resolveSocketPath(opts.socketPath);
-  const nodeUrl = (opts.nodeUrl ?? process.env.ROUTINES_LASTDB_NODE_URL ?? "http://localhost:9001").replace(/\/+$/, "");
-  const fetchImpl: LastDbFetch = opts.fetchImpl ?? ((input, init) => globalThis.fetch(input, init));
-  return async function callJson(method: "GET" | "POST", path: string, body?: unknown, userHash = ""): Promise<unknown> {
-    const headers: Record<string, string> = { "X-LastDB-Client": ROUTINES_APP_ID };
-    if (userHash) headers["X-User-Hash"] = userHash;
-    let requestBody: string | undefined;
-    if (body !== undefined) {
-      headers["Content-Type"] = "application/json";
-      requestBody = JSON.stringify(body);
-    }
-    const useSocket = isLoopback(nodeUrl) && existsSync(socketPath);
-    const init: FetchInit = { method, headers, body: requestBody };
-    if (useSocket) init.unix = socketPath;
-    const url = useSocket ? `http://localhost${path}` : `${nodeUrl}${path}`;
-    let res: Response;
-    try {
-      res = await fetchImpl(url, init);
-    } catch (err) {
-      throw new LastDbPublishError(
-        "lastdb_unreachable",
-        useSocket
-          ? `LastDB is not reachable over ${socketPath}: ${err instanceof Error ? err.message : String(err)}`
-          : `LastDB is not reachable at ${nodeUrl}: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
-    const text = await res.text();
-    const parsed = parseJson(text);
-    if (!res.ok) {
-      throw new LastDbPublishError(`lastdb_http_${res.status}`, `LastDB ${method} ${path} returned ${res.status}: ${messageFor(parsed)}`);
-    }
-    return parsed;
-  };
-}
-
-function resolveSocketPath(override?: string): string {
-  if (override) return override;
-  for (const key of [
-    "ROUTINES_LASTDB_SOCKET",
-    "LASTDB_SOCKET_PATH",
-    "FOLDDB_SOCKET_PATH",
-    "FBRAIN_FOLDDB_SOCKET",
-    "LASTGIT_SOCKET",
-  ]) {
-    const value = process.env[key];
-    if (value) return value;
-  }
-  const home = process.env.LASTDB_HOME || join(homedir(), ".lastdb");
-  return join(home, "data", "folddb.sock");
-}
-
-function isLoopback(url: string): boolean {
-  try {
-    const u = new URL(url);
-    return u.hostname === "localhost" || u.hostname === "127.0.0.1" || u.hostname === "::1";
-  } catch {
-    return false;
-  }
-}
-
-function parseJson(text: string): unknown {
-  if (!text) return null;
-  try {
-    return JSON.parse(text) as unknown;
-  } catch {
-    return text;
-  }
-}
-
-function objectString(value: unknown, key: string): string {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return "";
-  const raw = (value as Record<string, unknown>)[key];
-  return typeof raw === "string" ? raw : "";
-}
-
-function objectNumber(value: unknown, key: string): number {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return 0;
-  const raw = (value as Record<string, unknown>)[key];
-  return typeof raw === "number" && Number.isFinite(raw) ? raw : 0;
-}
-
-function objectStringArray(value: unknown, key: string): string[] {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return [];
-  const raw = (value as Record<string, unknown>)[key];
-  return Array.isArray(raw) ? raw.filter((item): item is string => typeof item === "string") : [];
-}
-
-function dataObject(value: unknown): Record<string, unknown> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
-  const obj = value as Record<string, unknown>;
-  const nested = obj.data;
-  return nested && typeof nested === "object" && !Array.isArray(nested) ? (nested as Record<string, unknown>) : obj;
-}
-
-function messageFor(body: unknown): string {
-  return objectString(body, "message") || objectString(body, "error") || JSON.stringify(body)?.slice(0, 300) || "";
-}
-
-function queryRows(body: unknown): Array<{ key: { hash: string | null; range: string | null }; fields: FieldMap }> {
-  const raw =
-    body && typeof body === "object" && Array.isArray((body as Record<string, unknown>).results)
-      ? ((body as Record<string, unknown>).results as unknown[])
-      : body && typeof body === "object" && Array.isArray((body as Record<string, unknown>).rows)
-        ? ((body as Record<string, unknown>).rows as unknown[])
-        : [];
-  return raw.map((item) => {
-    const rec = item && typeof item === "object" ? (item as Record<string, unknown>) : {};
-    const keyRaw = rec.key;
-    const key =
-      keyRaw && typeof keyRaw === "object" && !Array.isArray(keyRaw)
-        ? {
-            hash: objectString(keyRaw, "hash") || null,
-            range: objectString(keyRaw, "range") || null,
-          }
-        : { hash: typeof keyRaw === "string" ? keyRaw : null, range: null };
-    const fields = rec.fields && typeof rec.fields === "object" && !Array.isArray(rec.fields) ? (rec.fields as FieldMap) : {};
-    return { key, fields };
-  });
 }

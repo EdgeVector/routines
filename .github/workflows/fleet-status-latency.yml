@@ -1,0 +1,169 @@
+name: Routines schema values and latency
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      schema_environment:
+        type: choice
+        options: [dev, prod]
+        default: dev
+        required: true
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: routines-fleet-values-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  APP_BEFORE: e7916cbe4a278fc6c23ecf6be06b884df3f7121b
+  APP_AFTER: ${{ github.event.pull_request.head.sha || github.sha }}
+  CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+  DAEMON_BEFORE: 46f1b2d6fd329b4931fd0f9e18f4fe39adb7bc56
+  DAEMON_AFTER: a83d5f06da5bfac12b8341594513743fbb3ffabd
+  ROUTINES_SCHEMA_ENV: ${{ inputs.schema_environment || 'dev' }}
+jobs:
+  compare:
+    name: Actual fleet commands, conversion and latency
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.APP_AFTER }}
+          path: candidate
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.APP_BEFORE }}
+          path: control
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: EdgeVector/lastdb
+          ref: ${{ env.DAEMON_BEFORE }}
+          path: daemon-before
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: EdgeVector/lastdb
+          ref: ${{ env.DAEMON_AFTER }}
+          path: daemon-after
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.3.10'
+      - name: Pin the source and prepare the explicit patched-main control
+        run: |
+          set -euo pipefail
+          test "$(git -C candidate rev-parse HEAD)" = "$APP_AFTER"
+          test "$(git -C control rev-parse HEAD)" = "$APP_BEFORE"
+          test "$(git -C daemon-before rev-parse HEAD)" = "$DAEMON_BEFORE"
+          test "$(git -C daemon-after rev-parse HEAD)" = "$DAEMON_AFTER"
+          python3 candidate/scripts/prepare-fleet-control.py --baseline "$GITHUB_WORKSPACE/control" \
+            --candidate "$GITHUB_WORKSPACE/candidate" --output "$RUNNER_TEMP/routines-results/source"
+          printf 'Candidate %s\nControl base %s\nCompatible engine %s\nRemoval engine %s\n' \
+            "$APP_AFTER" "$APP_BEFORE" "$DAEMON_BEFORE" "$DAEMON_AFTER" > "$RUNNER_TEMP/routines-results/source/revisions.txt"
+      - name: Typecheck the actual app and patched control before definition admission
+        run: |
+          set -euo pipefail
+          for label in control candidate; do
+            cd "$GITHUB_WORKSPACE/$label"
+            bun install --frozen-lockfile
+            bunx tsc --noEmit
+          done
+      - name: Require the real PROD definitions before any build
+        if: ${{ env.ROUTINES_SCHEMA_ENV == 'prod' }}
+        run: |
+          bun candidate/scripts/fleet-schema-definitions.mjs "$GITHUB_WORKSPACE/control" "$GITHUB_WORKSPACE/candidate" \
+            "$GITHUB_WORKSPACE/daemon-after" "$RUNNER_TEMP/routines-results/source/definitions.json"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            daemon-before -> target
+            daemon-after -> target
+          shared-key: routines-fleet-values
+          cache-on-failure: true
+          cache-workspace-crates: true
+      - name: Build the exact engines and actual app commands
+        env:
+          CARGO_BUILD_JOBS: '3'
+          CARGO_TERM_COLOR: never
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/routines-binaries"
+          for label in before after; do
+            if [ "$label" = before ]; then revision="$DAEMON_BEFORE"; else revision="$DAEMON_AFTER"; fi
+            cd "$GITHUB_WORKSPACE/daemon-$label"
+            FOLDDB_BUILD_VERSION_OVERRIDE="bench-$revision" cargo build --locked --profile dev-release -p lastdb_node --bin lastdbd
+            cp target/dev-release/lastdbd "$RUNNER_TEMP/routines-binaries/daemon-$label"
+          done
+          for label in control candidate; do
+            cd "$GITHUB_WORKSPACE/$label"
+            bun build src/cli.ts --compile --outfile "$RUNNER_TEMP/routines-binaries/$label"
+          done
+          cd "$RUNNER_TEMP/routines-binaries"
+          sha256sum daemon-before daemon-after control candidate > "$RUNNER_TEMP/routines-results/source/programs.sha256"
+      - name: Use normal DEV app publication under one generated CI identity
+        if: ${{ env.ROUTINES_SCHEMA_ENV == 'dev' }}
+        run: |
+          python3 candidate/scripts/fleet-status-latency.py --register-definitions-only --schema-environment dev \
+            --candidate "$GITHUB_WORKSPACE/candidate" --candidate-revision "$APP_AFTER" \
+            --control-source "$RUNNER_TEMP/routines-results/source/control-source.json" \
+            --control-binary "$RUNNER_TEMP/routines-binaries/control" --candidate-binary "$RUNNER_TEMP/routines-binaries/candidate" \
+            --daemon-before "$RUNNER_TEMP/routines-binaries/daemon-before" --daemon-before-revision "$DAEMON_BEFORE" \
+            --daemon-after "$RUNNER_TEMP/routines-binaries/daemon-after" --daemon-after-revision "$DAEMON_AFTER" \
+            --lastdb-source "$GITHUB_WORKSPACE/daemon-after" --output "$RUNNER_TEMP/routines-results/registration"
+      - name: Verify all six exact published definitions after normal DEV admission
+        if: ${{ env.ROUTINES_SCHEMA_ENV == 'dev' }}
+        run: |
+          bun candidate/scripts/fleet-schema-definitions.mjs "$GITHUB_WORKSPACE/control" "$GITHUB_WORKSPACE/candidate" \
+            "$GITHUB_WORKSPACE/daemon-after" "$RUNNER_TEMP/routines-results/source/definitions.json"
+      - name: Compare actual commands in balanced orders and a fresh owned-schema home
+        id: operations
+        run: |
+          python3 candidate/scripts/fleet-status-latency.py --schema-environment "$ROUTINES_SCHEMA_ENV" \
+            --candidate "$GITHUB_WORKSPACE/candidate" --candidate-revision "$APP_AFTER" \
+            --control-source "$RUNNER_TEMP/routines-results/source/control-source.json" \
+            --control-binary "$RUNNER_TEMP/routines-binaries/control" --candidate-binary "$RUNNER_TEMP/routines-binaries/candidate" \
+            --daemon-before "$RUNNER_TEMP/routines-binaries/daemon-before" --daemon-before-revision "$DAEMON_BEFORE" \
+            --daemon-after "$RUNNER_TEMP/routines-binaries/daemon-after" --daemon-after-revision "$DAEMON_AFTER" \
+            --lastdb-source "$GITHUB_WORKSPACE/daemon-after" --records 256 --samples 20 \
+            --output "$RUNNER_TEMP/routines-results/measurements"
+      - name: Check the finite retained output before upload
+        if: always()
+        id: evidence
+        run: python3 candidate/scripts/fleet-status-evidence.py "$RUNNER_TEMP/routines-results"
+      - name: Retain source identities and actual operation results
+        if: ${{ always() && steps.evidence.outcome == 'success' }}
+        id: measurements
+        uses: actions/upload-artifact@v4
+        with:
+          name: routines-fleet-values-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/routines-results/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Verify the uploaded identity, expiry and archive checksum
+        if: ${{ always() && steps.measurements.outcome == 'success' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ steps.measurements.outputs.artifact-id }}
+          ARTIFACT_URL: ${{ steps.measurements.outputs.artifact-url }}
+          ARTIFACT_SHA256: ${{ steps.measurements.outputs.artifact-digest }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID" > "$RUNNER_TEMP/routines-artifact-metadata.json"
+          python3 daemon-after/scripts/benchmarks/artifact.py \
+            --metadata "$RUNNER_TEMP/routines-artifact-metadata.json" --output "$RUNNER_TEMP/routines-artifact-receipt"
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > "$RUNNER_TEMP/routines-artifact.zip"
+          printf '%s  %s\n' "${ARTIFACT_SHA256#sha256:}" "$RUNNER_TEMP/routines-artifact.zip" | sha256sum --check
+          unzip -t "$RUNNER_TEMP/routines-artifact.zip" > /dev/null
+  benchmark-complete:
+    if: ${{ always() }}
+    needs: [compare]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require valid operations, balanced measurements and verified artifacts
+        env:
+          RESULT: ${{ needs.compare.result }}
+        run: test "$RESULT" = success
