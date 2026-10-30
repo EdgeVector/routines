@@ -221,14 +221,16 @@ def register_definitions(args, Node):
         result, _ = call_json(args, args.control_binary, node, home, "publish-status")
         publication(result, set())
         require(len(set(result["schemaHashes"].values())) == 6, "The normal publisher did not declare six distinct schemas")
-        directory = node.call("/api/schemas")[0]
+        directory = node.call("/api/schemas?include_full=true&include_counts=true")[0]
+        addresses = [schema["name"] for schema in directory.get("schemas", []) if schema.get("owner_app_id") == "routines"]
+        require(len(addresses) <= 64, "The diagnostic schema set exceeds its bounded owner scope")
         def metadata(runtime):
             try:
                 return {"runtime": runtime, "schema": node.call("/api/schema/" + quote(runtime, safe=""))[0]["schema"]}
             except Exception as error:
                 return {"runtime": runtime, "error": str(error)}
         with ThreadPoolExecutor(max_workers=6) as pool:
-            replies = list(pool.map(metadata, result["schemaHashes"].values()))
+            replies = list(pool.map(metadata, addresses))
         save(args.output / "installed-schemas.json", {"directory": directory, "responses": replies,
             "scope": "Actual owner metadata after normal DEV legacy admission; no value-authority inference from global definitions"})
         require(directory.get("ready") is True, "The actual installed schema directory is not ready")
