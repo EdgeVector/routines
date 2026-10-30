@@ -197,6 +197,10 @@ def snapshot(node, bindings, contract, coordinates):
             require(values[definition["key"]["hash_field"]] == address and
                 (range_value is None or values[definition["key"]["range_field"]] == range_value), "A stored primary field differs from its actual coordinates")
             require(set(row.get("metadata", {})) == present and "author_pub_key" in row, "A full query omits actual per-field or row author metadata")
+            if any("has_conflicts" in tip and tip["has_conflicts"] is not False and tip["has_conflicts"] != "unknown"
+                for tip in row["metadata"].values()):
+                save(node.output / "failed-known-key-conflict.json", {"coordinate": [key, address, range_value], "actual_result": item})
+                raise RuntimeError("A present field reports retained conflicts or an invalid conflict signal")
             # Molecules change ownership; conflict flags describe this query.
             # Preserve every actual current-tip attribute and optional key presence.
             metadata = {field: {name: value for name, value in row["metadata"][field].items()
