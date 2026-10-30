@@ -243,8 +243,8 @@ export async function convertStatusSchemas(client: LastDbPublisherClient, option
         requireValue(previous && digest(previous) === scope.target_config_sha256 && scopeBytes, "The completed fleet config or scope differs.");
         removeScope(scopePath, scopeBytes); return report;
       }
-      if (report?.phase === "aborted") {
-        requireValue(scopeBytes && (previous === null ? scope.source_config_sha256 === null : digest(previous) === scope.source_config_sha256),
+      if (report?.phase === "aborted" && scopeBytes) {
+        requireValue(previous === null ? scope.source_config_sha256 === null : digest(previous) === scope.source_config_sha256,
           "The aborted fleet conversion does not match the source config.");
         removeScope(scopePath, scopeBytes); scopeBytes = null; scope.change_id = "";
         if (options.abort) return report;

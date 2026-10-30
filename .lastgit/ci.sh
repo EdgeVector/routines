@@ -18,6 +18,16 @@ for f in .lastgit/*.sh scripts/*.sh; do
   bash -n "$f"
 done
 
+# Operational comparison scripts receive a syntax check; no workload runs here.
+for f in scripts/*.py; do
+  python3 - "$f" <<'PY'
+import ast
+from pathlib import Path
+import sys
+ast.parse(Path(sys.argv[1]).read_text(), filename=sys.argv[1])
+PY
+done
+
 # 1b. prompt closeout lint — this repo's prompts only. The fleet prompts under
 # ~/.last-stack/routines are not present in a fresh CI clone, and the lint
 # refuses to report success on an empty scan, so name the path explicitly.
