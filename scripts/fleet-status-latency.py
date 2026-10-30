@@ -179,7 +179,12 @@ def snapshot(node, bindings, contract, coordinates):
                 continue
             row = response["results"][0]
             require(row.get("key") == {"hash": address, "range": range_value}, "A known-key snapshot returned different primary coordinates")
-            require(set(row["fields"]) == set(batch[offset]["fields"]), "A known-key record lacks complete declared fields")
+            if set(row["fields"]) != set(batch[offset]["fields"]):
+                save(node.output / "failed-known-key-snapshot.json", {"coordinate": [key, address, range_value],
+                    "query": batch[offset], "actual_result": item,
+                    "missing_fields": sorted(set(batch[offset]["fields"]) - set(row["fields"])),
+                    "unexpected_fields": sorted(set(row["fields"]) - set(batch[offset]["fields"]))})
+                raise RuntimeError(f"Actual {key} record lacks complete declared fields; see failed-known-key-snapshot.json")
             values = {field: unwrapped(value) for field, value in row["fields"].items()}
             require(all(isinstance(value, str) for value in values.values()), "A String field changed its value type")
             metadata = {field: {name: row.get("metadata", {}).get(field, {}).get(name)
