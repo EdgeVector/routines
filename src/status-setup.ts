@@ -128,7 +128,7 @@ function keyFor(source: Record<string, unknown>): SchemaKey {
 function requireOwnedMetadata(source: Record<string, unknown>, key: SchemaKey): Binding {
   const definition = canonicalDefinition(key), binding = validateMetadata(source, definition);
   requireValue(source.independent_fields === true && binding.identity === definitionIdentity(definition) &&
-    Object.keys(object(source.field_mappers)).length === 0 &&
+    Object.keys(object(source.field_mappers ?? {})).length === 0 &&
     same(source.alternate_keys ?? {}, definition.alternate_keys ?? {}), "The installed fleet keys or value ownership differ from this release.");
   return binding;
 }
@@ -149,7 +149,7 @@ function requirePrivateSources(sources: { key: SchemaKey; source: Record<string,
     const fields = source.fields as string[], uuids = object(source.field_molecule_uuids);
     requireValue(same(Object.keys(uuids).sort(), [...fields].sort()) && Object.values(uuids).every((value) => typeof value === "string" && value),
       "A fleet source lacks a complete physical molecule map.");
-    for (const [field, path] of Object.entries(object(source.field_mappers))) {
+    for (const [field, path] of Object.entries(object(source.field_mappers ?? {}))) {
       const split = typeof path === "string" ? path.lastIndexOf(".") : -1;
       const referenced = split > 0 ? byName.get((path as string).slice(0, split)) : undefined;
       const targetField = split > 0 ? (path as string).slice(split + 1) : "";
