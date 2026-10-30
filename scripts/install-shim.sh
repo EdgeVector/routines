@@ -67,8 +67,6 @@ link_gate() {
 
 # north-star-rollup: plain registry gate_command target.
 link_gate north-star-rollup-gate.sh routines-north-star-rollup-gate
-# cloud-sync-health-fix: observe gate; avoids a 45m exit-124 with no metrics.
-link_gate cloud-sync-health-fix-gate.sh routines-cloud-sync-health-fix-gate
 # lastdb-local-smoke: the scheduled canary must never spend its harness wall
 # clock compiling Fold; a separate 180-minute builder stages the binaries.
 link_gate lastdb-local-smoke-gate.sh routines-lastdb-local-smoke-gate
