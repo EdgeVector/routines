@@ -28,6 +28,47 @@ def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
+def installed_schemas(node, bindings, contract, output, phase, legacy):
+    directory = node.call("/api/schemas?include_full=true&include_counts=true")[0]
+    save(output / f"installed-{phase}.json", directory)
+    require(directory.get("ready") is True and directory.get("full_included") is True,
+        "The actual installed schema metadata is incomplete")
+    owned = {schema["name"]: schema for schema in directory.get("schemas", []) if schema.get("owner_app_id") == "routines"}
+    canonical = {key: owned[runtime] for key, runtime in bindings.items() if runtime in owned}
+    expected = set(contract) if legacy else {key for key, runtime in bindings.items() if runtime}
+    require(set(canonical) == expected, "The publisher's actual schema bindings are incomplete")
+    for key, schema in canonical.items():
+        definition = contract[key]["definition"]
+        require(schema.get("identity_hash") == contract[key]["identity"] and schema.get("descriptive_name") == definition["descriptive_name"]
+            and schema.get("schema_type") == definition["schema_type"]
+            and [schema.get("key", {}).get(field) for field in ("hash_field", "range_field")] == [definition["key"].get(field) for field in ("hash_field", "range_field")]
+            and set(schema.get("fields", [])) == set(definition["fields"])
+            and all(schema.get(field) == definition[field] for field in ("field_types", "field_descriptions", "field_data_classifications")),
+            "An actual local definition differs from the published field definition")
+        if not legacy:
+            require(schema.get("independent_fields") is True and not schema.get("field_mappers") and not schema.get("transform_fields")
+                and schema.get("alternate_keys", {}) == definition.get("alternate_keys", {}), "A native runtime retains legacy value authority or different keys")
+    aliases = {name: alias for name, alias in owned.items() if name not in {schema["name"] for schema in canonical.values()}}
+    if legacy:
+        require(len(aliases) == len(canonical) == 6, "The exact legacy control did not produce its six source schemas and six aliases")
+        targets = []
+        for alias in aliases.values():
+            matches = [source for source in canonical.values()
+                if all(alias.get(field) == source.get(field) for field in ("owner_app_id", "descriptive_name", "identity_hash", "schema_type", "key",
+                    "fields", "field_types", "field_descriptions", "field_data_classifications", "field_hashes", "field_molecule_uuids"))
+                and alias.get("field_mappers") == {field: source["name"] + "." + field for field in source["fields"]}
+                and not alias.get("transform_fields")]
+            require(len(matches) == 1, "A legacy alias is not an exact physical forwarder of a selected source")
+            targets.append(matches[0]["name"])
+        require(len(set(targets)) == 6, "The old alias membership does not cover exactly the six source record types")
+    else:
+        require(not aliases, "Native setup or conversion retains an unexpected local schema")
+        molecules = [molecule for schema in canonical.values() for molecule in schema.get("field_molecule_uuids", {}).values()]
+        require(len(set(molecules)) == len(molecules), "Two native schemas share physical record values")
+    return sorted(aliases), {key: next((name for name, alias in aliases.items() if alias["identity_hash"] == schema["identity_hash"]), "")
+        for key, schema in canonical.items()}
+
+
 def cli(args, binary, node, home, verb, *flags, allow_failure=False):
     environment = {key: value for key, value in os.environ.items()
         if not key.startswith(("ROUTINES_", "LASTDB", "FOLD", "SENTRY", "OBS_", "OTEL_"))
@@ -235,8 +276,7 @@ def register_definitions(args, Node):
             "scope": "Actual owner metadata after normal DEV legacy admission; no value-authority inference from global definitions"})
         require(directory.get("ready") is True, "The actual installed schema directory is not ready")
         owned = {schema["name"]: schema for schema in directory.get("schemas", []) if schema.get("owner_app_id") == "routines"}
-        require(len(owned) == 6 and set(owned) == set(result["schemaHashes"].values()),
-            "The six declared runtimes differ from the actual installed schemas")
+        installed_schemas(node, result["schemaHashes"], args.contract, args.output, "registered", True)
         require(all("schema" in reply and reply["schema"].get("name") == reply["runtime"]
             and reply["schema"].get("identity_hash") == owned[reply["runtime"]].get("identity_hash")
             and reply["schema"].get("owner_app_id") == "routines" for reply in replies),
@@ -277,19 +317,7 @@ def arm(args, Node, finish_setup, contract, label, pair):
         read, _ = call_json(args, setup, node, home, "read-status")
         rows = view(read, expected)
         bindings = published["schemaHashes"]
-        directory = node.call("/api/schemas")[0]
-        owned = [schema for schema in directory.get("schemas", []) if schema.get("owner_app_id") == "routines"]
-        expected_types = {"RoutineStatus", "RoutineRunSummaryV2", "FleetSummary"} if fresh else {item["definition"]["descriptive_name"] for item in contract.values()}
-        require(directory.get("ready") is True and len(owned) == len(expected_types)
-            and {schema.get("descriptive_name") for schema in owned} == expected_types, "The installed app schema membership differs")
-        def installed_metadata(schema):
-            key = next(key for key, item in contract.items() if item["definition"]["descriptive_name"] == schema["descriptive_name"])
-            metadata = node.call("/api/schema/" + quote(schema["name"], safe=""))[0]["schema"]
-            require(metadata.get("identity_hash") == schema.get("identity_hash") == contract[key]["identity"]
-                and metadata.get("owner_app_id") == "routines" and bindings[key] == metadata.get("name"),
-                "A published definition or installed runtime identity differs")
-        with ThreadPoolExecutor(max_workers=6) as pool:
-            list(pool.map(installed_metadata, owned))
+        aliases, alias_bindings = installed_schemas(node, bindings, contract, output, "published", not fresh)
         histories = run_keys(home)
         coordinates = [("status", identifier, None) for identifier in sorted(expected)]
         coordinates += [("fleetSummary", "routines", None)]
@@ -298,19 +326,27 @@ def arm(args, Node, finish_setup, contract, label, pair):
         before = snapshot(node, bindings, contract, coordinates + copied)
         require(all(value is not None for value in before.values()), "An actual published record is absent before conversion")
         save(output / "before-atoms.json", before)
+        if not fresh:
+            alias_values = snapshot(node, alias_bindings, contract, coordinates + copied)
+            save(output / "alias-atoms.json", alias_values)
+            require(alias_values == before, "A qualified legacy alias does not resolve the source's actual current atoms and authors")
         if label == "candidate":
             planned, _ = cli(args, binary, node, home, "convert-status-schemas")
             plan = json.loads(planned.stdout)
-            require(plan.get("phase") == "plan" and len(plan.get("schemas", [])) == 6 and plan.get("retire") == [], "The explicit app conversion plan differs")
+            require(plan.get("phase") == "plan" and len(plan.get("schemas", [])) == 6 and sorted(plan.get("retire", [])) == aliases
+                and {source["schema"] for source in plan["schemas"]} == set(bindings.values()), "The explicit source and exact-alias conversion plan differs")
             # The conversion command emits JSON without a --json flag.
             result, _ = cli(args, binary, node, home, "convert-status-schemas", "--apply", "--maintenance")
             report = json.loads(result.stdout)
             require(report.get("phase") == "complete" and report.get("durable") is True
                 and report.get("selected_keys") == report.get("expected_selected_keys") == len(coordinates + copied)
-                and report.get("retired_schemas") == [], "The actual conversion lacks complete membership or retains a retirement")
+                and sorted(report.get("retired_schemas", [])) == aliases, "The actual conversion lacks complete membership or the exact frozen alias retirement")
             save(output / "conversion.json", report)
             after = snapshot(node, bindings, contract, coordinates + copied)
             require(after == before, "Conversion changed values, current atoms, authors, metadata, or membership")
+            installed_schemas(node, bindings, contract, output, "converted", False)
+            require(snapshot(node, alias_bindings, contract, coordinates + copied) == before,
+                "A public qualified schema address changed values or current atoms after its physical proxy retired")
         finish_setup(node, output)
         cloud_off(node, "before-reopen")
         node.stop()
@@ -415,12 +451,13 @@ def main():
     sys.path.insert(0, str(args.lastdb_source / "scripts/benchmarks"))
     from node import Node, file_hash
     from app_multi_key_compare import finish_setup
-    if args.register_definitions_only:
-        register_definitions(args, Node)
-        return
     source = '''import {SCHEMAS,canonicalDefinition,definitionIdentity,fieldRules} from "./src/status-schema.ts";
 console.log(JSON.stringify(Object.fromEntries(Object.keys(SCHEMAS).map(key=>[key,{identity:definitionIdentity(canonicalDefinition(key)),definition:canonicalDefinition(key),field_map:Object.fromEntries(Object.entries(fieldRules(key)).map(([field,[name]])=>[field,name]))}]))));'''
     contract = json.loads(subprocess.check_output(["bun", "--eval", source], cwd=args.candidate, text=True))
+    args.contract = contract
+    if args.register_definitions_only:
+        register_definitions(args, Node)
+        return
     summary = {"complete": False, "schema_environment": args.schema_environment, "candidate_revision": args.candidate_revision,
         "daemon_before_revision": args.daemon_before_revision, "daemon_after_revision": args.daemon_after_revision,
         "control": json.loads(args.control_source.read_text()), "records": args.records, "samples_per_operation_per_arm": args.samples,

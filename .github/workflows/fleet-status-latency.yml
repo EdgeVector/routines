@@ -19,8 +19,8 @@ env:
   APP_BEFORE: e7916cbe4a278fc6c23ecf6be06b884df3f7121b
   APP_AFTER: ${{ github.event.pull_request.head.sha || github.sha }}
   CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-  DAEMON_BEFORE: 11f18a8b8cadceed751e92ab2ec920312b650aec
-  DAEMON_AFTER: 209d4ec0c6c09e860188a5736f7f59d9552e245e
+  DAEMON_BEFORE: 084dfe803afaf956e225a593f77dc4388afd7f93
+  DAEMON_AFTER: 13c3cf27da2406455ce27940b9e329df39eae8b6
   ROUTINES_SCHEMA_ENV: ${{ inputs.schema_environment || 'dev' }}
 jobs:
   compare:

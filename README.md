@@ -447,8 +447,9 @@ routines read-status --json
 
 `ROUTINES_STATUS_SCHEMA_CONFIG` selects the config path.
 The default is `ROUTINES_HOME/state/status-schemas.json`.
-The explicit conversion requires `app_schema_conversion_v1` and `app_schema_field_mapping_v1`.
-It saves the exact source identities, field maps, membership fields, target identities, and alternate keys before the node request pause.
+The explicit conversion requires `app_schema_conversion_v1`, `app_schema_field_mapping_v1`,
+`app_schema_alias_retirement_v1`, and `app_schema_private_mapper_conversion_v1`.
+It saves the exact source identities, field maps, membership fields, target identities, alternate keys, and explicit alias retirement scope before the node request pause.
 It resumes only the same durable operation and publishes the config before requests resume.
 It checks complete selected membership and preserves values, atom identities, authors, metadata, runtime addresses, and primary coordinates.
 Field maps rename fields through published definitions. They never coerce values or infer record correspondence.
@@ -456,7 +457,12 @@ Field maps rename fields through published definitions. They never coerce values
 The conversion retains every installed, reviewed historical record type with schema-owned values:
 `RoutineFleetSnapshot`, `RoutineRunSummary`, and the old copied `FleetRoutineStatusV2` payloads.
 Their old primary layouts remain available, but the current publisher and fleet reader do not use those payloads.
-The conversion does not retire or delete any historical schema or infer that equal payloads permit deletion.
+The conversion does not retire or delete any historical record type or infer that equal payloads permit deletion.
+An old alias can retire only when every field points to one selected source with the same complete physical molecule map.
+The engine repeats this exact-alias audit under its request pause before it permits retirement.
+An old mapper can convert only when its selected same-app source uses different keys and separate physical molecules.
+The engine checks the complete stored and runtime molecule maps, types, field identities, and current tips.
+Published definitions can retain historical mapper metadata; native local schemas never inherit that value authority.
 An unknown older schema, including the polluted `FleetRoutineStatus` layout, requires a separate explicit owner review.
 Fresh setup does not create historical schemas.
 
