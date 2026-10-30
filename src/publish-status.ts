@@ -431,24 +431,28 @@ export async function readLegacyFleetStatus(options: LegacySnapshotOptions = {})
 }
 
 export async function clearLegacyFleetSnapshot(options: LegacySnapshotOptions = {}): Promise<boolean> {
-  const client = options.client ?? newLastDbPublisherClient();
-  const schemaHashes = configuredSchemas(client, options.schemaHashes);
-  if (!schemaHashes.snapshot) return false;
-  const [existing] = await client.queryByKeys([{
-    schemaHash: schemaHashes.snapshot,
-    keyHash: "fleet-latest",
-    fields: [...SNAPSHOT_FIELDS],
-  }]);
-  if (!existing || !existing.rows_json) return false;
-  const fields = Object.fromEntries(SNAPSHOT_FIELDS.map((field) => [field, existing[field] ?? ""]));
-  fields.rows_json = "";
-  await client.mutateBatch([{
-    schemaHash: schemaHashes.snapshot,
-    keyHash: "fleet-latest",
-    fields,
-    mutationType: "update",
-  }]);
-  return true;
+  const release = acquireStatusConfigLock();
+  try {
+    const client = options.client ?? newLastDbPublisherClient();
+    const schemaHashes = configuredSchemas(client, options.schemaHashes);
+    if (!schemaHashes.snapshot) return false;
+    const [existing] = await client.queryByKeys([{
+      schemaHash: schemaHashes.snapshot,
+      keyHash: "fleet-latest",
+      fields: [...SNAPSHOT_FIELDS],
+    }]);
+    if (!existing || !existing.rows_json) return false;
+    const fields = Object.fromEntries(SNAPSHOT_FIELDS.map((field) => [field, existing[field] ?? ""]));
+    fields.rows_json = "";
+    await client.mutateBatch([{
+      schemaHash: schemaHashes.snapshot,
+      keyHash: "fleet-latest",
+      fields,
+      mutationType: "update",
+      expected: { field: "rows_json", value: existing.rows_json },
+    }]);
+    return true;
+  } finally { release(); }
 }
 
 function assertLegacyReadWindow(now: Date): void {
