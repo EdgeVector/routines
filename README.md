@@ -475,6 +475,11 @@ Such a result measures publication and lookup latency with that dependency absen
 It does not prove nominal live posture collection, and no posture gate is changed.
 Cloud sync stays off for CI nodes.
 A baseline that fails schema admission supplies no before latency and cannot count as a passing comparison.
+The comparison records each field's present, absent, or null state and its actual current-tip metadata.
+An absent optional historical layout marker stays absent after conversion.
+It verifies complete primary membership and real per-field counts; it does not require an atom in every declared field.
+Legacy CLI writes in this cohort have unsigned or unset authors. Their exact author state must remain unchanged.
+This cohort does not establish signed-author preservation.
 
 ## Admin fleet status deliver
 

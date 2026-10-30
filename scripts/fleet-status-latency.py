@@ -31,7 +31,7 @@ def digest(value):
 def installed_schemas(node, bindings, contract, output, phase, legacy):
     directory = node.call("/api/schemas?include_full=true&include_counts=true")[0]
     save(output / f"installed-{phase}.json", directory)
-    require(directory.get("ready") is True and directory.get("full_included") is True,
+    require(directory.get("ready") is True and directory.get("full_included") is True and directory.get("counts_included") is True,
         "The actual installed schema metadata is incomplete")
     owned = {schema["name"]: schema for schema in directory.get("schemas", []) if schema.get("owner_app_id") == "routines"}
     canonical = {key: owned[runtime] for key, runtime in bindings.items() if runtime in owned}
@@ -66,7 +66,7 @@ def installed_schemas(node, bindings, contract, output, phase, legacy):
         molecules = [molecule for schema in canonical.values() for molecule in schema.get("field_molecule_uuids", {}).values()]
         require(len(set(molecules)) == len(molecules), "Two native schemas share physical record values")
     return sorted(aliases), {key: next((name for name, alias in aliases.items() if alias["identity_hash"] == schema["identity_hash"]), "")
-        for key, schema in canonical.items()}
+        for key, schema in canonical.items()}, {key: schema["record_count"] for key, schema in canonical.items()}
 
 
 def cli(args, binary, node, home, verb, *flags, allow_failure=False):
@@ -179,20 +179,50 @@ def snapshot(node, bindings, contract, coordinates):
                 continue
             row = response["results"][0]
             require(row.get("key") == {"hash": address, "range": range_value}, "A known-key snapshot returned different primary coordinates")
-            if set(row["fields"]) != set(batch[offset]["fields"]):
+            declared, present = set(batch[offset]["fields"]), set(row["fields"])
+            definition = contract[key]["definition"]
+            required = {field for field in definition["key"].values() if field}
+            if key == "status":
+                alternate = definition["alternate_keys"]["by_fleet"]
+                required |= {alternate["hash_field"], contract[key]["field_map"]["sk"]}
+                required |= {part["field"] for part in alternate["range_parts"]}
+            if not required <= present or not present <= declared:
                 save(node.output / "failed-known-key-snapshot.json", {"coordinate": [key, address, range_value],
                     "query": batch[offset], "actual_result": item,
-                    "missing_fields": sorted(set(batch[offset]["fields"]) - set(row["fields"])),
-                    "unexpected_fields": sorted(set(row["fields"]) - set(batch[offset]["fields"]))})
-                raise RuntimeError(f"Actual {key} record lacks complete declared fields; see failed-known-key-snapshot.json")
+                    "missing_required_fields": sorted(required - present), "unexpected_fields": sorted(present - declared)})
+                raise RuntimeError(f"Actual {key} record lacks required key fields or returns undeclared fields; see failed-known-key-snapshot.json")
             values = {field: unwrapped(value) for field, value in row["fields"].items()}
-            require(all(isinstance(value, str) for value in values.values()), "A String field changed its value type")
-            metadata = {field: {name: row.get("metadata", {}).get(field, {}).get(name)
-                for name in ("atom_uuid", "writer_pubkey", "metadata")} for field in values}
-            require(all(isinstance(item["atom_uuid"], str) and item["atom_uuid"] for item in metadata.values()),
+            require(all(value is None or isinstance(value, str) for value in values.values()) and
+                all(isinstance(values[field], str) and values[field] for field in required), "A value type or required key field differs")
+            require(values[definition["key"]["hash_field"]] == address and
+                (range_value is None or values[definition["key"]["range_field"]] == range_value), "A stored primary field differs from its actual coordinates")
+            require(set(row.get("metadata", {})) == present and "author_pub_key" in row, "A full query omits actual per-field or row author metadata")
+            # Molecules change ownership; conflict flags describe this query.
+            # Preserve every actual current-tip attribute and optional key presence.
+            metadata = {field: {name: value for name, value in row["metadata"][field].items()
+                if name not in ("molecule_uuid", "has_conflicts")} for field in values}
+            require(all(isinstance(item.get("atom_uuid"), str) and item["atom_uuid"] for item in metadata.values()),
                 "A stored field lacks its current atom identity")
-            observed[identity] = {"values_sha256": digest(values), "value_bytes": sum(len(value.encode()) for value in values.values()), "metadata": metadata}
+            observed[identity] = {"values_sha256": digest(values), "value_bytes": sum(len(json.dumps(value, ensure_ascii=False).encode()) for value in values.values()),
+                "present_fields": sorted(present), "absent_fields": sorted(declared - present),
+                "null_fields": sorted(field for field, value in values.items() if value is None),
+                "metadata": metadata, "row_author": row["author_pub_key"]}
     return observed
+
+
+def field_volume(observed, contract):
+    volume = {key: {field: {"present": 0, "absent": 0, "null": 0, "writer_set": 0} for field in item["definition"]["fields"]}
+        for key, item in contract.items()}
+    for coordinate, state in observed.items():
+        if state is None:
+            continue
+        key = json.loads(coordinate)[0]
+        for presence in ("present", "absent", "null"):
+            for field in state[presence + "_fields"]:
+                volume[key][field][presence] += 1
+        for field, metadata in state["metadata"].items():
+            volume[key][field]["writer_set"] += bool(metadata.get("writer_pubkey"))
+    return volume
 
 
 def native_pages(node, binding, contract, expected_rows):
@@ -318,19 +348,23 @@ def arm(args, Node, finish_setup, contract, label, pair):
         for identifier in sorted(expected)[:4]:
             cli(args, setup, node, home, "run", identifier, "--quiet")
         published, _ = call_json(args, setup, node, home, "publish-status")
+        save(output / "publication.json", published)
         publication(published, expected)
         read, _ = call_json(args, setup, node, home, "read-status")
         rows = view(read, expected)
         bindings = published["schemaHashes"]
-        aliases, alias_bindings = installed_schemas(node, bindings, contract, output, "published", not fresh)
+        aliases, alias_bindings, actual_counts = installed_schemas(node, bindings, contract, output, "published", not fresh)
         histories = run_keys(home)
         coordinates = [("status", identifier, None) for identifier in sorted(expected)]
         coordinates += [("fleetSummary", "routines", None)]
         coordinates += [("runSummaryV2", identifier, stamp) for identifier, stamp in histories]
         copied = [] if fresh else [("fleetStatus", row["fleet_bucket"], row["sk"]) for row in rows]
+        require(actual_counts == {key: sum(coordinate[0] == key for coordinate in coordinates + copied) for key in actual_counts},
+            "Actual primary membership exceeds or differs from the complete known key set")
         before = snapshot(node, bindings, contract, coordinates + copied)
         require(all(value is not None for value in before.values()), "An actual published record is absent before conversion")
         save(output / "before-atoms.json", before)
+        save(output / "before-field-volume.json", field_volume(before, contract))
         if not fresh:
             alias_values = snapshot(node, alias_bindings, contract, coordinates + copied)
             save(output / "alias-atoms.json", alias_values)
@@ -349,6 +383,8 @@ def arm(args, Node, finish_setup, contract, label, pair):
             save(output / "conversion.json", report)
             after = snapshot(node, bindings, contract, coordinates + copied)
             require(after == before, "Conversion changed values, current atoms, authors, metadata, or membership")
+            require(field_volume(after, contract) == field_volume(before, contract), "Conversion changed real per-field presence, absence, null, or writer volume")
+            save(output / "converted-field-volume.json", field_volume(after, contract))
             installed_schemas(node, bindings, contract, output, "converted", False)
             require(snapshot(node, alias_bindings, contract, coordinates + copied) == before,
                 "A public qualified schema address changed values or current atoms after its physical proxy retired")
@@ -487,7 +523,8 @@ console.log(JSON.stringify(Object.fromEntries(Object.keys(SCHEMAS).map(key=>[key
             "Both balanced orders and a fresh owned-schema arm passed actual CLI operations. Cloud sync stayed off.",
             "The compatible engine seeded both arms. The candidate converted all six record types before the removal-engine reopen.",
             "The control retains main's serial flow and copied status records after the explicit vocabulary/transport patch.",
-            "Current atoms, authors, metadata, values, complete membership, native order, deletion, run retention, and reopen checks passed.",
+            "Current atoms, actual author metadata (including unsigned/unset state), optional field absence/null, values, complete membership, native order, deletion, retention, and reopen checks passed.",
+            "The legacy control writes unsigned records. This cohort does not establish signed-author preservation.",
             "This does not prove nominal live posture collection, invalid generic-name conversion, or recipient delivery.", "",
             "| Comparison | Operation | Percentile | Patched main ms | Candidate ms | Change |", "|---|---|---|---:|---:|---:|"]
         lines += [f"| {row['comparison']} | {row['operation']} | {row['percentile']} | {row['before_ms']:.3f} | {row['after_ms']:.3f} | {row['change_percent']:+.1f}% |" for row in rows]
