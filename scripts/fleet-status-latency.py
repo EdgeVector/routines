@@ -11,6 +11,8 @@ import statistics
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import quote
 
 
 def require(ok, message):
@@ -218,7 +220,9 @@ def arm(args, Node, finish_setup, contract, label, pair):
         expected = registry(home, args.records)
         setup = args.candidate_binary if fresh else args.control_binary
         if fresh:
-            call_json(args, setup, node, home, "init-status")
+            installed, _ = call_json(args, setup, node, home, "init-status")
+            require(set(installed["schemas"]) == {"status", "runSummaryV2", "fleetSummary"},
+                "Fresh setup created a historical or duplicate record type")
         # Run real checksum routines. These completed histories come from the
         # product runner, never handcrafted run metadata or collector responses.
         for identifier in sorted(expected)[:4]:
@@ -228,6 +232,19 @@ def arm(args, Node, finish_setup, contract, label, pair):
         read, _ = call_json(args, setup, node, home, "read-status")
         rows = view(read, expected)
         bindings = published["schemaHashes"]
+        directory = node.call("/api/schemas")[0]
+        owned = [schema for schema in directory.get("schemas", []) if schema.get("owner_app_id") == "routines"]
+        expected_types = {"RoutineStatus", "RoutineRunSummaryV2", "FleetSummary"} if fresh else {item["definition"]["descriptive_name"] for item in contract.values()}
+        require(directory.get("ready") is True and len(owned) == len(expected_types)
+            and {schema.get("descriptive_name") for schema in owned} == expected_types, "The installed app schema membership differs")
+        def installed_metadata(schema):
+            key = next(key for key, item in contract.items() if item["definition"]["descriptive_name"] == schema["descriptive_name"])
+            metadata = node.call("/api/schema/" + quote(schema["name"], safe=""))[0]["schema"]
+            require(metadata.get("identity_hash") == schema.get("identity_hash") == contract[key]["identity"]
+                and metadata.get("owner_app_id") == "routines" and bindings[key] == metadata.get("name"),
+                "A published definition or installed runtime identity differs")
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            list(pool.map(installed_metadata, owned))
         histories = run_keys(home)
         coordinates = [("status", identifier, None) for identifier in sorted(expected)]
         coordinates += [("fleetSummary", "routines", None)]
@@ -279,7 +296,7 @@ def arm(args, Node, finish_setup, contract, label, pair):
         if label == "candidate":
             require(snapshot(node, bindings, contract, copied) == {key: value for key, value in before.items() if json.loads(key)[0] == "fleetStatus"},
                 "A current primary mutation changed separately retained historical payloads")
-        removed = sorted(expected)[-1]
+        removed = changed
         (home / "registry" / f"{removed}.toml").unlink()
         expected.remove(removed)
         value, _ = call_json(args, binary, node, home, "publish-status")
@@ -290,6 +307,11 @@ def arm(args, Node, finish_setup, contract, label, pair):
             "A normal stale primary deletion left the record visible")
         if label != "control":
             native_pages(node, bindings["status"], contract, rows)
+            removed_runs = [("runSummaryV2", identifier, stamp) for identifier, stamp in histories if identifier == removed]
+            require(snapshot(node, bindings, contract, removed_runs) == {key: before[key] for key in
+                (json.dumps([kind, identifier, stamp]) for kind, identifier, stamp in removed_runs)},
+                "A status deletion changed the separate retained run records")
+        changed = sorted(expected)[0]
         # Exercise the unchanged default retention policy through actual runs.
         for _ in range(101):
             cli(args, binary, node, home, "run", changed, "--quiet")
@@ -312,6 +334,9 @@ def arm(args, Node, finish_setup, contract, label, pair):
         require(snapshot(node, bindings, contract, [("runSummaryV2", identifier, stamp) for identifier, stamp in selected]) == retained,
             "Run-retention values or atoms differ after the second actual reopen")
         save(output / "retention-atoms.json", retained)
+        if label == "candidate":
+            require(snapshot(node, bindings, contract, copied) == {key: value for key, value in before.items() if json.loads(key)[0] == "fleetStatus"},
+                "A primary deletion, run retention, or reopen changed the retained copied history")
         save(output / "samples.json", samples)
         result = {"label": label, "pair": pair, "samples": samples, "same_engine_samples": same_engine_samples, "volume": volume,
             "initial_logical_records": len(before), "posture": "unknown: real ENOENT from explicit absent dependency",
@@ -343,8 +368,8 @@ def main():
     sys.path.insert(0, str(args.lastdb_source / "scripts/benchmarks"))
     from node import Node, file_hash
     from app_multi_key_compare import finish_setup
-    source = '''import {SCHEMAS,canonicalDefinition,fieldRules} from "./src/status-schema.ts";
-console.log(JSON.stringify(Object.fromEntries(Object.keys(SCHEMAS).map(key=>[key,{definition:canonicalDefinition(key),field_map:Object.fromEntries(Object.entries(fieldRules(key)).map(([field,[name]])=>[field,name]))}]))));'''
+    source = '''import {SCHEMAS,canonicalDefinition,definitionIdentity,fieldRules} from "./src/status-schema.ts";
+console.log(JSON.stringify(Object.fromEntries(Object.keys(SCHEMAS).map(key=>[key,{identity:definitionIdentity(canonicalDefinition(key)),definition:canonicalDefinition(key),field_map:Object.fromEntries(Object.entries(fieldRules(key)).map(([field,[name]])=>[field,name]))}]))));'''
     contract = json.loads(subprocess.check_output(["bun", "--eval", source], cwd=args.candidate, text=True))
     summary = {"complete": False, "candidate_revision": args.candidate_revision,
         "daemon_before_revision": args.daemon_before_revision, "daemon_after_revision": args.daemon_after_revision,

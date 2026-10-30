@@ -57,6 +57,14 @@ jobs:
             --candidate "$GITHUB_WORKSPACE/candidate" --output "$RUNNER_TEMP/routines-results/source"
           printf 'Candidate %s\nControl base %s\nCompatible engine %s\nRemoval engine %s\n' \
             "$APP_AFTER" "$APP_BEFORE" "$DAEMON_BEFORE" "$DAEMON_AFTER" > "$RUNNER_TEMP/routines-results/source/revisions.txt"
+      - name: Typecheck the actual app and patched control before definition admission
+        run: |
+          set -euo pipefail
+          for label in control candidate; do
+            cd "$GITHUB_WORKSPACE/$label"
+            bun install --frozen-lockfile
+            bunx tsc --noEmit
+          done
       - name: Require all exact real published definitions before the build
         run: |
           bun candidate/scripts/fleet-schema-definitions.mjs "$GITHUB_WORKSPACE/control" "$GITHUB_WORKSPACE/candidate" \
@@ -82,8 +90,6 @@ jobs:
           done
           for label in control candidate; do
             cd "$GITHUB_WORKSPACE/$label"
-            bun install --frozen-lockfile
-            bunx tsc --noEmit
             bun build src/cli.ts --compile --outfile "$RUNNER_TEMP/routines-binaries/$label"
           done
           cd "$RUNNER_TEMP/routines-binaries"
