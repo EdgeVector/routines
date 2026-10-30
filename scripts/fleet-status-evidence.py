@@ -17,7 +17,7 @@ def main():
     files = []
     # Three fixed levels: source files, measurement summary, and arm files.
     for first in root.iterdir():
-        if first.is_symlink() or not first.is_dir() or first.name not in ("source", "measurements"):
+        if first.is_symlink() or not first.is_dir() or first.name not in ("source", "measurements", "registration"):
             raise RuntimeError("An unexpected retained root entry exists")
         for second in first.iterdir():
             if second.is_symlink():

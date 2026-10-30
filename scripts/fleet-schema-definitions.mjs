@@ -2,10 +2,13 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
-const [control, candidate, output] = process.argv.slice(2);
-if (process.env.GITHUB_ACTIONS !== "true" || !control || !candidate || !output) {
+const [control, candidate, lastdbSource, output] = process.argv.slice(2);
+const environment = process.env.ROUTINES_SCHEMA_ENV;
+if (process.env.GITHUB_ACTIONS !== "true" || !control || !candidate || !lastdbSource || !output || !["dev", "prod"].includes(environment)) {
   throw Error("Use this read-only definition check in CI with exact source paths and an output path");
 }
+const endpoints = JSON.parse(readFileSync(join(resolve(lastdbSource), "folddb_profile/environments.json"), "utf8"));
+const service = endpoints.environments[environment].schema_service;
 const controlRules = readFileSync(join(resolve(control), "src/status-schema.ts"));
 const candidateRules = readFileSync(join(resolve(candidate), "src/status-schema.ts"));
 if (!controlRules.equals(candidateRules)) throw Error("The two arms do not use the same canonical vocabulary");
@@ -16,7 +19,7 @@ const same = (a, b) => JSON.stringify(stable(a)) === JSON.stringify(stable(b));
 const results = await Promise.all(Object.keys(SCHEMAS).map(async key => {
   const schema = canonicalDefinition(key), identity = definitionIdentity(schema);
   try {
-    const response = await fetch(`https://axo709qs11.execute-api.us-east-1.amazonaws.com/v1/schema/${identity}`, {
+    const response = await fetch(`${service}/v1/schema/${identity}`, {
       signal: AbortSignal.timeout(60000),
     });
     const raw = await response.json(), body = raw.data ?? raw, stored = body.schema ?? body;
@@ -33,6 +36,6 @@ const results = await Promise.all(Object.keys(SCHEMAS).map(async key => {
   }
 }));
 const complete = results.length === 6 && results.every(item => item.exact_definition);
-writeFileSync(output, JSON.stringify({ complete, definitions: results }, null, 2) + "\n");
+writeFileSync(output, JSON.stringify({ complete, environment, service, definitions: results }, null, 2) + "\n");
 for (const { response, ...result } of results) console.log(JSON.stringify(result));
 if (!complete) throw Error("The exact six Routines definitions must pass normal publication before build or measurement");

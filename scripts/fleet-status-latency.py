@@ -205,6 +205,30 @@ def measure(args, binary, node, home, expected):
     return samples, rows
 
 
+def register_definitions(args, Node):
+    require(args.schema_environment == "dev", "Only DEV permits normal account-free registration; PROD uses the registered publisher")
+    node = Node(args.daemon_before, args.daemon_before_revision, args.output,
+        temporary_directory=Path(os.environ["RUNNER_TEMP"]).resolve(), environment={"ENVIRONMENT": "dev", "EXEMEM_ENV": "dev",
+            "LASTDB_SELF_METRICS_TO_DB": "false", "LASTDB_BYTE_BACKUP_V2_ENABLED": "false", "LASTDB_TTL_SWEEP": "0"})
+    try:
+        node.start()
+        cloud_off(node, "registration")
+        home = node.root / "routines"
+        (home / "registry").mkdir(parents=True)
+        # Exact main has no separate init command. Its normal publisher declares
+        # all six real record types, under this one normal CI node identity.
+        # An empty actual registry is admission work, never a latency/data proof.
+        result, _ = call_json(args, args.control_binary, node, home, "publish-status")
+        publication(result, set())
+        require(len(set(result["schemaHashes"].values())) == 6, "The normal publisher did not declare six distinct schemas")
+        cloud_off(node, "registered")
+        save(args.output / "registration.json", {"scope": "DEV normal six-definition admission only; no latency or migration proof",
+            "environment": "dev", "schema_hashes": result["schemaHashes"], "actual_registry_records": 0,
+            "posture": "unknown: real ENOENT", "cloud_sync": "off", "identity_rotated_on_failure": False})
+    finally:
+        node.close()
+
+
 def arm(args, Node, finish_setup, contract, label, pair):
     output = args.output / f"pair-{pair}-{label}"
     output.mkdir()
@@ -212,7 +236,8 @@ def arm(args, Node, finish_setup, contract, label, pair):
     binary = args.candidate_binary if label != "control" else args.control_binary
     daemon, revision = (args.daemon_after, args.daemon_after_revision) if fresh else (args.daemon_before, args.daemon_before_revision)
     node = Node(daemon, revision, output, temporary_directory=Path(os.environ["RUNNER_TEMP"]).resolve(),
-        environment={"LASTDB_SELF_METRICS_TO_DB": "false", "LASTDB_BYTE_BACKUP_V2_ENABLED": "false", "LASTDB_TTL_SWEEP": "0"})
+        environment={"ENVIRONMENT": args.schema_environment, "EXEMEM_ENV": args.schema_environment,
+            "LASTDB_SELF_METRICS_TO_DB": "false", "LASTDB_BYTE_BACKUP_V2_ENABLED": "false", "LASTDB_TTL_SWEEP": "0"})
     try:
         node.start()
         cloud_off(node, "start")
@@ -361,6 +386,8 @@ def main():
         parser.add_argument("--" + name, required=True)
     parser.add_argument("--records", type=int, default=256)
     parser.add_argument("--samples", type=int, default=20)
+    parser.add_argument("--schema-environment", choices=("dev", "prod"), required=True)
+    parser.add_argument("--register-definitions-only", action="store_true")
     args = parser.parse_args()
     require(os.environ.get("GITHUB_ACTIONS") == "true", "This operational comparison runs only in hosted CI")
     require(128 <= args.records <= 4096 and 16 <= args.samples <= 100, "The comparison volume or sample count is outside its finite bound")
@@ -368,10 +395,13 @@ def main():
     sys.path.insert(0, str(args.lastdb_source / "scripts/benchmarks"))
     from node import Node, file_hash
     from app_multi_key_compare import finish_setup
+    if args.register_definitions_only:
+        register_definitions(args, Node)
+        return
     source = '''import {SCHEMAS,canonicalDefinition,definitionIdentity,fieldRules} from "./src/status-schema.ts";
 console.log(JSON.stringify(Object.fromEntries(Object.keys(SCHEMAS).map(key=>[key,{identity:definitionIdentity(canonicalDefinition(key)),definition:canonicalDefinition(key),field_map:Object.fromEntries(Object.entries(fieldRules(key)).map(([field,[name]])=>[field,name]))}]))));'''
     contract = json.loads(subprocess.check_output(["bun", "--eval", source], cwd=args.candidate, text=True))
-    summary = {"complete": False, "candidate_revision": args.candidate_revision,
+    summary = {"complete": False, "schema_environment": args.schema_environment, "candidate_revision": args.candidate_revision,
         "daemon_before_revision": args.daemon_before_revision, "daemon_after_revision": args.daemon_after_revision,
         "control": json.loads(args.control_source.read_text()), "records": args.records, "samples_per_operation_per_arm": args.samples,
         "scope": "publication/lookup with the real posture dependency absent; patched-main control; no generic-field migration proof",
@@ -391,7 +421,7 @@ console.log(JSON.stringify(Object.fromEntries(Object.keys(SCHEMAS).map(key=>[key
                     new = statistics.median(percentile(arm[selected][operation], fraction) for arm in after)
                     rows.append({"comparison": comparison, "operation": operation, "percentile": name, "before_ms": old, "after_ms": new, "change_percent": (new / old - 1) * 100})
         summary["rows"], summary["complete"] = rows, True
-        lines = ["## Routines publication and lookup latency", "", summary["scope"], "",
+        lines = ["## Routines publication and lookup latency", "", f"Schema service environment: {args.schema_environment}.", "", summary["scope"], "",
             "Both balanced orders and a fresh owned-schema arm passed actual CLI operations. Cloud sync stayed off.",
             "The compatible engine seeded both arms. The candidate converted all six record types before the removal-engine reopen.",
             "The control retains main's serial flow and copied status records after the explicit vocabulary/transport patch.",
