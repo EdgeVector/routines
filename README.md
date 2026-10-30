@@ -244,6 +244,7 @@ routines pause|resume <id>    # toggle status
 routines route <id> --harness codex --model gpt-5.5
 routines route <id> --harness grok --model grok-4.5
 routines logs <id>            # recent runs (--path, --tail, --json)
+routines init-status          # explicit setup; convert-status-schemas preserves existing values
 routines publish-status       # publish slim fleet status + recent run summaries to LastDB
 routines read-status          # read and validate the bounded fleet view
 routines deliver-status       # publish + stage/admin-approve a fleet-status delivery
@@ -395,50 +396,79 @@ The JSON API (for scripting): `GET /api/routines`, `GET /api/routines/<id>/runs`
 
 ## LastDB fleet status publish
 
-`routines publish-status` writes a bounded fleet view to the local LastDB Mini
-socket. It reuses `collectStatus()` and `listRuns()`, declares the app-owned
-schemas, and writes:
+The publisher uses three schema-owned record types:
 
-- `routines/RoutineStatus` key `<routine id>`, only when its content changes
-- `routines/FleetRoutineStatusV2` in 16 stable hash buckets through explicit writes
-- `routines/RoutineRunSummaryV2` key `<routine id>, <run stamp>`, once per run
-- `routines/FleetSummary` key `routines`, last as the publication marker
+- `RoutineStatus` owns one status record for each routine identifier.
+- Its named `by_fleet` alternate key uses the existing fleet bucket and ordered status key.
+- `RoutineRunSummaryV2` owns separate run records by routine identifier and run stamp.
+- `FleetSummary` owns the fleet counts and digest. The publisher writes this record last.
 
-The publisher intentionally excludes prompts and full logs. Recent run evidence
-is capped (`--tail-bytes`, default 2048) and common secret-looking assignments
-are redacted before write.
+Canonical field reuse supplies field definitions and types. Each schema owns its values.
+The publisher does not copy status payloads into a second fleet schema.
+The native status mutation updates the primary key and alternate key together.
+The 16 bucket keys and the status, display-group, identifier range order stay the same.
 
-`FleetRoutineStatusV2` has `schema_layout_version=1`. The marker keeps its
-HashRange physical layout separate from the Hash-keyed `RoutineStatus` records.
-The publisher sends separate writes to both schemas when their content changes.
-The fleet summary follows those writes and supplies the publication marker.
+The request flow is explicit:
 
-Canonical field reuse supplies definitions and types. It does not establish
-shared record values across schemas. A native multi-key conversion remains
-separate work; this documentation change does not convert stored data.
+1. Read the saved schema bindings. Ordinary reads and writes never declare schemas.
+2. Capture the actual registry and run history. Refuse an incomplete registry.
+3. Read current status records and all fleet buckets through native batch requests.
+4. Batch changed status records and stale primary deletions, with checks against the observed publication time.
+5. Batch new run records and bounded retention deletions.
+6. Write the fleet summary last. The reader checks this marker twice, full membership, and both record and fleet digests.
+
+One config lock covers capture through the final marker, setup, and conversion.
+The lock belongs to the Routines schema config. It does not reserve a build slot.
+A stale lock requires owner review. The app does not kill its owner.
+
+The publisher excludes prompts and full logs.
+Recent run output has a 2048-byte default cap and common secret assignments are redacted.
+Status and run records have an 8192-byte serialized cap, including canonical field names.
+The fleet summary has a 4096-byte cap.
+
+### Setup and existing values
+
+CAUTION: Existing values require the compatible conversion release before the engine removal upgrade.
+The primary-reset restrictions remain in force. These commands do not authorize a primary change.
+
+Fresh setup declares only the three active schemas and saves their exact identities and runtime addresses.
+Definitions must already exist in schema service under the registered app owner.
+Generic historical field names do not pass the current canonical-name policy.
+The source declares precise canonical names and preserves the original String field types.
 
 ```sh
+routines init-status --dry-run --json    # export the six published definitions, without a node request
+routines init-status --json              # fresh setup only
+routines convert-status-schemas          # inspect the exact existing-value conversion
+routines convert-status-schemas --apply --maintenance
 routines publish-status --json
-routines publish-status --runs 5 --tail-bytes 2048
-routines publish-status --dry-run --json
-routines publish-status --clear-legacy-snapshot
 routines read-status --json
 ```
 
-### Fleet physical-map repair
+`ROUTINES_STATUS_SCHEMA_CONFIG` selects the config path.
+The default is `ROUTINES_HOME/state/status-schemas.json`.
+The explicit conversion requires `app_schema_conversion_v1` and `app_schema_field_mapping_v1`.
+It saves the exact source identities, field maps, membership fields, target identities, and alternate keys before the node request pause.
+It resumes only the same durable operation and publishes the config before requests resume.
+It checks complete selected membership and preserves values, atom identities, authors, metadata, runtime addresses, and primary coordinates.
+Field maps rename fields through published definitions. They never coerce values or infer record correspondence.
 
-`FleetRoutineStatusV2` is a new HashRange schema identity. It does not reuse
-the polluted `routines/FleetRoutineStatus` physical map. Do not drop V2 during
-the repair. The old schema remains only as historical data and is not read or
-written by this version.
+The conversion retains every installed, reviewed historical record type with schema-owned values:
+`RoutineFleetSnapshot`, `RoutineRunSummary`, and the old copied `FleetRoutineStatusV2` payloads.
+Their old primary layouts remain available, but the current publisher and fleet reader do not use those payloads.
+The conversion does not retire or delete any historical schema or infer that equal payloads permit deletion.
+An unknown older schema, including the polluted `FleetRoutineStatus` layout, requires a separate explicit owner review.
+Fresh setup does not create historical schemas.
 
-CAUTION: Use the primary socket only after the deployment uses this version.
-Do not restart LastDB. Do not write a bulk `rows_json` snapshot.
+### Validation scope
 
-The [September repair record](https://github.com/EdgeVector/routines/blob/982fa5ef93c3f48a90c44280e37ea912b11700a5/README.md#fleet-physical-map-repair)
-describes an earlier deployment. Its observations do not prove the current
-primary state. The primary-reset restrictions in the workspace instructions
-remain in force. Use the current non-test CI checks for source validation.
+Source syntax and type checks do not prove the running app.
+The merge requires CI product operations, a valid latency comparison, and verified CI artifacts.
+A comparison with an absent posture dependency must retain the real ENOENT error and unknown posture in both arms.
+Such a result measures publication and lookup latency with that dependency absent.
+It does not prove nominal live posture collection, and no posture gate is changed.
+Cloud sync stays off for CI nodes.
+A baseline that fails schema admission supplies no before latency and cannot count as a passing comparison.
 
 ## Admin fleet status deliver
 
@@ -449,13 +479,14 @@ remain in force. Use the current non-test CI checks for source validation.
 - `routines/FleetSummary` key `routines`
 - explicit `routines/RoutineStatus` ids from the bounded reader
 
-Do not deliver `FleetRoutineStatusV2` HashRange buckets. A live 72-row fleet
-still sealed at about 118 KiB per bucket page.
+The delivery uses the returned primary identifiers from the complete alternate-key read.
+Historical copied status payloads do not form part of the delivery.
 
 A rollback read needs both `--legacy-view` and an ISO deadline in
 `ROUTINES_FLEET_LEGACY_READ_UNTIL`. The deadline must be within seven days.
-Remove this path after the live bounded-view proof and the legacy snapshot
-clear. The normal publisher never writes `RoutineFleetSnapshot`.
+This path reads retained historical data. The normal publisher never writes `RoutineFleetSnapshot`.
+An explicit `--clear-legacy-snapshot` request clears only that snapshot payload.
+Schema conversion never requests that deletion.
 
 Recipient keys are operational inputs, not repository config. Pass them as
 flags or environment variables; do not commit them:

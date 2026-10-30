@@ -2,9 +2,7 @@
 //
 // The registry, run logs, locks, and per-routine state all live under a single
 // home directory. It defaults to ~/.routines but is overridable via
-// ROUTINES_HOME so tests and the e2e can run against a throwaway directory
-// without ever touching the real registry (same isolation discipline the
-// fkanban-agent skill requires for stateful checks).
+// ROUTINES_HOME for an explicit independent registry and its own run state.
 
 import { homedir } from "node:os";
 import { join } from "node:path";

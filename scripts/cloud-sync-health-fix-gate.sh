@@ -109,21 +109,11 @@ if [ "$(remaining)" -lt "$RESERVE_SEC" ]; then
   flush_timeout_partial "budget-exhausted-before-probe"
 fi
 
-# Fixture / dry path: inject status text without calling lastdb.
-status_text=""
-status_rc=0
-if [ -n "${CLOUD_SYNC_HEALTH_FIX_STATUS_FILE:-}" ] && [ -f "$CLOUD_SYNC_HEALTH_FIX_STATUS_FILE" ]; then
-  status_text="$(cat "$CLOUD_SYNC_HEALTH_FIX_STATUS_FILE")"
-  status_rc=0
-elif [ -n "${CLOUD_SYNC_HEALTH_FIX_STATUS_TEXT:-}" ]; then
-  status_text="$CLOUD_SYNC_HEALTH_FIX_STATUS_TEXT"
-  status_rc=0
-else
-  set +e
-  status_text="$(run_with_timeout "$STATUS_TIMEOUT_SEC" lastdb status 2>&1)"
-  status_rc=$?
-  set -e
-fi
+# A health result comes from the actual node command.
+set +e
+status_text="$(run_with_timeout "$STATUS_TIMEOUT_SEC" lastdb status 2>&1)"
+status_rc=$?
+set -e
 
 if [ "$status_rc" -eq 124 ] || [ "$status_rc" -eq 137 ]; then
   flush_timeout_partial "status-probe-timeout" "status_rc=${status_rc}"
