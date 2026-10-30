@@ -103,7 +103,8 @@ export function newLastDbPublisherClient(opts: LastDbClientOptions = {}): LastDb
       }
       reply.results.forEach((item, index) => {
         const result = object(item), read = batch[index]!;
-        if (result.status !== 200) throw new LastDbPublishError("key_read_failed", "A fleet key read failed.");
+        if (result.status !== 200) throw new LastDbPublishError("key_read_failed", `A fleet key read failed (HTTP ${result.status}).`,
+          { status: typeof result.status === "number" ? result.status : 0, body: result.response });
         const page = object(result.response), resultRows = rows(page);
         if (page.has_more !== false || resultRows.length > 1 || resultRows.some((row) =>
           row.hash !== read.keyHash || row.range !== (read.keyRange ?? null))) {
@@ -131,7 +132,8 @@ export function newLastDbPublisherClient(opts: LastDbClientOptions = {}): LastDb
         const next: typeof pending = [];
         reply.results.forEach((item, index) => {
           const result = object(item), query = pending[index]!, { read } = query;
-          if (result.status !== 200) throw new LastDbPublishError("hash_read_failed", "A fleet hash read failed.");
+          if (result.status !== 200) throw new LastDbPublishError("hash_read_failed", `A fleet hash read failed (HTTP ${result.status}).`,
+            { status: typeof result.status === "number" ? result.status : 0, body: result.response });
           const response = object(result.response);
           for (const row of rows(response)) {
             const address = read.keyName ? row.matched : { hash: row.hash, range: row.range };

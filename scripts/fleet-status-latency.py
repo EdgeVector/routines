@@ -86,6 +86,18 @@ def cli(args, binary, node, home, verb, *flags, allow_failure=False):
         stream.write(json.dumps({"verb": verb, "elapsed_ms": elapsed, "exit_code": result.returncode}) + "\n")
     if result.returncode:
         (node.output / f"failed-{verb}.stderr").write_text(result.stderr[:65536])
+        if verb == "read-status":
+            # Repeat only the actual failed read on the same owned live node.
+            # Keep its real batch item statuses before normal cleanup; no data changes.
+            try:
+                configured = json.loads((home / "state/status-schemas.json").read_text())
+                queries = [{"schema_name": configured["schemas"]["status"]["runtime"],
+                    "fields": args.contract["status"]["definition"]["fields"], "filter": {"HashKey": f"routines#{bucket:02x}"},
+                    "key_name": "by_fleet", "limit": 128} for bucket in range(16)]
+                save(node.output / "failed-native-read.json", {"queries": queries, "actual_reply": node.call("/api/queries/batch", {"queries": queries})[0]})
+                save(node.output / "failed-read-node-status.json", node.call("/api/status")[0])
+            except Exception as error:
+                save(node.output / "failed-native-read-diagnostic.json", {"error": str(error)})
     require(result.returncode == 0 or allow_failure, f"Actual Routines {verb} failed; see its retained error")
     return result, elapsed
 
