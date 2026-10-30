@@ -77,6 +77,7 @@ export const RUN_SUMMARY_FIELDS = [
 export const ROUTINES_APP_ID = "routines";
 export const ROUTINES_FLEET_ID = "routines";
 export const FLEET_STATUS_BUCKET_COUNT = 16;
+export const FLEET_ALTERNATE = { hashField: "fleet_bucket", rangeFields: ["status", "group_id", "id"] } as const;
 export const ROUTINE_STATUS_MAX_BYTES = 8 * 1024;
 export const LAST_OUTCOME_DETAIL_MAX_BYTES = 1024;
 export const FLEET_SUMMARY_MAX_BYTES = 4 * 1024;
@@ -241,8 +242,8 @@ export function canonicalDefinition(key: KeptSchemaKey): SchemaDefinition {
     field_data_classifications: Object.fromEntries(source.fields.map((field) => [name(field), source.field_data_classifications[field]!])),
     independent_fields: true,
     alternate_keys: key === "status" ? {
-      by_fleet: { hash_field: name("fleet_bucket"), range_field: null, range_separator: "#",
-        range_parts: ["status", "group_id", "id"].map((field) => ({ field: name(field), format: "text" })), missing: "reject" },
+      by_fleet: { hash_field: name(FLEET_ALTERNATE.hashField), range_field: null, range_separator: "#",
+        range_parts: FLEET_ALTERNATE.rangeFields.map((field) => ({ field: name(field), format: "text" })), missing: "reject" },
     } : {},
   };
 }

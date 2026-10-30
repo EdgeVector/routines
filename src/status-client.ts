@@ -1,7 +1,8 @@
 /** Native owner-socket requests for fleet status. No schema declarations on reads or writes. */
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { fieldRules, localFields, wireFields, type KeptSchemaKey, type SchemaDefinition } from "./status-schema.ts";
+import { writeFileSync } from "node:fs";
+import { FLEET_ALTERNATE, SCHEMAS, fieldRules, localFields, wireFields, type KeptSchemaKey, type SchemaDefinition } from "./status-schema.ts";
 
 export type FieldMap = Record<string, string>;
 export type SchemaProfile = { key: KeptSchemaKey; canonical: boolean };
@@ -38,6 +39,22 @@ type FetchInit = RequestInit & { unix?: string };
 type LastDbFetch = (input: Parameters<typeof globalThis.fetch>[0], init?: FetchInit) => Promise<Response>;
 type LastDbClientOptions = { socketPath?: string; nodeUrl?: string; fetchImpl?: LastDbFetch };
 const BATCH_SIZE = 64;
+const READ_WORK_KEYS = 10_000;
+
+function hashReadPageLimit(reads: readonly HashRead[]): number {
+  // Core charges selected addresses and each field's tip/atom work to ONE
+  // batch budget. Keep half of that budget for probes, selectors and metadata.
+  // The native reader also loads its alternate fields to validate each address.
+  const keysPerRecord = reads.reduce((sum, read) => {
+    const fields = new Set(read.fields);
+    if (read.keyName) {
+      fields.add(FLEET_ALTERNATE.hashField);
+      for (const field of FLEET_ALTERNATE.rangeFields) fields.add(field);
+    }
+    return sum + 1 + 2 * fields.size;
+  }, 0);
+  return Math.max(1, Math.min(128, Math.floor((READ_WORK_KEYS / 2) / keysPerRecord)));
+}
 
 export function object(value: unknown): Entry {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new LastDbPublishError("bad_reply", "LastDB returned an invalid object.");
@@ -121,9 +138,12 @@ export function newLastDbPublisherClient(opts: LastDbClientOptions = {}): LastDb
       let pending = reads.slice(start, start + BATCH_SIZE).map((read, index) => ({ read, index: start + index, cursor: undefined as unknown }));
       const seen = new Map<number, Set<string>>();
       const primaryKeys = new Map<number, Set<string>>();
-      for (let page = 0; pending.length && page < 1000; page++) {
+      const maxPages = 1 + Math.max(...pending.map(({ read }) => read.maxRows));
+      for (let page = 0; pending.length && page < maxPages; page++) {
+        const limit = hashReadPageLimit(pending.map(({ read }) => ({ ...read,
+          fields: read.fields.length ? read.fields : SCHEMAS[selected(read.schemaHash).key].fields })));
         const reply = dataObject(await request("POST", "/api/queries/batch", { queries: pending.map(({ read, cursor }) => ({
-          schema_name: read.schemaHash, fields: names(read.schemaHash, read.fields), filter: { HashKey: read.keyHash }, limit: 128,
+          schema_name: read.schemaHash, fields: names(read.schemaHash, read.fields), filter: { HashKey: read.keyHash }, limit,
           ...(read.keyName ? { key_name: read.keyName } : {}), ...(cursor === undefined ? {} : { cursor }),
         })) }));
         if (reply.count !== pending.length || !Array.isArray(reply.results) || reply.results.length !== pending.length) {
@@ -243,9 +263,36 @@ function newLastDbJsonCaller(opts: LastDbClientOptions) {
     let parsed: unknown;
     try { parsed = JSON.parse(text); }
     catch { parsed = text; }
+    recordReadPages(path, body, parsed, response.status);
     if (!response.ok) {
       throw new LastDbPublishError(`lastdb_http_${response.status}`, `LastDB ${method} ${path} returned HTTP ${response.status}.`, { status: response.status, body: parsed });
     }
     return parsed;
   };
+}
+
+// Explicit operator diagnostics contain selectors and page metadata, never values.
+// The same transport records the patched control's ordinary range pages in CI.
+function recordReadPages(path: string, body: unknown, reply: unknown, status: number): void {
+  const file = process.env.ROUTINES_STATUS_READ_TRACE_FILE;
+  if (!file || (path !== "/api/query" && path !== "/api/queries/batch")) return;
+  const entry = (value: unknown): Record<string, unknown> => value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown> : {};
+  const request = entry(body), envelope = entry(reply), result = entry(envelope.data ?? envelope);
+  if (path === "/api/queries/batch" && (!Array.isArray(request.queries) || !Array.isArray(result.results))) return;
+  const queries = path === "/api/queries/batch" && Array.isArray(request.queries) ? request.queries : [request];
+  const replies = path === "/api/queries/batch" && Array.isArray(result.results) ? result.results : [{ status, response: result }];
+  const pages = queries.flatMap((value, index) => {
+    if (index >= replies.length) return [];
+    const query = entry(value), item = entry(replies[index]), page = entry(item.response);
+    if (!query.key_name && !(typeof query.limit === "number" && query.limit > 2)) return [];
+    return [{ call_id: process.env.ROUTINES_STATUS_READ_TRACE_ID ?? String(process.pid),
+      schema: query.schema_name, key_name: query.key_name ?? "primary", filter: query.filter,
+      fields: query.fields, limit: query.limit, offset: query.offset ?? 0, cursor: query.cursor ?? null,
+      status: item.status ?? null, returned_count: page.returned_count ?? (Array.isArray(page.results) ? page.results.length : null),
+      has_more: page.has_more ?? null, next_cursor: page.next_cursor ?? null,
+      unresolved_rows: page.unresolved_rows ?? null, tombstoned_rows: page.tombstoned_rows ?? null,
+      error: typeof page.error === "string" ? page.error : null }];
+  });
+  if (pages.length) writeFileSync(file, pages.map((page) => JSON.stringify(page) + "\n").join(""), { flag: "a", mode: 0o600 });
 }

@@ -75,15 +75,28 @@ def cli(args, binary, node, home, verb, *flags, allow_failure=False):
         and key not in ("GH_TOKEN", "GITHUB_TOKEN", "ANTHROPIC_API_KEY", "OPENAI_API_KEY")}
     absent = node.root / "posture-dependency-absent"
     require(not absent.exists(), "The explicitly absent posture dependency unexpectedly exists")
+    trace = node.output / "read-pages.jsonl"
+    trace_offset = trace.stat().st_size if trace.exists() else 0
+    call_id = f"{verb}-{time.perf_counter_ns()}"
     environment.update(ROUTINES_HOME=str(home), ROUTINES_LASTDB_SOCKET=str(node.socket),
         ROUTINES_STATUS_SCHEMA_CONFIG=str(home / "state/status-schemas.json"),
-        ROUTINES_SITUATIONS_CLI=str(absent), LASTDB_SUPPRESS_RECOVERY_PHRASE="1")
+        ROUTINES_SITUATIONS_CLI=str(absent), LASTDB_SUPPRESS_RECOVERY_PHRASE="1",
+        ROUTINES_STATUS_READ_TRACE_FILE=str(trace), ROUTINES_STATUS_READ_TRACE_ID=call_id)
     started = time.perf_counter_ns()
     result = subprocess.run([str(binary), verb, *flags], cwd=home, env=environment,
         capture_output=True, text=True, timeout=180)
     elapsed = (time.perf_counter_ns() - started) / 1e6
+    pages = []
+    if trace.exists():
+        with trace.open() as stream:
+            stream.seek(trace_offset)
+            pages = [json.loads(line) for line in stream if line.strip()]
+        require(all(page["call_id"] == call_id for page in pages), "The actual per-page evidence belongs to another CLI call")
     with (node.output / "commands.jsonl").open("a") as stream:
-        stream.write(json.dumps({"verb": verb, "elapsed_ms": elapsed, "exit_code": result.returncode}) + "\n")
+        stream.write(json.dumps({"verb": verb, "call_id": call_id, "elapsed_ms": elapsed, "exit_code": result.returncode,
+            "hash_pages": len(pages), "continued_hash_pages": sum(page["cursor"] is not None or page["offset"] != 0 for page in pages),
+            "page_statuses": sorted({page["status"] for page in pages if isinstance(page["status"], int)}),
+            "pages_without_status": sum(page["status"] is None for page in pages)}) + "\n")
     if result.returncode:
         (node.output / f"failed-{verb}.stderr").write_text(result.stderr[:65536])
         if verb == "read-status":
@@ -91,9 +104,10 @@ def cli(args, binary, node, home, verb, *flags, allow_failure=False):
             # Keep its real batch item statuses before normal cleanup; no data changes.
             try:
                 configured = json.loads((home / "state/status-schemas.json").read_text())
+                limit = max(1, min(128, 5000 // (16 * (1 + 2 * len(args.contract["status"]["definition"]["fields"])))))
                 queries = [{"schema_name": configured["schemas"]["status"]["runtime"],
                     "fields": args.contract["status"]["definition"]["fields"], "filter": {"HashKey": f"routines#{bucket:02x}"},
-                    "key_name": "by_fleet", "limit": 128} for bucket in range(16)]
+                    "key_name": "by_fleet", "limit": limit} for bucket in range(16)]
                 save(node.output / "failed-native-read.json", {"queries": queries, "actual_reply": node.call("/api/queries/batch", {"queries": queries})[0]})
                 save(node.output / "failed-read-node-status.json", node.call("/api/status")[0])
             except Exception as error:
@@ -539,6 +553,8 @@ console.log(JSON.stringify(Object.fromEntries(Object.keys(SCHEMAS).map(key=>[key
             "Both balanced orders and a fresh owned-schema arm passed actual CLI operations. Cloud sync stayed off.",
             "The compatible engine seeded both arms. The candidate converted all six record types before the removal-engine reopen.",
             "The control retains main's serial flow and copied status records after the explicit vocabulary/transport patch.",
+            "Both arms use the same optional page trace. Latency includes the trace cost and every cursor page.",
+            "read-pages.jsonl retains actual page statuses/selectors/cursors; commands.jsonl links each CLI call to its page count and elapsed time.",
             "Current atoms, actual author metadata (including unsigned/unset state), optional field absence/null, values, complete membership, native order, deletion, retention, and reopen checks passed.",
             "The legacy control writes unsigned records. This cohort does not establish signed-author preservation.",
             "This does not prove nominal live posture collection, invalid generic-name conversion, or recipient delivery.", "",
