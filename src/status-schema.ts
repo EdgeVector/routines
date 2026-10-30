@@ -310,4 +310,3 @@ function hashRangeSchema(
     key: { hash_field: hashField, range_field: rangeField },
   };
 }
-
