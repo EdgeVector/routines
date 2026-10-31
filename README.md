@@ -244,7 +244,7 @@ routines pause|resume <id>    # toggle status
 routines route <id> --harness codex --model gpt-5.5
 routines route <id> --harness grok --model grok-4.5
 routines logs <id>            # recent runs (--path, --tail, --json)
-routines init-status          # explicit setup; convert-status-schemas preserves existing values
+routines init-status          # explicit setup of the schema-owned fleet definitions
 routines publish-status       # publish slim fleet status + recent run summaries to LastDB
 routines read-status          # read and validate the bounded fleet view
 routines deliver-status       # publish + stage/admin-approve a fleet-status delivery
@@ -417,7 +417,7 @@ The request flow is explicit:
 5. Batch new run records and bounded retention deletions.
 6. Write the fleet summary last. The reader checks this marker twice, full membership, and both record and fleet digests.
 
-One config lock covers capture through the final marker, setup, and conversion.
+One config lock covers setup and each publication, from capture through the final marker.
 The lock belongs to the Routines schema config. It does not reserve a build slot.
 A stale lock requires owner review. The app does not kill its owner.
 
@@ -426,9 +426,8 @@ Recent run output has a 2048-byte default cap and common secret assignments are 
 Status and run records have an 8192-byte serialized cap, including canonical field names.
 The fleet summary has a 4096-byte cap.
 
-### Setup and existing values
+### Setup
 
-CAUTION: Existing values require the compatible conversion release before the engine removal upgrade.
 The primary-reset restrictions remain in force. These commands do not authorize a primary change.
 
 Fresh setup declares only the three active schemas and saves their exact identities and runtime addresses.
@@ -439,37 +438,25 @@ The source declares precise canonical names and preserves the original String fi
 ```sh
 routines init-status --dry-run --json    # export the six published definitions, without a node request
 routines init-status --json              # fresh setup only
-routines convert-status-schemas          # inspect the exact existing-value conversion
-routines convert-status-schemas --apply --maintenance
 routines publish-status --json
 routines read-status --json
 ```
 
 `ROUTINES_STATUS_SCHEMA_CONFIG` selects the config path.
 The default is `ROUTINES_HOME/state/status-schemas.json`.
-The explicit conversion requires `app_schema_conversion_v1`, `app_schema_field_mapping_v1`,
-`app_schema_alias_retirement_v1`, and `app_schema_private_mapper_conversion_v1`.
-It saves the exact source identities, field maps, membership fields, target identities, alternate keys, and explicit alias retirement scope before the node request pause.
-It resumes only the same durable operation and publishes the config before requests resume.
-It checks complete selected membership and preserves values, atom identities, authors, metadata, runtime addresses, and primary coordinates.
-Field maps rename fields through published definitions. They never coerce values or infer record correspondence.
-
-The conversion retains every installed, reviewed historical record type with schema-owned values:
-`RoutineFleetSnapshot`, `RoutineRunSummary`, and the old copied `FleetRoutineStatusV2` payloads.
-Their old primary layouts remain available, but the current publisher and fleet reader do not use those payloads.
-The conversion does not retire or delete any historical record type or infer that equal payloads permit deletion.
-An old alias can retire only when every field points to one selected source with the same complete physical molecule map.
-The engine repeats this exact-alias audit under its request pause before it permits retirement.
-An old mapper can convert only when its selected same-app source uses different keys and separate physical molecules.
-The engine checks the complete stored and runtime molecule maps, types, field identities, and current tips.
-Published definitions can retain historical mapper metadata; native local schemas never inherit that value authority.
-An unknown older schema, including the polluted `FleetRoutineStatus` layout, requires a separate explicit owner review.
-Fresh setup does not create historical schemas.
+Setup requires `owned_app_schemas_v1`, `independent_hash_range_v1`, and `compound_alternate_keys_v1`.
+Setup refuses an installed Routines schema that does not own its values.
+Setup refuses an unknown older schema, for example the `FleetRoutineStatus` layout, until an owner reviews it.
+The published definitions also keep three historical record types:
+`RoutineFleetSnapshot`, `RoutineRunSummary`, and `FleetRoutineStatusV2`.
+Fresh setup does not create them, and the current publisher and fleet reader do not use them.
 
 ### Validation scope
 
 Source syntax and type checks do not prove the running app.
 The merge requires CI product operations, a valid latency comparison, and verified CI artifacts.
+The comparison runs the base revision and the candidate on one engine build.
+Each arm starts from a fresh owned-schema home, and the two arms run in balanced orders.
 A comparison with an absent posture dependency must retain the real ENOENT error and unknown posture in both arms.
 Such a result measures publication and lookup latency with that dependency absent.
 It does not prove nominal live posture collection, and no posture gate is changed.
@@ -482,9 +469,8 @@ CI retains every page's selectors, status, cursor, count, and continuation. Each
 The comparison enables the same transport trace in both arms, so both latency samples include the trace cost.
 A baseline that fails schema admission supplies no before latency and cannot count as a passing comparison.
 The comparison records each field's present, absent, or null state and its actual current-tip metadata.
-An absent optional historical layout marker stays absent after conversion.
 It verifies complete primary membership and real per-field counts; it does not require an atom in every declared field.
-Legacy CLI writes in this cohort have unsigned or unset authors. Their exact author state must remain unchanged.
+CLI writes in this cohort have unsigned or unset authors. Their exact author state must stay the same after each reopen.
 This cohort does not establish signed-author preservation.
 
 ## Admin fleet status deliver
@@ -503,7 +489,6 @@ A rollback read needs both `--legacy-view` and an ISO deadline in
 `ROUTINES_FLEET_LEGACY_READ_UNTIL`. The deadline must be within seven days.
 This path reads retained historical data. The normal publisher never writes `RoutineFleetSnapshot`.
 An explicit `--clear-legacy-snapshot` request clears only that snapshot payload.
-Schema conversion never requests that deletion.
 
 Recipient keys are operational inputs, not repository config. Pass them as
 flags or environment variables; do not commit them:

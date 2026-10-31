@@ -93,7 +93,7 @@ export function newLastDbPublisherClient(opts: LastDbClientOptions = {}): LastDb
   let profiles: Record<string, SchemaProfile> = {};
   const selected = (schema: string) => {
     const profile = profiles[schema];
-    if (!profile) throw new LastDbPublishError("schema_not_configured", "Run init-status or resume the explicit schema conversion first.");
+    if (!profile) throw new LastDbPublishError("schema_not_configured", "Run init-status first.");
     return profile;
   };
   const names = (schema: string, fields: string[]) => {
