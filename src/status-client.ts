@@ -13,6 +13,8 @@ export type Mutation = { schemaHash: string; keyHash: string; keyRange?: string;
 export type HashRow = { keyHash: string; keyRange: string; fields: FieldMap };
 export interface LastDbPublisherClient {
   request(method: "GET" | "POST", path: string, body?: unknown): Promise<unknown>;
+  /** The node's `/api/version` body, read once per client. */
+  nodeVersion(): Promise<Record<string, unknown>>;
   bindSchemas(profiles: Record<string, SchemaProfile>): void;
   declareAppSchema(appId: string, schema: SchemaDefinition): Promise<{ identity: string; canonical: string; schemaName: string }>;
   queryByKeys(reads: KeyRead[]): Promise<(FieldMap | null)[]>;
@@ -65,6 +67,21 @@ export function dataObject(value: unknown): Entry {
   return body.data === undefined ? body : object(body.data);
 }
 
+/** API 13 (lastdb#803) is the first node release that owns every schema and refuses a home with the old shared-value layout at startup. */
+export const OWNED_SCHEMAS_API_VERSION = 13;
+export function nodeApiVersion(version: Entry): number {
+  return Number.isSafeInteger(version.api_version) ? Number(version.api_version) : 0;
+}
+/**
+ * Whether a node reply marks a schema as the owner of its values. Protein removal
+ * stage 2 (after lastdb#901) stops sending `independent_fields`. A missing key means
+ * owned only on API 13 or later; older nodes that omit it (API 7 and earlier never sent
+ * it) stay refused. A present key keeps its old meaning, so explicit `false` is not owned.
+ */
+export function ownsValues(entry: Entry, apiVersion: number): boolean {
+  return entry.independent_fields === undefined ? apiVersion >= OWNED_SCHEMAS_API_VERSION : entry.independent_fields === true;
+}
+
 function rows(value: unknown): Array<{ hash: string; range: string | null; fields: FieldMap; matched?: { hash: string; range: string } }> {
   const reply = object(value);
   if (reply.ok !== true || reply.unresolved_rows !== 0 || !Array.isArray(reply.results) || typeof reply.has_more !== "boolean") {
@@ -90,6 +107,9 @@ function rows(value: unknown): Array<{ hash: string; range: string | null; field
 
 export function newLastDbPublisherClient(opts: LastDbClientOptions = {}): LastDbPublisherClient {
   const request = newLastDbJsonCaller(opts);
+  let version: Promise<Entry> | undefined;
+  const nodeVersion = () => version ??= request("GET", "/api/version").then(dataObject)
+    .catch((error: unknown) => { version = undefined; throw error; });
   let profiles: Record<string, SchemaProfile> = {};
   const selected = (schema: string) => {
     const profile = profiles[schema];
@@ -207,10 +227,13 @@ export function newLastDbPublisherClient(opts: LastDbClientOptions = {}): LastDb
   };
   return {
     request,
+    nodeVersion,
     bindSchemas(next) { profiles = { ...next }; },
     async declareAppSchema(appId, schema) {
       const reply = dataObject(await request("POST", "/api/apps/declare-schema", { app_id: appId, schema }));
-      if (reply.app_id !== appId || reply.schema_name !== `${appId}/${schema.name}` || reply.independent_fields !== true ||
+      // The node version matters only when the reply omits the key; a present key decides alone.
+      const apiVersion = reply.independent_fields === undefined ? nodeApiVersion(await nodeVersion()) : 0;
+      if (reply.app_id !== appId || reply.schema_name !== `${appId}/${schema.name}` || !ownsValues(reply, apiVersion) ||
           typeof reply.canonical !== "string" || !reply.canonical || typeof reply.identity_hash !== "string" || !/^[a-f0-9]{64}$/.test(reply.identity_hash)) {
         throw new LastDbPublishError("schema_declare_bad_response", "LastDB did not confirm the requested schema-owned definition.");
       }

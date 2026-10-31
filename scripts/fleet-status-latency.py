@@ -28,6 +28,20 @@ def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
+OWNED_SCHEMAS_API_VERSION = 13  # lastdb#803: every schema is owned; the old shared-value home is refused at startup.
+
+
+def owns_values(node, schema, cache):
+    # Protein removal stage 2 (after lastdb#901) omits independent_fields. A present key keeps
+    # its old meaning; a missing key means owned only when the node reports API 13 or later.
+    if "independent_fields" in schema:
+        return schema["independent_fields"] is True
+    if "api_version" not in cache:
+        cache["api_version"] = node.call("/api/version")[0].get("api_version")
+    version = cache["api_version"]
+    return isinstance(version, int) and not isinstance(version, bool) and version >= OWNED_SCHEMAS_API_VERSION
+
+
 def installed_schemas(node, bindings, contract, output, phase, legacy):
     directory = node.call("/api/schemas?include_full=true&include_counts=true")[0]
     save(output / f"installed-{phase}.json", directory)
@@ -37,6 +51,7 @@ def installed_schemas(node, bindings, contract, output, phase, legacy):
     canonical = {key: owned[runtime] for key, runtime in bindings.items() if runtime in owned}
     expected = set(contract) if legacy else {key for key, runtime in bindings.items() if runtime}
     require(set(canonical) == expected, "The publisher's actual schema bindings are incomplete")
+    version_cache = {}
     for key, schema in canonical.items():
         definition = contract[key]["definition"]
         require(schema.get("identity_hash") == contract[key]["identity"] and schema.get("descriptive_name") == definition["descriptive_name"]
@@ -46,7 +61,7 @@ def installed_schemas(node, bindings, contract, output, phase, legacy):
             and all(schema.get(field) == definition[field] for field in ("field_types", "field_descriptions", "field_data_classifications")),
             "An actual local definition differs from the published field definition")
         if not legacy:
-            require(schema.get("independent_fields") is True and not schema.get("field_mappers") and not schema.get("transform_fields")
+            require(owns_values(node, schema, version_cache) and not schema.get("field_mappers") and not schema.get("transform_fields")
                 and schema.get("alternate_keys", {}) == definition.get("alternate_keys", {}), "A native runtime retains legacy value authority or different keys")
     aliases = {name: alias for name, alias in owned.items() if name not in {schema["name"] for schema in canonical.values()}}
     if legacy:
