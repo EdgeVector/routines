@@ -3,7 +3,7 @@ import { closeSync, constants, existsSync, fsyncSync, mkdirSync, openSync, readF
 import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { stateDir } from "./paths.ts";
-import { dataObject, LastDbPublishError, object, type LastDbPublisherClient } from "./status-client.ts";
+import { dataObject, LastDbPublishError, nodeApiVersion, object, ownsValues, type LastDbPublisherClient } from "./status-client.ts";
 import { ACTIVE_SCHEMA_KEYS, canonicalDefinition, definitionIdentity, fieldRules, ROUTINES_APP_ID, SCHEMAS, type SchemaDefinition, type SchemaKey } from "./status-schema.ts";
 
 type Binding = { identity: string; runtime: string };
@@ -92,14 +92,22 @@ function removeScope(path: string, expected: Buffer): void {
   const directory = openSync(dirname(path), constants.O_RDONLY);
   try { fsyncSync(directory); } finally { closeSync(directory); }
 }
+// Protein removal stage 2 (after lastdb#901) omits `independent_fields` from the
+// schema list and detail. An API 13+ node cannot hold the old alias/field_mappers
+// layout, so a missing key there means owned; every check below then reads the same
+// answer. A present key, and a missing key on an older node, stay exactly as sent.
+async function ownership(client: LastDbPublisherClient, entry: Record<string, unknown>): Promise<Record<string, unknown>> {
+  if (entry.independent_fields !== undefined) return entry;
+  return ownsValues(entry, nodeApiVersion(await client.nodeVersion())) ? { ...entry, independent_fields: true } : entry;
+}
 async function directory(client: LastDbPublisherClient): Promise<Record<string, unknown>[]> {
   const reply = dataObject(await client.request("GET", "/api/schemas"));
   requireValue(reply.ready === true && Array.isArray(reply.schemas), "The schema directory is not ready.");
-  return reply.schemas.map(object).filter((schema) => schema.owner_app_id === ROUTINES_APP_ID);
+  return Promise.all(reply.schemas.map(object).filter((schema) => schema.owner_app_id === ROUTINES_APP_ID).map((schema) => ownership(client, schema)));
 }
 async function metadata(client: LastDbPublisherClient, name: string): Promise<Record<string, unknown>> {
   const reply = dataObject(await client.request("GET", `/api/schema/${encodeURIComponent(name)}`));
-  return object(reply.schema ?? reply);
+  return ownership(client, object(reply.schema ?? reply));
 }
 function validateMetadata(source: Record<string, unknown>, definition: SchemaDefinition): Binding {
   const key = object(source.key);
@@ -113,7 +121,7 @@ function validateMetadata(source: Record<string, unknown>, definition: SchemaDef
   return { identity: source.identity_hash as string, runtime: source.name as string };
 }
 async function capabilities(client: LastDbPublisherClient, conversion: boolean): Promise<void> {
-  const flags = object(dataObject(await client.request("GET", "/api/version")).capabilities);
+  const flags = object((await client.nodeVersion()).capabilities);
   requireValue(["owned_app_schemas_v1", "independent_hash_range_v1", "compound_alternate_keys_v1"].every((flag) => flags[flag] === true),
     "Fleet setup requires a compatible LastDB release with owned app schemas and named keys.");
   if (conversion) requireValue(flags.app_schema_conversion_v1 === true && flags.app_schema_field_mapping_v1 === true &&
