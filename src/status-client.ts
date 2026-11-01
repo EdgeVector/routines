@@ -67,19 +67,10 @@ export function dataObject(value: unknown): Entry {
   return body.data === undefined ? body : object(body.data);
 }
 
-/** API 13 (lastdb#803) is the first node release that owns every schema and refuses a home with the old shared-value layout at startup. */
+/** API 13 (lastdb#803) is the first node release where every declared schema owns its values. Setup refuses an older node. */
 export const OWNED_SCHEMAS_API_VERSION = 13;
 export function nodeApiVersion(version: Entry): number {
   return Number.isSafeInteger(version.api_version) ? Number(version.api_version) : 0;
-}
-/**
- * Whether a node reply marks a schema as the owner of its values. Protein removal
- * stage 2 (after lastdb#901) stops sending `independent_fields`. A missing key means
- * owned only on API 13 or later; older nodes that omit it (API 7 and earlier never sent
- * it) stay refused. A present key keeps its old meaning, so explicit `false` is not owned.
- */
-export function ownsValues(entry: Entry, apiVersion: number): boolean {
-  return entry.independent_fields === undefined ? apiVersion >= OWNED_SCHEMAS_API_VERSION : entry.independent_fields === true;
 }
 
 function rows(value: unknown): Array<{ hash: string; range: string | null; fields: FieldMap; matched?: { hash: string; range: string } }> {
@@ -231,9 +222,8 @@ export function newLastDbPublisherClient(opts: LastDbClientOptions = {}): LastDb
     bindSchemas(next) { profiles = { ...next }; },
     async declareAppSchema(appId, schema) {
       const reply = dataObject(await request("POST", "/api/apps/declare-schema", { app_id: appId, schema }));
-      // The node version matters only when the reply omits the key; a present key decides alone.
-      const apiVersion = reply.independent_fields === undefined ? nodeApiVersion(await nodeVersion()) : 0;
-      if (reply.app_id !== appId || reply.schema_name !== `${appId}/${schema.name}` || !ownsValues(reply, apiVersion) ||
+      // Setup checks the node API version once before any declare, so no per-schema ownership check remains here.
+      if (reply.app_id !== appId || reply.schema_name !== `${appId}/${schema.name}` ||
           typeof reply.canonical !== "string" || !reply.canonical || typeof reply.identity_hash !== "string" || !/^[a-f0-9]{64}$/.test(reply.identity_hash)) {
         throw new LastDbPublishError("schema_declare_bad_response", "LastDB did not confirm the requested schema-owned definition.");
       }

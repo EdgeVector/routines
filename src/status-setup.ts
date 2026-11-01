@@ -2,12 +2,12 @@
  *
  * The one-time conversion of shared fleet values (`convert-status-schemas`) is gone.
  * It drove `POST /api/db/alternate-keys`, which LastDB API 15 removed together with the
- * app conversion capabilities, and an API 13+ node refuses the old shared-value home
- * at startup. A new home starts empty, so `init-status` declares the owned schemas. */
+ * app conversion capabilities. Setup requires API 13 or later, where every declared
+ * schema owns its values. A new home starts empty, so `init-status` declares the owned schemas. */
 import { closeSync, constants, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { stateDir } from "./paths.ts";
-import { dataObject, LastDbPublishError, nodeApiVersion, object, ownsValues, type LastDbPublisherClient } from "./status-client.ts";
+import { dataObject, LastDbPublishError, nodeApiVersion, object, OWNED_SCHEMAS_API_VERSION, type LastDbPublisherClient } from "./status-client.ts";
 import { ACTIVE_SCHEMA_KEYS, canonicalDefinition, definitionIdentity, ROUTINES_APP_ID, SCHEMAS, type SchemaDefinition, type SchemaKey } from "./status-schema.ts";
 
 type Binding = { identity: string; runtime: string };
@@ -89,22 +89,14 @@ function save(path: string, previous: Buffer | null, value: unknown): Buffer {
   try { fsyncSync(directory); } finally { closeSync(directory); }
   return next;
 }
-// Protein removal stage 2 (after lastdb#901) omits `independent_fields` from the
-// schema list and detail. An API 13+ node cannot hold the old alias/field_mappers
-// layout, so a missing key there means owned; every check below then reads the same
-// answer. A present key, and a missing key on an older node, stay exactly as sent.
-async function ownership(client: LastDbPublisherClient, entry: Record<string, unknown>): Promise<Record<string, unknown>> {
-  if (entry.independent_fields !== undefined) return entry;
-  return ownsValues(entry, nodeApiVersion(await client.nodeVersion())) ? { ...entry, independent_fields: true } : entry;
-}
 async function directory(client: LastDbPublisherClient): Promise<Record<string, unknown>[]> {
   const reply = dataObject(await client.request("GET", "/api/schemas"));
   requireValue(reply.ready === true && Array.isArray(reply.schemas), "The schema directory is not ready.");
-  return Promise.all(reply.schemas.map(object).filter((schema) => schema.owner_app_id === ROUTINES_APP_ID).map((schema) => ownership(client, schema)));
+  return reply.schemas.map(object).filter((schema) => schema.owner_app_id === ROUTINES_APP_ID);
 }
 async function metadata(client: LastDbPublisherClient, name: string): Promise<Record<string, unknown>> {
   const reply = dataObject(await client.request("GET", `/api/schema/${encodeURIComponent(name)}`));
-  return ownership(client, object(reply.schema ?? reply));
+  return object(reply.schema ?? reply);
 }
 function validateMetadata(source: Record<string, unknown>, definition: SchemaDefinition): Binding {
   const key = object(source.key);
@@ -117,8 +109,12 @@ function validateMetadata(source: Record<string, unknown>, definition: SchemaDef
     `Installed ${definition.name} differs from the reviewed fleet definition.`);
   return { identity: source.identity_hash as string, runtime: source.name as string };
 }
+// The one value-ownership check: from API 13 (lastdb#803) every declared schema owns its
+// values, so no installed or declared schema needs its own check.
 async function capabilities(client: LastDbPublisherClient): Promise<void> {
-  const flags = object((await client.nodeVersion()).capabilities);
+  const version = await client.nodeVersion(), flags = object(version.capabilities);
+  requireValue(nodeApiVersion(version) >= OWNED_SCHEMAS_API_VERSION,
+    `Fleet setup requires LastDB API ${OWNED_SCHEMAS_API_VERSION} or later, where every declared schema owns its values.`);
   requireValue(["owned_app_schemas_v1", "independent_hash_range_v1", "compound_alternate_keys_v1"].every((flag) => flags[flag] === true),
     "Fleet setup requires a compatible LastDB release with owned app schemas and named keys.");
 }
@@ -129,9 +125,8 @@ function keyFor(source: Record<string, unknown>): SchemaKey {
 }
 function requireOwnedMetadata(source: Record<string, unknown>, key: SchemaKey): Binding {
   const definition = canonicalDefinition(key), binding = validateMetadata(source, definition);
-  requireValue(source.independent_fields === true && binding.identity === definitionIdentity(definition) &&
-    Object.keys(object(source.field_mappers ?? {})).length === 0 &&
-    same(source.alternate_keys ?? {}, definition.alternate_keys ?? {}), "The installed fleet keys or value ownership differ from this release.");
+  requireValue(binding.identity === definitionIdentity(definition) &&
+    same(source.alternate_keys ?? {}, definition.alternate_keys ?? {}), "The installed fleet identity or keys differ from this release.");
   return binding;
 }
 
@@ -142,7 +137,6 @@ export async function initializeStatusSchemas(client: LastDbPublisherClient): Pr
     const previous = readOptional(path), saved = previous ? config(JSON.parse(previous.toString())) : { version: 2 as const, schemas: {} as StatusSchemaConfig["schemas"] };
     await capabilities(client);
     const installed = await directory(client);
-    requireValue(installed.every((schema) => schema.independent_fields === true), "Existing Routines schemas use the retired shared-value layout, which this release does not convert. No schema was declared.");
     const current = await Promise.all(installed.map(async (entry) => {
       const key = keyFor(entry), source = await metadata(client, String(entry.name));
       return { key, binding: requireOwnedMetadata(source, key) };

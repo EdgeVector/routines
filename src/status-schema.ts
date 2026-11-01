@@ -15,7 +15,6 @@ export interface SchemaDefinition {
   field_types: Record<string, FieldType>;
   field_descriptions: Record<string, string>;
   field_data_classifications: Record<string, { sensitivity_level: number; data_domain: string }>;
-  independent_fields?: boolean;
   alternate_keys?: Record<string, { hash_field: string; range_field: null; range_separator: string;
     range_parts: Array<{ field: string; format: "text" }>; missing: "reject" }>;
 }
@@ -240,7 +239,6 @@ export function canonicalDefinition(key: KeptSchemaKey): SchemaDefinition {
     field_types: Object.fromEntries(source.fields.map((field) => [name(field), source.field_types[field]!])),
     field_descriptions: Object.fromEntries(source.fields.map((field) => [name(field), rules[field]![1]])),
     field_data_classifications: Object.fromEntries(source.fields.map((field) => [name(field), source.field_data_classifications[field]!])),
-    independent_fields: true,
     alternate_keys: key === "status" ? {
       by_fleet: { hash_field: name(FLEET_ALTERNATE.hashField), range_field: null, range_separator: "#",
         range_parts: FLEET_ALTERNATE.rangeFields.map((field) => ({ field: name(field), format: "text" })), missing: "reject" },

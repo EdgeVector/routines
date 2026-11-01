@@ -29,10 +29,7 @@ const results = await Promise.all(Object.keys(SCHEMAS).map(async key => {
       same([...(stored.fields ?? [])].sort(), [...schema.fields].sort()) &&
       same(stored.field_types, schema.field_types) && same(stored.field_descriptions, schema.field_descriptions) &&
       same(stored.field_data_classifications, schema.field_data_classifications) && Object.keys(stored.transform_fields ?? {}).length === 0;
-    // Published field definitions cross the native schema boundary. Historical
-    // global value mappers do not grant authority over locally owned values.
-    return { key, schema: schema.descriptive_name, identity, status: response.status, exact_field_definition: exact,
-      published_mapper_fields: Object.keys(stored.field_mappers ?? {}).sort(), published_value_authority: false, response: body };
+    return { key, schema: schema.descriptive_name, identity, status: response.status, exact_field_definition: exact, response: body };
   } catch (error) {
     return { key, schema: schema.descriptive_name, identity, exact_field_definition: false, error: String(error) };
   }

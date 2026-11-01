@@ -28,18 +28,14 @@ def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
-OWNED_SCHEMAS_API_VERSION = 13  # lastdb#803: every schema is owned; the old shared-value home is refused at startup.
+OWNED_SCHEMAS_API_VERSION = 13  # lastdb#803: every declared schema owns its values.
 
 
-def owns_values(node, schema, cache):
-    # Protein removal stage 2 (after lastdb#901) omits independent_fields. A present key keeps
-    # its old meaning; a missing key means owned only when the node reports API 13 or later.
-    if "independent_fields" in schema:
-        return schema["independent_fields"] is True
-    if "api_version" not in cache:
-        cache["api_version"] = node.call("/api/version")[0].get("api_version")
-    version = cache["api_version"]
-    return isinstance(version, int) and not isinstance(version, bool) and version >= OWNED_SCHEMAS_API_VERSION
+def require_owned_node(node):
+    # One node-level check replaces a per-schema ownership check.
+    version = node.call("/api/version")[0].get("api_version")
+    require(isinstance(version, int) and not isinstance(version, bool) and version >= OWNED_SCHEMAS_API_VERSION,
+        "The engine is older than LastDB API 13, where every declared schema owns its values")
 
 
 def record_home(node):
@@ -55,11 +51,11 @@ def installed_schemas(node, bindings, contract, output, phase, legacy):
     save(output / f"installed-{phase}.json", directory)
     require(directory.get("ready") is True and directory.get("full_included") is True and directory.get("counts_included") is True,
         "The actual installed schema metadata is incomplete")
+    require_owned_node(node)
     owned = {schema["name"]: schema for schema in directory.get("schemas", []) if schema.get("owner_app_id") == "routines"}
     canonical = {key: owned[runtime] for key, runtime in bindings.items() if runtime in owned}
     expected = set(contract) if legacy else {key for key, runtime in bindings.items() if runtime}
     require(set(canonical) == expected, "The publisher's actual schema bindings are incomplete")
-    version_cache = {}
     for key, schema in canonical.items():
         definition = contract[key]["definition"]
         require(schema.get("identity_hash") == contract[key]["identity"] and schema.get("descriptive_name") == definition["descriptive_name"]
@@ -69,27 +65,13 @@ def installed_schemas(node, bindings, contract, output, phase, legacy):
             and all(schema.get(field) == definition[field] for field in ("field_types", "field_descriptions", "field_data_classifications")),
             "An actual local definition differs from the published field definition")
         if not legacy:
-            require(owns_values(node, schema, version_cache) and not schema.get("field_mappers") and not schema.get("transform_fields")
-                and schema.get("alternate_keys", {}) == definition.get("alternate_keys", {}), "A native runtime retains legacy value authority or different keys")
-    aliases = {name: alias for name, alias in owned.items() if name not in {schema["name"] for schema in canonical.values()}}
-    if legacy:
-        require(len(aliases) == len(canonical) == 6, "The exact legacy control did not produce its six source schemas and six aliases")
-        targets = []
-        for alias in aliases.values():
-            matches = [source for source in canonical.values()
-                if all(alias.get(field) == source.get(field) for field in ("owner_app_id", "descriptive_name", "identity_hash", "schema_type", "key",
-                    "fields", "field_types", "field_descriptions", "field_data_classifications", "field_hashes", "field_molecule_uuids"))
-                and alias.get("field_mappers") == {field: source["name"] + "." + field for field in source["fields"]}
-                and not alias.get("transform_fields")]
-            require(len(matches) == 1, "A legacy alias is not an exact physical forwarder of a selected source")
-            targets.append(matches[0]["name"])
-        require(len(set(targets)) == 6, "The old alias membership does not cover exactly the six source record types")
-    else:
-        require(not aliases, "Native setup retains an unexpected local schema")
+            require(not schema.get("transform_fields") and schema.get("alternate_keys", {}) == definition.get("alternate_keys", {}),
+                "A native runtime has transform fields or different keys")
+    require(set(owned) == {schema["name"] for schema in canonical.values()}, "Setup retains an unexpected local schema")
+    if not legacy:
         molecules = [molecule for schema in canonical.values() for molecule in schema.get("field_molecule_uuids", {}).values()]
         require(len(set(molecules)) == len(molecules), "Two native schemas share physical record values")
-    return sorted(aliases), {key: next((name for name, alias in aliases.items() if alias["identity_hash"] == schema["identity_hash"]), "")
-        for key, schema in canonical.items()}, {key: schema["record_count"] for key, schema in canonical.items()}
+    return {key: schema["record_count"] for key, schema in canonical.items()}
 
 
 def cli(args, binary, node, home, verb, *flags, allow_failure=False):
@@ -365,7 +347,7 @@ def register_definitions(args, Node):
         with ThreadPoolExecutor(max_workers=6) as pool:
             replies = list(pool.map(metadata, addresses))
         save(args.output / "installed-schemas.json", {"directory": directory, "responses": replies,
-            "scope": "Actual owner metadata after normal DEV legacy admission; no value-authority inference from global definitions"})
+            "scope": "Actual owner metadata after normal DEV admission by the control"})
         require(directory.get("ready") is True, "The actual installed schema directory is not ready")
         owned = {schema["name"]: schema for schema in directory.get("schemas", []) if schema.get("owner_app_id") == "routines"}
         installed_schemas(node, result["schemaHashes"], args.contract, args.output, "registered", True)
@@ -385,9 +367,8 @@ def arm(args, Node, finish_setup, contract, label, pair):
     output = args.output / f"pair-{pair}-{label}"
     output.mkdir()
     fresh = label == "fresh"
-    # Only the control writes the old shared-value layout. The candidate has no value
-    # conversion (LastDB API 15 removed /api/db/alternate-keys), so both candidate arms
-    # declare fresh owned schemas: "candidate" on the compatible engine, "fresh" on the removal engine.
+    # The control keeps main's old request flow. Both engine pins are API 13 or later, so every
+    # arm declares owned schemas: "candidate" on the before engine, "fresh" on the after engine.
     legacy = label == "control"
     binary = args.candidate_binary if not legacy else args.control_binary
     daemon, revision = (args.daemon_after, args.daemon_after_revision) if fresh else (args.daemon_before, args.daemon_before_revision)
@@ -414,7 +395,7 @@ def arm(args, Node, finish_setup, contract, label, pair):
         read, _ = call_json(args, setup, node, home, "read-status")
         rows = view(read, expected)
         bindings = published["schemaHashes"]
-        aliases, alias_bindings, actual_counts = installed_schemas(node, bindings, contract, output, "published", legacy)
+        actual_counts = installed_schemas(node, bindings, contract, output, "published", legacy)
         histories = run_keys(home)
         coordinates = [("status", identifier, None) for identifier in sorted(expected)]
         coordinates += [("fleetSummary", "routines", None)]
@@ -426,10 +407,6 @@ def arm(args, Node, finish_setup, contract, label, pair):
         require(all(value is not None for value in before.values()), "An actual published record is absent before reopen")
         save(output / "before-atoms.json", before)
         save(output / "before-field-volume.json", field_volume(before, contract))
-        if legacy:
-            alias_values = snapshot(node, alias_bindings, contract, coordinates + copied)
-            save(output / "alias-atoms.json", alias_values)
-            require(alias_values == before, "A qualified legacy alias does not resolve the source's actual current atoms and authors")
         finish_setup(node, output)
         cloud_off(node, "before-reopen")
         node.stop()
@@ -449,9 +426,9 @@ def arm(args, Node, finish_setup, contract, label, pair):
             node.stop()
             node.binary, node.revision = args.daemon_after, args.daemon_after_revision
             node.start()
-            cloud_off(node, "removal-reopen")
+            cloud_off(node, "after-engine-reopen")
             require(snapshot(node, bindings, contract, coordinates + copied) == current,
-                "The removal-engine reopen changed current atoms, authors, values, or membership")
+                "The after-engine reopen changed current atoms, authors, values, or membership")
             save(output / "upgrade-atoms.json", current)
         samples, rows = measure(args, binary, node, home, expected)
         changed = sorted(expected)[0]
@@ -544,7 +521,7 @@ console.log(JSON.stringify(Object.fromEntries(Object.keys(SCHEMAS).map(key=>[key
             for label in order:
                 summary["arms"].append(arm(args, Node, finish_setup, contract, label, pair))
         rows = []
-        for comparison, selected in (("same compatible engine", "same_engine_samples"), ("full engine upgrade", "samples")):
+        for comparison, selected in (("same engine", "same_engine_samples"), ("full engine upgrade", "samples")):
             for operation in ("publish_unchanged", "read_complete", "publish_changed"):
                 before = [arm for arm in summary["arms"] if arm["label"] == "control"]
                 after = [arm for arm in summary["arms"] if arm["label"] == "candidate"]
@@ -556,8 +533,9 @@ console.log(JSON.stringify(Object.fromEntries(Object.keys(SCHEMAS).map(key=>[key
         summary["rows"], summary["complete"] = rows, True
         lines = ["## Routines publication and lookup latency", "", f"Schema service environment: {args.schema_environment}.", "", summary["scope"], "",
             "Both balanced orders and a fresh owned-schema arm passed actual CLI operations. Cloud sync stayed off.",
-            "The control seeded the old layout on the compatible engine. The candidate declared fresh owned schemas there before the removal-engine reopen.",
-            "The candidate has no value conversion: LastDB API 15 removed its route.",
+            "Every arm ran on a LastDB engine at API 13 or later, where every declared schema owns its values.",
+            "The candidate measured on the before engine, then reopened on the after engine."
+            + (" Both pins name the same engine." if args.daemon_before_revision == args.daemon_after_revision else ""),
             "The control retains main's serial flow and copied status records after the explicit vocabulary/transport patch.",
             "Both arms use the same optional page trace. Latency includes the trace cost and every cursor page.",
             "read-pages.jsonl retains actual page statuses/selectors/cursors; commands.jsonl links each CLI call to its page count and elapsed time.",

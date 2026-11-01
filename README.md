@@ -430,7 +430,7 @@ The fleet summary has a 4096-byte cap.
 
 The release has no value conversion. `convert-status-schemas` is gone.
 It drove `POST /api/db/alternate-keys`, which LastDB API 15 removed with the app conversion capabilities.
-A LastDB node at API 13 or later refuses the old shared-value home at startup.
+Setup requires LastDB API 13 or later. From API 13, every declared schema owns its values.
 A new home starts with no Routines schema, so `init-status` declares the schema-owned definitions.
 The primary-reset restrictions remain in force. These commands do not authorize a primary change.
 
@@ -448,7 +448,8 @@ routines read-status --json
 
 `ROUTINES_STATUS_SCHEMA_CONFIG` selects the config path.
 The default is `ROUTINES_HOME/state/status-schemas.json`.
-Setup refuses a node whose installed Routines schemas do not own their values.
+Setup reads the node API version once and refuses a node before API 13.
+It also refuses a node without the owned app schema and named key capabilities.
 Setup and each request refuse a `status-schemas.json.conversion` scope file that an older release left.
 Review that file and remove it. This release cannot resume or abort that conversion.
 Fresh setup does not create historical schemas.
