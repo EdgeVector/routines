@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Hosted-CI comparison of actual Routines commands, conversion, and an engine upgrade."""
+"""Hosted-CI comparison of actual Routines commands, owned setup, and an engine upgrade."""
 import argparse
 import hashlib
 import json
@@ -42,6 +42,14 @@ def owns_values(node, schema, cache):
     return isinstance(version, int) and not isinstance(version, bool) and version >= OWNED_SCHEMAS_API_VERSION
 
 
+def record_home(node):
+    # A format 7 home stores one value per record key, so a field reply carries an empty
+    # atom_uuid (LastDB decision D7). The LastDB benchmark Node reads the home marker;
+    # a Node from a release before format 7 has no record_home and no format 7 home.
+    probe = getattr(node, "record_home", None)
+    return bool(probe and probe())
+
+
 def installed_schemas(node, bindings, contract, output, phase, legacy):
     directory = node.call("/api/schemas?include_full=true&include_counts=true")[0]
     save(output / f"installed-{phase}.json", directory)
@@ -77,7 +85,7 @@ def installed_schemas(node, bindings, contract, output, phase, legacy):
             targets.append(matches[0]["name"])
         require(len(set(targets)) == 6, "The old alias membership does not cover exactly the six source record types")
     else:
-        require(not aliases, "Native setup or conversion retains an unexpected local schema")
+        require(not aliases, "Native setup retains an unexpected local schema")
         molecules = [molecule for schema in canonical.values() for molecule in schema.get("field_molecule_uuids", {}).values()]
         require(len(set(molecules)) == len(molecules), "Two native schemas share physical record values")
     return sorted(aliases), {key: next((name for name, alias in aliases.items() if alias["identity_hash"] == schema["identity_hash"]), "")
@@ -246,8 +254,12 @@ def snapshot(node, bindings, contract, coordinates):
             # Preserve every actual current-tip attribute and optional key presence.
             metadata = {field: {name: value for name, value in row["metadata"][field].items()
                 if name not in ("molecule_uuid", "has_conflicts")} for field in values}
-            require(all(isinstance(item.get("atom_uuid"), str) and item["atom_uuid"] for item in metadata.values()),
-                "A stored field lacks its current atom identity")
+            atoms = [item.get("atom_uuid") for item in metadata.values()]
+            if record_home(node):
+                # No per-field atom identity exists; the value, presence and author checks still run.
+                require(all(atom == "" for atom in atoms), "A format 7 reply names a per-field atom")
+            else:
+                require(all(isinstance(atom, str) and atom for atom in atoms), "A stored field lacks its current atom identity")
             observed[identity] = {"values_sha256": digest(values), "value_bytes": sum(len(json.dumps(value, ensure_ascii=False).encode()) for value in values.values()),
                 "present_fields": sorted(present), "absent_fields": sorted(declared - present),
                 "null_fields": sorted(field for field, value in values.items() if value is None),
@@ -373,7 +385,11 @@ def arm(args, Node, finish_setup, contract, label, pair):
     output = args.output / f"pair-{pair}-{label}"
     output.mkdir()
     fresh = label == "fresh"
-    binary = args.candidate_binary if label != "control" else args.control_binary
+    # Only the control writes the old shared-value layout. The candidate has no value
+    # conversion (LastDB API 15 removed /api/db/alternate-keys), so both candidate arms
+    # declare fresh owned schemas: "candidate" on the compatible engine, "fresh" on the removal engine.
+    legacy = label == "control"
+    binary = args.candidate_binary if not legacy else args.control_binary
     daemon, revision = (args.daemon_after, args.daemon_after_revision) if fresh else (args.daemon_before, args.daemon_before_revision)
     node = Node(daemon, revision, output, temporary_directory=Path(os.environ["RUNNER_TEMP"]).resolve(),
         environment={"ENVIRONMENT": args.schema_environment, "EXEMEM_ENV": args.schema_environment,
@@ -383,8 +399,8 @@ def arm(args, Node, finish_setup, contract, label, pair):
         cloud_off(node, "start")
         home = node.root / "routines"
         expected = registry(home, args.records)
-        setup = args.candidate_binary if fresh else args.control_binary
-        if fresh:
+        setup = args.control_binary if legacy else args.candidate_binary
+        if not legacy:
             installed, _ = call_json(args, setup, node, home, "init-status")
             require(set(installed["schemas"]) == {"status", "runSummaryV2", "fleetSummary"},
                 "Fresh setup created a historical or duplicate record type")
@@ -398,41 +414,22 @@ def arm(args, Node, finish_setup, contract, label, pair):
         read, _ = call_json(args, setup, node, home, "read-status")
         rows = view(read, expected)
         bindings = published["schemaHashes"]
-        aliases, alias_bindings, actual_counts = installed_schemas(node, bindings, contract, output, "published", not fresh)
+        aliases, alias_bindings, actual_counts = installed_schemas(node, bindings, contract, output, "published", legacy)
         histories = run_keys(home)
         coordinates = [("status", identifier, None) for identifier in sorted(expected)]
         coordinates += [("fleetSummary", "routines", None)]
         coordinates += [("runSummaryV2", identifier, stamp) for identifier, stamp in histories]
-        copied = [] if fresh else [("fleetStatus", row["fleet_bucket"], row["sk"]) for row in rows]
+        copied = [("fleetStatus", row["fleet_bucket"], row["sk"]) for row in rows] if legacy else []
         require(actual_counts == {key: sum(coordinate[0] == key for coordinate in coordinates + copied) for key in actual_counts},
             "Actual primary membership exceeds or differs from the complete known key set")
         before = snapshot(node, bindings, contract, coordinates + copied)
-        require(all(value is not None for value in before.values()), "An actual published record is absent before conversion")
+        require(all(value is not None for value in before.values()), "An actual published record is absent before reopen")
         save(output / "before-atoms.json", before)
         save(output / "before-field-volume.json", field_volume(before, contract))
-        if not fresh:
+        if legacy:
             alias_values = snapshot(node, alias_bindings, contract, coordinates + copied)
             save(output / "alias-atoms.json", alias_values)
             require(alias_values == before, "A qualified legacy alias does not resolve the source's actual current atoms and authors")
-        if label == "candidate":
-            planned, _ = cli(args, binary, node, home, "convert-status-schemas")
-            plan = json.loads(planned.stdout)
-            require(plan.get("phase") == "plan" and len(plan.get("schemas", [])) == 6 and sorted(plan.get("retire", [])) == aliases
-                and {source["schema"] for source in plan["schemas"]} == set(bindings.values()), "The explicit source and exact-alias conversion plan differs")
-            # The conversion command emits JSON without a --json flag.
-            result, _ = cli(args, binary, node, home, "convert-status-schemas", "--apply", "--maintenance")
-            report = json.loads(result.stdout)
-            require(report.get("phase") == "complete" and report.get("durable") is True
-                and report.get("selected_keys") == report.get("expected_selected_keys") == len(coordinates + copied)
-                and sorted(report.get("retired_schemas", [])) == aliases, "The actual conversion lacks complete membership or the exact frozen alias retirement")
-            save(output / "conversion.json", report)
-            after = snapshot(node, bindings, contract, coordinates + copied)
-            require(after == before, "Conversion changed values, current atoms, authors, metadata, or membership")
-            require(field_volume(after, contract) == field_volume(before, contract), "Conversion changed real per-field presence, absence, null, or writer volume")
-            save(output / "converted-field-volume.json", field_volume(after, contract))
-            installed_schemas(node, bindings, contract, output, "converted", False)
-            require(snapshot(node, alias_bindings, contract, coordinates + copied) == before,
-                "A public qualified schema address changed values or current atoms after its physical proxy retired")
         finish_setup(node, output)
         cloud_off(node, "before-reopen")
         node.stop()
@@ -441,8 +438,7 @@ def arm(args, Node, finish_setup, contract, label, pair):
         reopened = snapshot(node, bindings, contract, coordinates + copied)
         require(reopened == before, "The actual reopen changed values, current atoms, authors, or membership")
         save(output / "reopened-atoms.json", reopened)
-        # A converted primary starts with the control's digest marker. Normal
-        # publication refreshes it once before any timed native reader request.
+        # Normal publication refreshes the digest marker once before any timed native reader request.
         published, _ = call_json(args, binary, node, home, "publish-status")
         publication(published, expected)
         same_engine_samples = None
@@ -460,9 +456,6 @@ def arm(args, Node, finish_setup, contract, label, pair):
         samples, rows = measure(args, binary, node, home, expected)
         changed = sorted(expected)[0]
         volume = native_pages(node, bindings["status"], contract, rows) if label != "control" else {"logical_records": len(rows)}
-        if label == "candidate":
-            require(snapshot(node, bindings, contract, copied) == {key: value for key, value in before.items() if json.loads(key)[0] == "fleetStatus"},
-                "A current primary mutation changed separately retained historical payloads")
         removed = changed
         (home / "registry" / f"{removed}.toml").unlink()
         expected.remove(removed)
@@ -501,13 +494,10 @@ def arm(args, Node, finish_setup, contract, label, pair):
         require(snapshot(node, bindings, contract, [("runSummaryV2", identifier, stamp) for identifier, stamp in selected]) == retained,
             "Run-retention values or atoms differ after the second actual reopen")
         save(output / "retention-atoms.json", retained)
-        if label == "candidate":
-            require(snapshot(node, bindings, contract, copied) == {key: value for key, value in before.items() if json.loads(key)[0] == "fleetStatus"},
-                "A primary deletion, run retention, or reopen changed the retained copied history")
         save(output / "samples.json", samples)
         result = {"label": label, "pair": pair, "samples": samples, "same_engine_samples": same_engine_samples, "volume": volume,
             "initial_logical_records": len(before), "posture": "unknown: real ENOENT from explicit absent dependency",
-            "cloud_sync": "off at every phase", "conversion_atom_author_values_preserved": label == "candidate",
+            "cloud_sync": "off at every phase", "owned_setup": not legacy,
             "current_status_primary_and_alternate_delete": True, "actual_run_retention_and_reopen": True}
         save(output / "result.json", result)
         return result
@@ -566,7 +556,8 @@ console.log(JSON.stringify(Object.fromEntries(Object.keys(SCHEMAS).map(key=>[key
         summary["rows"], summary["complete"] = rows, True
         lines = ["## Routines publication and lookup latency", "", f"Schema service environment: {args.schema_environment}.", "", summary["scope"], "",
             "Both balanced orders and a fresh owned-schema arm passed actual CLI operations. Cloud sync stayed off.",
-            "The compatible engine seeded both arms. The candidate converted all six record types before the removal-engine reopen.",
+            "The control seeded the old layout on the compatible engine. The candidate declared fresh owned schemas there before the removal-engine reopen.",
+            "The candidate has no value conversion: LastDB API 15 removed its route.",
             "The control retains main's serial flow and copied status records after the explicit vocabulary/transport patch.",
             "Both arms use the same optional page trace. Latency includes the trace cost and every cursor page.",
             "read-pages.jsonl retains actual page statuses/selectors/cursors; commands.jsonl links each CLI call to its page count and elapsed time.",

@@ -24,7 +24,7 @@ env:
   ROUTINES_SCHEMA_ENV: ${{ inputs.schema_environment || 'dev' }}
 jobs:
   compare:
-    name: Actual fleet commands, conversion and latency
+    name: Actual fleet commands, owned setup and latency
     runs-on: ubuntu-24.04
     timeout-minutes: 150
     steps:

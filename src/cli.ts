@@ -66,7 +66,7 @@ import { startServer } from "./server.ts";
 import { loadProjectConfig } from "./project-config.ts";
 import { clearLegacyFleetSnapshot, deliverFleetStatus, publishFleetStatus, readFleetStatus, type DeliveryRecipient } from "./publish-status.ts";
 import { newLastDbPublisherClient } from "./status-client.ts";
-import { convertStatusSchemas, initializeStatusSchemas } from "./status-setup.ts";
+import { initializeStatusSchemas } from "./status-setup.ts";
 import { canonicalDefinition, SCHEMAS, type SchemaKey } from "./status-schema.ts";
 import { initRoutinesSentry } from "./observability.ts";
 import { runCapacityControllerTick } from "./capacity-runtime.ts";
@@ -121,7 +121,6 @@ Commands:
   probe-path <id>              print the installed path for a versioned probe harness
   publish-status              write slim fleet status records to LastDB (--json)
   init-status                 explicitly install published schema-owned fleet definitions
-  convert-status-schemas      plan an existing fleet value conversion; --apply --maintenance writes it
   read-status                 read and validate the bounded fleet view (--json)
   deliver-status              publish + stage a fleet-status delivery; --approve sends it
   hygiene                     mechanical cleanup (prune runs/memory, daemon check,
@@ -337,8 +336,6 @@ async function main(argv: string[]): Promise<number> {
       return await cmdPublishStatus(rest);
     case "init-status":
       return await cmdInitStatus(rest);
-    case "convert-status-schemas":
-      return await cmdConvertStatusSchemas(rest);
     case "read-status":
       return await cmdReadStatus(rest);
     case "deliver-status":
@@ -797,14 +794,7 @@ async function cmdInitStatus(rest: string[]): Promise<number> {
     return 0;
   }
   const result = await initializeStatusSchemas(newLastDbPublisherClient());
-  console.log(values.json ? JSON.stringify(result, null, 2) : "Fleet schemas are configured. Existing values require explicit conversion before the removal upgrade.");
-  return 0;
-}
-
-async function cmdConvertStatusSchemas(rest: string[]): Promise<number> {
-  const { values } = parseArgs({ args: rest, options: { apply: { type: "boolean" }, maintenance: { type: "boolean" }, abort: { type: "boolean" } }, allowPositionals: false });
-  const result = await convertStatusSchemas(newLastDbPublisherClient(), values);
-  console.log(JSON.stringify(result, null, 2));
+  console.log(values.json ? JSON.stringify(result, null, 2) : "Fleet schemas are configured.");
   return 0;
 }
 
