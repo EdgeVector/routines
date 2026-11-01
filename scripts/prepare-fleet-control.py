@@ -32,7 +32,7 @@ def prepare(baseline, candidate, output):
         '      const body = await callJson("POST", "/api/apps/declare-schema", { app_id: appId, schema: schemaDef }, userHash);',
         '''      const key = (Object.keys(SCHEMAS) as SchemaKey[]).find((key) => SCHEMAS[key].name === schemaDef.name);
       if (!key) throw new LastDbPublishError("control_schema_unknown", "The control names an unknown record type.");
-      const definition = { ...canonicalDefinition(key), independent_fields: false, alternate_keys: {} };
+      const definition = { ...canonicalDefinition(key), alternate_keys: {} };
       const body = await callJson("POST", "/api/apps/declare-schema", { app_id: appId, schema: definition }, userHash);''')
     source = replace(source, '      return { canonical, schemaName };', '      profiles.set(canonical, key);\n      return { canonical, schemaName };')
     # The control still performs the original single-key requests and offset pages.

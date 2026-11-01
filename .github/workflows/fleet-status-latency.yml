@@ -19,7 +19,8 @@ env:
   APP_BEFORE: e7916cbe4a278fc6c23ecf6be06b884df3f7121b
   APP_AFTER: ${{ github.event.pull_request.head.sha || github.sha }}
   CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-  DAEMON_BEFORE: 46f1b2d6fd329b4931fd0f9e18f4fe39adb7bc56
+  # The candidate refuses a node before API 13 (lastdb#803), so both engine pins name API 13.
+  DAEMON_BEFORE: a83d5f06da5bfac12b8341594513743fbb3ffabd
   DAEMON_AFTER: a83d5f06da5bfac12b8341594513743fbb3ffabd
   ROUTINES_SCHEMA_ENV: ${{ inputs.schema_environment || 'dev' }}
 jobs:
@@ -62,7 +63,7 @@ jobs:
           test "$(git -C daemon-after rev-parse HEAD)" = "$DAEMON_AFTER"
           python3 candidate/scripts/prepare-fleet-control.py --baseline "$GITHUB_WORKSPACE/control" \
             --candidate "$GITHUB_WORKSPACE/candidate" --output "$RUNNER_TEMP/routines-results/source"
-          printf 'Candidate %s\nControl base %s\nCompatible engine %s\nRemoval engine %s\n' \
+          printf 'Candidate %s\nControl base %s\nBefore engine %s\nAfter engine %s\n' \
             "$APP_AFTER" "$APP_BEFORE" "$DAEMON_BEFORE" "$DAEMON_AFTER" > "$RUNNER_TEMP/routines-results/source/revisions.txt"
       - name: Typecheck the actual app and patched control before definition admission
         run: |
