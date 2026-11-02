@@ -28,23 +28,11 @@ export function discoveredRoutineSocketEnv(
 }
 
 function discoverLiveSocket(env: NodeJS.ProcessEnv): string | null {
-  const explicitHome = firstNonEmpty(env.LASTDB_HOME, env.FOLDDB_HOME);
-  const homes = explicitHome
-    ? [explicitHome]
-    : [join(homedir(), ".lastdb"), join(homedir(), ".folddb")];
+  const home = env.LASTDB_HOME || join(homedir(), ".lastdb");
+  const dataDir = join(home, "data");
+  if (existsSync(join(dataDir, CANONICAL_SOCKET))) return null;
 
-  for (const home of homes) {
-    const dataDir = join(home, "data");
-    const canonical = join(dataDir, CANONICAL_SOCKET);
-    if (existsSync(canonical)) return null;
-
-    const full = join(dataDir, FULL_SURFACE_SOCKET);
-    if (existsSync(full)) return full;
-  }
-
-  return null;
+  const full = join(dataDir, FULL_SURFACE_SOCKET);
+  return existsSync(full) ? full : null;
 }
 
-function firstNonEmpty(...values: Array<string | undefined>): string | undefined {
-  return values.find((v) => v !== undefined && v.length > 0);
-}

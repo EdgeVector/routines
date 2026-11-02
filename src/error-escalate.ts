@@ -54,12 +54,13 @@ const DEFAULT_ERROR_PRIORITY: ErrorPriority = "P3";
 const ERROR_ESCALATE_CREATOR = "routine:routinesd-error-escalate";
 export const ROUTINE_PAPERCUT_SLUG = "papercut-routine-non-p0-failures";
 /**
- * LastDB atoms hard-cap at 524_288 bytes. Frontmatter + metadata add about
- * 13.5 KB, so a body near 510 KB is already at the edge. Roll the live ledger
- * before that edge (high-water) and again on a 413 backstop.
+ * A LastDB field value hard-caps at LASTDB_MAX_FIELD_VALUE_BYTES (524_288
+ * bytes for this ledger). Frontmatter + metadata add about 13.5 KB, so a body
+ * near 510 KB is already at the edge. Roll the live ledger before that edge
+ * (high-water) and again on a 413 backstop.
  */
 export const ROUTINE_PAPERCUT_HIGH_WATER_CHARS = 480_000;
-/** Max chars per archive body so a put stays under the atom hard limit. */
+/** Max chars per archive body so a put stays under the field value hard limit. */
 export const ROUTINE_PAPERCUT_ARCHIVE_MAX_CHARS = 480_000;
 /** Card upsert always; agent spawn is rate-limited. */
 const STATE_DIR_NAME = "error-escalate";
@@ -507,10 +508,10 @@ function isMissingBrainRecord(res: ReturnType<typeof spawnSync>): boolean {
   );
 }
 
-/** True when brain refused the write because the atom hit LASTDB_MAX_ATOM_CONTENT. */
-export function isAtomContentTooLarge(res: ReturnType<typeof spawnSync>): boolean {
+/** True when brain refused the write because the field value hit LASTDB_MAX_FIELD_VALUE_BYTES. */
+export function isFieldValueTooLarge(res: ReturnType<typeof spawnSync>): boolean {
   const text = `${res.stderr || ""}\n${res.stdout || ""}`;
-  return /atom_content_too_large|atom content too large|HTTP 413/i.test(text);
+  return /field_value_too_large|HTTP 413/i.test(text);
 }
 
 function heartbeatsLogPath(): string {
@@ -795,16 +796,13 @@ systemic fix by Brain grooming.
 
 ## Rotated ${rolledAtIso} — automatic roll by routinesd error-escalate
 
-The live atom approached or hit LASTDB_MAX_ATOM_CONTENT_BYTES (524288). The
+The live record approached or hit LASTDB_MAX_FIELD_VALUE_BYTES (524288). The
 prior body was frozen into the archive segment(s) below; this live record was
 restarted so new non-P0 failures can append again.
 
 Frozen history:
 
 ${lines.join("\n")}
-
-Cause and durable fix:
-[[papercut-routine-non-p0-failures-atom-content-too-large-413]].
 `;
 }
 
@@ -919,7 +917,7 @@ systemic fix by Brain grooming.
 ${entryBody}`;
 
   // Proactive high-water roll: do not wait for the 413 if the live body is
-  // already near the atom cap.
+  // already near the field value cap.
   const existing = brainGetReference(brain, ROUTINE_PAPERCUT_SLUG);
   if (existing.ok) {
     const liveChars = (existing.record.body ?? "").length;
@@ -958,9 +956,9 @@ ${entryBody}`;
       };
     }
 
-    if (isAtomContentTooLarge(append) && !rolledOn413) {
+    if (isFieldValueTooLarge(append) && !rolledOn413) {
       rolledOn413 = true;
-      logLine(opts.quiet, "brain papercut atom_content_too_large; rolling ledger then retrying once");
+      logLine(opts.quiet, "brain papercut field_value_too_large; rolling ledger then retrying once");
       const rolled = rollRoutinePapercutLedger(brain, {
         quiet: opts.quiet,
         nowMs: opts.nowMs,
