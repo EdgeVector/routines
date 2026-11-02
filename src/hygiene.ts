@@ -303,7 +303,7 @@ function probeDaemon(): HygieneResult["daemon"] {
  * The doctor detects two ways a routine can silently dispatch the wrong
  * instructions: a registry entry loading a stale local twin instead of the
  * installed prompt, and a prompt_path pinned into an immutable
- * artifacts/versions/<sha>/ tree that host-track will GC. Both keep working
+ * artifacts/versions/<sha>/ tree that app registry will GC. Both keep working
  * until they don't, so nothing surfaces them on its own.
  *
  * On 2026-08-06 that cost real damage: the LastDB canary nightly was still
@@ -409,10 +409,10 @@ export function isLaunchdServiceNotLoaded(message: string): boolean {
   );
 }
 
-/** True when `executable` is the immutable host-track routines artifact. */
-export function isHostTrackRoutinesArtifact(executable: string): boolean {
+/** True when `executable` is the immutable app registry routines artifact. */
+export function isRegistryRoutinesArtifact(executable: string): boolean {
   const normalized = executable.replace(/\\/g, "/");
-  return /\/\.host-track\/apps\/routines\/versions\/[0-9a-f]{64}\//.test(normalized);
+  return /\/\.local\/share\/lastdb-apps\/routines\/versions\/[^/]+\//.test(normalized);
 }
 
 /** Refresh a daemon whose launchd arguments still name a previous artifact. */
@@ -496,7 +496,7 @@ export function tryArtifactDaemonRefresh(
 ): HygieneResult["installFf"] | null {
   const currentLink =
     seams.currentLink ??
-    join(homedir(), ".host-track", "apps", "routines", "current", "dist", "routines");
+    join(process.env.LASTDB_APPS_ROOT || join(homedir(), ".local", "share", "lastdb-apps"), "routines", "current", "source", "bin", "registry-routines");
   if (!seams.currentLink && !existsSync(currentLink)) return null;
 
   let currentExecutable: string;
@@ -505,10 +505,10 @@ export function tryArtifactDaemonRefresh(
   } catch {
     return null;
   }
-  // Reload onto host-track current even when this process is still the previous
-  // digest (stale LaunchAgent after `host-track refresh --activate`). Never
+  // Reload onto app registry current even when this process is still the previous
+  // digest (stale LaunchAgent after `lastdb app upgrade routines`). Never
   // install a DEV binary: current must resolve under versions/<64-hex>/.
-  if (!isHostTrackRoutinesArtifact(currentExecutable)) return null;
+  if (!isRegistryRoutinesArtifact(currentExecutable)) return null;
 
   const uid = process.getuid?.() ?? 0;
   let launchctlPrint: string;

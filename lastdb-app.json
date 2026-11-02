@@ -38,7 +38,15 @@
         "timeout_s": 30
       }
     ],
-    "post_install": [],
+    "post_install": [
+      {
+        "argv": [
+          "python3",
+          "scripts/registry-services.py"
+        ],
+        "timeout_s": 600
+      }
+    ],
     "requires": []
   }
 }

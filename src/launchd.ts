@@ -244,7 +244,7 @@ export function plistOptionsForEntrypoint(opts: {
     return { program: wrapper, direct: true, wrapper: true, env: opts.env };
   }
   if (isBunfsEntrypoint(opts.entrypoint)) {
-    return { program: stableHostTrackExecutable(opts.execPath), direct: true, env: opts.env };
+    return { program: stableRegistryExecutable(opts.execPath), direct: true, env: opts.env };
   }
   return {
     program: opts.entrypoint,
@@ -263,8 +263,8 @@ export function isBunfsEntrypoint(entrypoint: string): boolean {
   return entrypoint.startsWith("/$bunfs/") || entrypoint.startsWith("$bunfs/");
 }
 
-/** A path inside one immutable host-track version tree, for any app. */
-const HOST_TRACK_VERSION_PATH = /\/\.host-track\/apps\/[^/]+\/versions\/[0-9a-f]{64}\//;
+/** A path inside one immutable app registry version tree, for any app. */
+const APP_REGISTRY_VERSION_PATH = /\/\.local\/share\/lastdb-apps\/[^/]+\/versions\/[^/]+\//;
 
 /**
  * argv for a launchd job that runs `routines <verb…>` as a one-shot.
@@ -282,9 +282,9 @@ const HOST_TRACK_VERSION_PATH = /\/\.host-track\/apps\/[^/]+\/versions\/[0-9a-f]
  *      unknown command: /$bunfs/root/cli.ts          (exit 2)
  *
  *    So that agent would have exited 2 every 15 min and never run one check.
- * 2. A path inside one `versions/<digest>/` tree dies when host-track prunes
+ * 2. A path inside one `versions/<digest>/` tree dies when app registry prunes
  *    it, and never picks up a later fix to the job itself (see
- *    `stableHostTrackExecutable`).
+ *    `stableRegistryExecutable`).
  *
  * Any further launchd one-shot must come through this function.
  */
@@ -293,10 +293,10 @@ export function launchdArgvForVerb(opts: {
   entrypoint: string;
   verb: readonly string[];
 }): string[] {
-  const runtime = stableHostTrackExecutable(opts.execPath);
+  const runtime = stableRegistryExecutable(opts.execPath);
   const argv = isBunfsEntrypoint(opts.entrypoint)
     ? [runtime, ...opts.verb]
-    : [runtime, stableHostTrackExecutable(opts.entrypoint), ...opts.verb];
+    : [runtime, stableRegistryExecutable(opts.entrypoint), ...opts.verb];
   assertRunnableLaunchdArgv(argv);
   return argv;
 }
@@ -317,26 +317,26 @@ export function assertRunnableLaunchdArgv(argv: readonly string[]): void {
         `user argument: ${pseudo}`,
     );
   }
-  const pinned = argv.find((a) => HOST_TRACK_VERSION_PATH.test(a));
+  const pinned = argv.find((a) => APP_REGISTRY_VERSION_PATH.test(a));
   if (pinned != null) {
     throw new Error(
-      `launchd argv is pinned to one host-track version tree, which dies at the ` +
+      `launchd argv is pinned to one app registry version tree, which dies at the ` +
         `next prune: ${pinned}`,
     );
   }
 }
 
 /**
- * Keep launchd on the stable host-track `current` link, not one version tree.
+ * Keep launchd on the stable app registry `current` link, not one version tree.
  *
  * A running daemon can outlive artifact pruning. If its plist names the old
  * immutable version, KeepAlive cannot execute that missing path after a later
  * SIGTERM. The app-specific current link always resolves to the active build.
  */
-export function stableHostTrackExecutable(execPath: string): string {
+export function stableRegistryExecutable(execPath: string): string {
   const normalized = execPath.replace(/\\/g, "/");
   return normalized.replace(
-    /(\/\.host-track\/apps\/routines)\/versions\/[0-9a-f]{64}\//,
+    /(\/\.local\/share\/lastdb-apps\/routines)\/versions\/[^/]+\//,
     "$1/current/",
   );
 }
