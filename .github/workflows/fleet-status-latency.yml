@@ -19,11 +19,10 @@ env:
   APP_BEFORE: e7916cbe4a278fc6c23ecf6be06b884df3f7121b
   APP_AFTER: ${{ github.event.pull_request.head.sha || github.sha }}
   CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-  # The candidate reads only the API 21 reply names, so both engine pins name the
-  # format 8 engine (API 21) of lastdb PR 1014. Set both to the lastdb main commit
-  # of PR 1014 before this workflow change merges.
-  DAEMON_BEFORE: 4d31ef7638230d51d2cb971adcfd52d4eb7f96dd
-  DAEMON_AFTER: 4d31ef7638230d51d2cb971adcfd52d4eb7f96dd
+  # The candidate reads only the API 21 reply names, so both engine pins name
+  # lastdb main after format 8 (API 21, #1014).
+  DAEMON_BEFORE: 372552e8d6a8ad0f6c325f82029a91ca910acea5
+  DAEMON_AFTER: 372552e8d6a8ad0f6c325f82029a91ca910acea5
   ROUTINES_SCHEMA_ENV: ${{ inputs.schema_environment || 'dev' }}
 jobs:
   compare:
