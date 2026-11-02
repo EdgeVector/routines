@@ -18,6 +18,14 @@
 # outcome=timeout_partial (exit 0) so operators still get a signal.
 set -euo pipefail
 
+# These gates depend on the board or Situations. Respect the host policy
+# before any command can reach either app or start an old primary-copy proof.
+if [ "${LAST_STACK_APPS_OFF:-0}" = "1" ]; then
+  echo 'skipped: kanban and situations off (Tom, 2026-10-31)'
+  echo 'ROUTINE_RESULT outcome=noop detail=apps-off'
+  exit 0
+fi
+
 ROUTINE_ID="cloud-sync-health-fix"
 last_stack="${LAST_STACK_ROOT:-$HOME/.last-stack}"
 export PATH="${HOME}/.local/bin:${last_stack}/bin:${PATH}"
