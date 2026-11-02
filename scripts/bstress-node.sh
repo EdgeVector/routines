@@ -58,7 +58,7 @@ _write_state() {
 }
 
 _launch_proc() {
-  FOLDDB_HOME="$HOME_DIR" LASTDB_HOME="$HOME_DIR" \
+  LASTDB_HOME="$HOME_DIR" \
   FOLDDB_DISABLE_KEYCHAIN=1 FOLDDB_PASSPHRASE="delmar" \
     nohup "$BIN" --data-dir "$HOME_DIR" >>"$LOG" 2>&1 &
   NODE_PID=$!
@@ -118,7 +118,7 @@ case "$cmd" in
       *) echo "bstress: error=refuse_home home=$HOME_DIR"; exit 3 ;;
     esac
     case "$HOME_DIR" in
-      "$HOME/.folddb"*|"$HOME/.lastdb"*) echo "bstress: error=refuse_real_profile"; exit 3 ;;
+      "$HOME/.lastdb"*) echo "bstress: error=refuse_real_profile"; exit 3 ;;
     esac
     SOCK="$HOME_DIR/data/folddb.sock"
     LOG="$HOME_DIR/node.log"
@@ -193,7 +193,7 @@ case "$cmd" in
       esac
     fi
     rm -f "$STATE"
-    if [ -S "$HOME/.folddb/data/folddb.sock" ]; then
+    if [ -S "$HOME/.lastdb/data/folddb.sock" ]; then
       echo "bstress: primary_brain=present_untouched"
     else
       echo "bstress: primary_brain=not_socket(ok if brain not running)"

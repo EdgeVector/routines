@@ -190,7 +190,6 @@ export function codexWritableDirs(): string[] {
     routinesHome(),
     join(home, ".codex", "automations"),
     join(home, ".lastdb"),
-    join(home, ".folddb"), // legacy alias → often symlink to ~/.lastdb
     join(home, ".kanban"), // legacy alias → often symlink to ~/.fkanban
     join(home, ".fkanban"),
     join(home, ".last-stack"), // compat root (mostly symlinks into state/)

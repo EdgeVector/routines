@@ -463,17 +463,15 @@ Such a result measures publication and lookup latency with that dependency absen
 It does not prove nominal live posture collection, and no posture gate is changed.
 Cloud sync stays off for CI nodes.
 Native fleet reads retain all 25 fields and all 16 hashes. The page plan uses the database's 10,000-key work gate.
-The page plan reserves half the gate for selectors and metadata. Each selected address adds one unit; each projected field adds tip and atom work.
+The page plan reserves half the gate for selectors and metadata. Each selected address adds one unit; each projected field adds value work.
 The 16 full-field queries start with six records per hash. The reader drains every opaque cursor and checks complete membership and range order.
 `ROUTINES_STATUS_READ_TRACE_FILE` enables explicit page diagnostics without field values.
 CI retains every page's selectors, status, cursor, count, and continuation. Each CLI call records its page count and full elapsed time.
 The comparison enables the same transport trace in both arms, so both latency samples include the trace cost.
 A baseline that fails schema admission supplies no before latency and cannot count as a passing comparison.
-The comparison records each field's present, absent, or null state and its actual current-tip metadata.
+The comparison records each field's present, absent, or null state and the record metadata block.
 An absent optional historical layout marker stays absent after each reopen.
-It verifies complete primary membership and real per-field counts; it does not require an atom in every declared field.
-Legacy CLI writes in this cohort have unsigned or unset authors. Their exact author state must remain unchanged.
-This cohort does not establish signed-author preservation.
+It verifies complete primary membership and real per-field counts; it does not require a value in every declared field.
 
 ## Admin fleet status deliver
 
