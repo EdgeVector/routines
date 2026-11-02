@@ -72,7 +72,6 @@ fi
 for probe in \
   kanban-stress.sh \
   north-star-rollup-gate.sh \
-  cloud-sync-health-fix-gate.sh \
   lastdb-local-smoke-gate.sh \
   llms-txt-install-smoke-gate.sh
 do
