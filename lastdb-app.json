@@ -1,0 +1,44 @@
+{
+  "app_id": "routines",
+  "version": "0.1.0",
+  "source": "https://github.com/EdgeVector/routines.git",
+  "metadata": {
+    "display_name": "routines",
+    "description": "Unified scheduler + dispatcher for agent routines with global difficulty routing and explicit provider pins.",
+    "homepage_url": "https://github.com/EdgeVector/routines"
+  },
+  "run": {
+    "runtime": "bun",
+    "entrypoint": "src/cli.ts"
+  },
+  "schemas": [],
+  "install": {
+    "prepare": [
+      {
+        "argv": [
+          "bun",
+          "install",
+          "--frozen-lockfile"
+        ],
+        "timeout_s": 300
+      }
+    ],
+    "links": [
+      {
+        "source": "bin/registry-routines",
+        "command": "routines"
+      }
+    ],
+    "probe": [
+      {
+        "argv": [
+          "./bin/registry-routines",
+          "list"
+        ],
+        "timeout_s": 30
+      }
+    ],
+    "post_install": [],
+    "requires": []
+  }
+}
