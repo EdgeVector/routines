@@ -446,8 +446,8 @@ export function pidAlive(pid: number): boolean {
   }
 }
 
-/** How long after host-track `current` flips we still name the stop as activate. */
-const HOST_TRACK_ACTIVATE_WINDOW_MS = 10 * 60 * 1000;
+/** How long after app registry `current` flips we still name the stop as activate. */
+const APP_REGISTRY_ACTIVATE_WINDOW_MS = 10 * 60 * 1000;
 
 /** Who wrote `stopReason` onto this identity. */
 export type DaemonStopSource = "self" | "reconstructed" | "inherited";
@@ -469,7 +469,7 @@ export interface DaemonIdentity {
 
 export interface ClassifyAbruptStopOptions {
   now?: Date;
-  hostTrackCurrentPath?: string;
+  registryCurrentPath?: string;
   windowMs?: number;
 }
 
@@ -483,10 +483,10 @@ function currentExecutable(): string | null {
   }
 }
 
-function defaultHostTrackCurrentPath(): string {
+function defaultRegistryCurrentPath(): string {
   return (
-    process.env.ROUTINES_HOST_TRACK_CURRENT ||
-    join(homedir(), ".host-track", "apps", "routines", "current")
+    process.env.ROUTINES_APP_REGISTRY_CURRENT ||
+    join(process.env.LASTDB_APPS_ROOT || join(homedir(), ".local", "share", "lastdb-apps"), "routines", "current")
   );
 }
 
@@ -543,19 +543,19 @@ export function priorStopNeedsReconstruct(prev: DaemonIdentity): boolean {
 
 /**
  * Name why the previous routinesd died without a graceful stop line.
- * host-track activate is the measured 2026-08-26 cause (symlink mtime
+ * app registry activate is the measured 2026-08-26 cause (symlink mtime
  * at the restart instant, launchd program path under versions/<digest>/).
  */
 export function classifyAbruptStop(
   prev: DaemonIdentity,
   opts: ClassifyAbruptStopOptions = {},
-): "host-track-activate" | "unknown" {
+): "registry-activate" | "unknown" {
   const now = opts.now ?? new Date();
-  const windowMs = opts.windowMs ?? HOST_TRACK_ACTIVATE_WINDOW_MS;
-  const currentPath = opts.hostTrackCurrentPath ?? defaultHostTrackCurrentPath();
+  const windowMs = opts.windowMs ?? APP_REGISTRY_ACTIVATE_WINDOW_MS;
+  const currentPath = opts.registryCurrentPath ?? defaultRegistryCurrentPath();
   try {
     const st = lstatSync(currentPath);
-    if (now.getTime() - st.mtimeMs <= windowMs) return "host-track-activate";
+    if (now.getTime() - st.mtimeMs <= windowMs) return "registry-activate";
   } catch {
     /* current link missing — fall through */
   }
@@ -568,7 +568,7 @@ export function classifyAbruptStop(
       } catch {
         /* keep the recorded path when it is gone */
       }
-      if (live !== prevExec) return "host-track-activate";
+      if (prevExec !== live && !prevExec.startsWith(live + "/")) return "registry-activate";
     } catch {
       /* ignore */
     }
