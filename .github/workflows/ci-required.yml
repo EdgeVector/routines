@@ -6,8 +6,8 @@
 # same thing. The repo has no tests (deleted 2026-10-09).
 #
 # `publish` runs only on a push to main. It calls last-stack's reusable workflow, which
-# builds the host-track artifact on macOS and uploads the Actions artifact
-# `ht-artifact-<sha>`. It never touches a channel. On the Mac, `host-track refresh`
+# builds the app registry artifact on macOS and uploads the Actions artifact
+# `ht-artifact-<sha>`. It never touches a channel. On the Mac, `app registry refresh`
 # runs last-stack-github-artifact-pull, which re-checks this workflow's ci-required
 # check run and every digest before it promotes stable.
 # Brain: design-github-artifact-publish-path, sop-github-artifact-app-migration.
@@ -63,12 +63,12 @@ jobs:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     permissions:
       contents: read
-    uses: EdgeVector/last-stack/.github/workflows/host-track-artifact.yml@main
+    uses: EdgeVector/last-stack/.github/workflows/registry-app-package.yml@main
     with:
       setup-bun: true
       build-command: "bun install --frozen-lockfile && bun run build"
       runs-on: macos-latest
-      config: .lastgit/artifacts.json
+      config: .last-stack/package.json
 
   registry-commit:
     name: Registry commit identity
