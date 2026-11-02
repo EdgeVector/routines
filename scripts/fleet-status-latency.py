@@ -38,12 +38,11 @@ def require_owned_node(node):
         "The engine is older than LastDB API 13, where every declared schema owns its values")
 
 
-def record_home(node):
-    # A format 7 home stores one value per record key, so a field reply carries an empty
-    # atom_uuid (LastDB decision D7). The LastDB benchmark Node reads the home marker;
-    # a Node from a release before format 7 has no record_home and no format 7 home.
-    probe = getattr(node, "record_home", None)
-    return bool(probe and probe())
+def finish_setup(node, output, cleanup):
+    # Setup reclamation is a one-time cost, outside the steady-state requests.
+    flushed = node.call("/api/db/flush", {})[0]
+    require(flushed.get("durable") is True, "The app setup lacks a durable flush")
+    save(output / "setup-cleanup.json", cleanup.request_and_wait(node))
 
 
 def installed_schemas(node, bindings, contract, output, phase, legacy):
@@ -69,8 +68,8 @@ def installed_schemas(node, bindings, contract, output, phase, legacy):
                 "A native runtime has transform fields or different keys")
     require(set(owned) == {schema["name"] for schema in canonical.values()}, "Setup retains an unexpected local schema")
     if not legacy:
-        molecules = [molecule for schema in canonical.values() for molecule in schema.get("field_molecule_uuids", {}).values()]
-        require(len(set(molecules)) == len(molecules), "Two native schemas share physical record values")
+        field_keys = [field_key for schema in canonical.values() for field_key in schema.get("field_key_ids", {}).values()]
+        require(len(set(field_keys)) == len(field_keys), "Two native schemas share a field key")
     return {key: schema["record_count"] for key, schema in canonical.items()}
 
 
@@ -202,7 +201,7 @@ def snapshot(node, bindings, contract, coordinates):
         for offset, item in enumerate(reply["results"]):
             key, address, range_value = coordinates[start + offset]
             response = item.get("response", {})
-            require(item.get("status") == 200 and response.get("ok") is True and response.get("unresolved_rows") == 0
+            require(item.get("status") == 200 and response.get("ok") is True
                 and response.get("has_more") is False and len(response.get("results", [])) <= 1, "A known-key snapshot is unresolved or ambiguous")
             identity = json.dumps([key, address, range_value])
             if not response["results"]:
@@ -227,30 +226,23 @@ def snapshot(node, bindings, contract, coordinates):
                 all(isinstance(values[field], str) and values[field] for field in required), "A value type or required key field differs")
             require(values[definition["key"]["hash_field"]] == address and
                 (range_value is None or values[definition["key"]["range_field"]] == range_value), "A stored primary field differs from its actual coordinates")
-            require(set(row.get("metadata", {})) == present and "author_pub_key" in row, "A full query omits actual per-field or row author metadata")
-            if any("has_conflicts" in tip and tip["has_conflicts"] is not False and tip["has_conflicts"] != "unknown"
-                for tip in row["metadata"].values()):
+            # A record has one metadata block (or null) and one conflict flag.
+            # The flag describes this query: false, or "unknown" when the page cannot read conflicts.
+            metadata = row.get("metadata")
+            require(metadata is None or isinstance(metadata, dict), "A full query returns an invalid record metadata block")
+            if row.get("has_conflicts") not in (False, "unknown"):
                 save(node.output / "failed-known-key-conflict.json", {"coordinate": [key, address, range_value], "actual_result": item})
-                raise RuntimeError("A present field reports retained conflicts or an invalid conflict signal")
-            # Molecules change ownership; conflict flags describe this query.
-            # Preserve every actual current-tip attribute and optional key presence.
-            metadata = {field: {name: value for name, value in row["metadata"][field].items()
-                if name not in ("molecule_uuid", "has_conflicts")} for field in values}
-            atoms = [item.get("atom_uuid") for item in metadata.values()]
-            if record_home(node):
-                # No per-field atom identity exists; the value, presence and author checks still run.
-                require(all(atom == "" for atom in atoms), "A format 7 reply names a per-field atom")
-            else:
-                require(all(isinstance(atom, str) and atom for atom in atoms), "A stored field lacks its current atom identity")
+                raise RuntimeError("A present record reports retained conflicts or an invalid conflict signal")
+            # Preserve the record metadata block and optional key presence.
             observed[identity] = {"values_sha256": digest(values), "value_bytes": sum(len(json.dumps(value, ensure_ascii=False).encode()) for value in values.values()),
                 "present_fields": sorted(present), "absent_fields": sorted(declared - present),
                 "null_fields": sorted(field for field, value in values.items() if value is None),
-                "metadata": metadata, "row_author": row["author_pub_key"]}
+                "metadata": metadata}
     return observed
 
 
 def field_volume(observed, contract):
-    volume = {key: {field: {"present": 0, "absent": 0, "null": 0, "writer_set": 0} for field in item["definition"]["fields"]}
+    volume = {key: {field: {"present": 0, "absent": 0, "null": 0} for field in item["definition"]["fields"]}
         for key, item in contract.items()}
     for coordinate, state in observed.items():
         if state is None:
@@ -259,8 +251,6 @@ def field_volume(observed, contract):
         for presence in ("present", "absent", "null"):
             for field in state[presence + "_fields"]:
                 volume[key][field][presence] += 1
-        for field, metadata in state["metadata"].items():
-            volume[key][field]["writer_set"] += bool(metadata.get("writer_pubkey"))
     return volume
 
 
@@ -276,7 +266,7 @@ def native_pages(node, binding, contract, expected_rows):
             if cursor is not None:
                 request["cursor"] = cursor
             reply = node.call("/api/query", request)[0]
-            require(reply.get("ok") is True and reply.get("unresolved_rows") == 0 and isinstance(reply.get("has_more"), bool),
+            require(reply.get("ok") is True and isinstance(reply.get("has_more"), bool),
                 "A normal native fleet page is incomplete")
             for row in reply["results"]:
                 values = {local: unwrapped(row["fields"][wire]) for local, wire in names.items()}
@@ -367,7 +357,7 @@ def arm(args, Node, finish_setup, contract, label, pair):
     output = args.output / f"pair-{pair}-{label}"
     output.mkdir()
     fresh = label == "fresh"
-    # The control keeps main's old request flow. Both engine pins are API 13 or later, so every
+    # The control keeps main's old request flow. Both engine pins name the format 8 engine (API 21), so every
     # arm declares owned schemas: "candidate" on the before engine, "fresh" on the after engine.
     legacy = label == "control"
     binary = args.candidate_binary if not legacy else args.control_binary
@@ -405,7 +395,7 @@ def arm(args, Node, finish_setup, contract, label, pair):
             "Actual primary membership exceeds or differs from the complete known key set")
         before = snapshot(node, bindings, contract, coordinates + copied)
         require(all(value is not None for value in before.values()), "An actual published record is absent before reopen")
-        save(output / "before-atoms.json", before)
+        save(output / "before-records.json", before)
         save(output / "before-field-volume.json", field_volume(before, contract))
         finish_setup(node, output)
         cloud_off(node, "before-reopen")
@@ -413,8 +403,8 @@ def arm(args, Node, finish_setup, contract, label, pair):
         node.start()
         cloud_off(node, "reopened")
         reopened = snapshot(node, bindings, contract, coordinates + copied)
-        require(reopened == before, "The actual reopen changed values, current atoms, authors, or membership")
-        save(output / "reopened-atoms.json", reopened)
+        require(reopened == before, "The actual reopen changed values, record metadata, or membership")
+        save(output / "reopened-records.json", reopened)
         # Normal publication refreshes the digest marker once before any timed native reader request.
         published, _ = call_json(args, binary, node, home, "publish-status")
         publication(published, expected)
@@ -428,8 +418,8 @@ def arm(args, Node, finish_setup, contract, label, pair):
             node.start()
             cloud_off(node, "after-engine-reopen")
             require(snapshot(node, bindings, contract, coordinates + copied) == current,
-                "The after-engine reopen changed current atoms, authors, values, or membership")
-            save(output / "upgrade-atoms.json", current)
+                "The after-engine reopen changed values, record metadata, or membership")
+            save(output / "upgrade-records.json", current)
         samples, rows = measure(args, binary, node, home, expected)
         changed = sorted(expected)[0]
         volume = native_pages(node, bindings["status"], contract, rows) if label != "control" else {"logical_records": len(rows)}
@@ -469,8 +459,8 @@ def arm(args, Node, finish_setup, contract, label, pair):
         value, _ = call_json(args, binary, node, home, "read-status")
         view(value, expected)
         require(snapshot(node, bindings, contract, [("runSummaryV2", identifier, stamp) for identifier, stamp in selected]) == retained,
-            "Run-retention values or atoms differ after the second actual reopen")
-        save(output / "retention-atoms.json", retained)
+            "Run-retention values or record metadata differ after the second actual reopen")
+        save(output / "retention-records.json", retained)
         save(output / "samples.json", samples)
         result = {"label": label, "pair": pair, "samples": samples, "same_engine_samples": same_engine_samples, "volume": volume,
             "initial_logical_records": len(before), "posture": "unknown: real ENOENT from explicit absent dependency",
@@ -502,8 +492,9 @@ def main():
     require(128 <= args.records <= 4096 and 16 <= args.samples <= 100, "The comparison volume or sample count is outside its finite bound")
     args.output.mkdir(parents=True)
     sys.path.insert(0, str(args.lastdb_source / "scripts/benchmarks"))
+    sys.path.append(str(args.lastdb_source / "scripts/disk_v2"))
     from node import Node, file_hash
-    from app_multi_key_compare import finish_setup
+    import cleanup
     source = '''import {SCHEMAS,canonicalDefinition,definitionIdentity,fieldRules} from "./src/status-schema.ts";
 console.log(JSON.stringify(Object.fromEntries(Object.keys(SCHEMAS).map(key=>[key,{identity:definitionIdentity(canonicalDefinition(key)),definition:canonicalDefinition(key),field_map:Object.fromEntries(Object.entries(fieldRules(key)).map(([field,[name]])=>[field,name]))}]))));'''
     contract = json.loads(subprocess.check_output(["bun", "--eval", source], cwd=args.candidate, text=True))
@@ -519,7 +510,7 @@ console.log(JSON.stringify(Object.fromEntries(Object.keys(SCHEMAS).map(key=>[key
     try:
         for pair, order in enumerate((("control", "candidate"), ("candidate", "control"), ("fresh",))):
             for label in order:
-                summary["arms"].append(arm(args, Node, finish_setup, contract, label, pair))
+                summary["arms"].append(arm(args, Node, lambda node, output: finish_setup(node, output, cleanup), contract, label, pair))
         rows = []
         for comparison, selected in (("same engine", "same_engine_samples"), ("full engine upgrade", "samples")):
             for operation in ("publish_unchanged", "read_complete", "publish_changed"):
@@ -533,14 +524,13 @@ console.log(JSON.stringify(Object.fromEntries(Object.keys(SCHEMAS).map(key=>[key
         summary["rows"], summary["complete"] = rows, True
         lines = ["## Routines publication and lookup latency", "", f"Schema service environment: {args.schema_environment}.", "", summary["scope"], "",
             "Both balanced orders and a fresh owned-schema arm passed actual CLI operations. Cloud sync stayed off.",
-            "Every arm ran on a LastDB engine at API 13 or later, where every declared schema owns its values.",
+            "Every arm ran on the LastDB format 8 engine (API 21), where every declared schema owns its values.",
             "The candidate measured on the before engine, then reopened on the after engine."
             + (" Both pins name the same engine." if args.daemon_before_revision == args.daemon_after_revision else ""),
             "The control retains main's serial flow and copied status records after the explicit vocabulary/transport patch.",
             "Both arms use the same optional page trace. Latency includes the trace cost and every cursor page.",
             "read-pages.jsonl retains actual page statuses/selectors/cursors; commands.jsonl links each CLI call to its page count and elapsed time.",
-            "Current atoms, actual author metadata (including unsigned/unset state), optional field absence/null, values, complete membership, native order, deletion, retention, and reopen checks passed.",
-            "The legacy control writes unsigned records. This cohort does not establish signed-author preservation.",
+            "Record metadata, conflict flags, optional field absence/null, values, complete membership, native order, deletion, retention, and reopen checks passed.",
             "This does not prove nominal live posture collection, invalid generic-name conversion, or recipient delivery.", "",
             "| Comparison | Operation | Percentile | Patched main ms | Candidate ms | Change |", "|---|---|---|---:|---:|---:|"]
         lines += [f"| {row['comparison']} | {row['operation']} | {row['percentile']} | {row['before_ms']:.3f} | {row['after_ms']:.3f} | {row['change_percent']:+.1f}% |" for row in rows]

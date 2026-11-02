@@ -1,6 +1,6 @@
 // Heartbeats. When a routine sets `heartbeat_slug`, each run appends one line
 // to a **filesystem log** (not LastDB / brain). Full-body brain rewrites of
-// routine-heartbeats ballooned Mini atom storage; heartbeats must stay off DB.
+// routine-heartbeats ballooned Mini record storage; heartbeats must stay off DB.
 //
 // Default: ~/.last-stack/logs/routine-heartbeats.log
 // Override: LAST_STACK_HEARTBEATS_FILE, or ROUTINES_HEARTBEATS_FILE

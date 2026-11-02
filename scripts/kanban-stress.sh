@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # kanban-stress.sh — consistency stress harness for the kanban board over the
-# LastDB Unix-socket transport (/Users/tomtang/.folddb/data/folddb.sock).
+# LastDB Unix-socket transport (~/.lastdb/data/folddb.sock).
 #
 # WHY: after kanban moved to the socket version of LastDB, writes have looked
 # inconsistent (acked writes not reading back, flapping reads). This harness

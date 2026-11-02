@@ -44,7 +44,7 @@ const BATCH_SIZE = 64;
 const READ_WORK_KEYS = 10_000;
 
 function hashReadPageLimit(reads: readonly HashRead[]): number {
-  // Core charges selected addresses and each field's tip/atom work to ONE
+  // Core charges selected addresses and each field's value work to ONE
   // batch budget. Keep half of that budget for probes, selectors and metadata.
   // The native reader also loads its alternate fields to validate each address.
   const keysPerRecord = reads.reduce((sum, read) => {
@@ -75,7 +75,7 @@ export function nodeApiVersion(version: Entry): number {
 
 function rows(value: unknown): Array<{ hash: string; range: string | null; fields: FieldMap; matched?: { hash: string; range: string } }> {
   const reply = object(value);
-  if (reply.ok !== true || reply.unresolved_rows !== 0 || !Array.isArray(reply.results) || typeof reply.has_more !== "boolean") {
+  if (reply.ok !== true || !Array.isArray(reply.results) || typeof reply.has_more !== "boolean") {
     throw new LastDbPublishError("query_incomplete", "LastDB did not return a resolved query page.");
   }
   return reply.results.map((item) => {
@@ -304,7 +304,6 @@ function recordReadPages(path: string, body: unknown, reply: unknown, status: nu
       fields: query.fields, limit: query.limit, offset: query.offset ?? 0, cursor: query.cursor ?? null,
       status: item.status ?? null, returned_count: page.returned_count ?? (Array.isArray(page.results) ? page.results.length : null),
       has_more: page.has_more ?? null, next_cursor: page.next_cursor ?? null,
-      unresolved_rows: page.unresolved_rows ?? null, tombstoned_rows: page.tombstoned_rows ?? null,
       error: typeof page.error === "string" ? page.error : null }];
   });
   if (pages.length) writeFileSync(file, pages.map((page) => JSON.stringify(page) + "\n").join(""), { flag: "a", mode: 0o600 });

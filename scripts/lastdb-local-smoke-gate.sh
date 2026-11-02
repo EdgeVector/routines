@@ -188,7 +188,7 @@ else
       awk -F' = ' '
         $1 ~ /^ *LASTDB_/ {
           key=$1; gsub(/^ +| +$/, "", key)
-          if (key == "LASTDB_HOME" || key == "FOLDDB_HOME" || key == "LASTDB_DATA_DIR") next
+          if (key == "LASTDB_HOME" || key == "LASTDB_DATA_DIR") next
           val=$2; gsub(/^ +| +$/, "", val)
           if (key != "" && val != "") print key "=" val
         }')"
@@ -201,7 +201,7 @@ fi
 env_pairs=()
 while IFS= read -r pair; do
   case "$pair" in
-    LASTDB_HOME=*|FOLDDB_HOME=*|LASTDB_DATA_DIR=*) ;;
+    LASTDB_HOME=*|LASTDB_DATA_DIR=*) ;;
     LASTDB_*=*) env_pairs+=("$pair") ;;
   esac
 done <<<"$env_content"
