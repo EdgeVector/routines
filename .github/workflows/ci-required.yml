@@ -57,19 +57,6 @@ jobs:
           echo "gate=$GATE_RESULT"
           test "$GATE_RESULT" = "success"
 
-  publish:
-    name: publish
-    needs: [ci-required]
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-    permissions:
-      contents: read
-    uses: EdgeVector/last-stack/.github/workflows/registry-app-package.yml@main
-    with:
-      setup-bun: true
-      build-command: "bun install --frozen-lockfile && bun run build"
-      runs-on: macos-latest
-      config: .last-stack/package.json
-
   registry-commit:
     name: Registry commit identity
     needs: [ci-required]
