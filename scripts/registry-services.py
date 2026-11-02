@@ -43,7 +43,9 @@ def main():
             path = home / 'Library/LaunchAgents' / (label + '.plist')
             originals[label] = (path, path.read_bytes())
             plist = plistlib.loads(originals[label][1])
-            env = plist.get('EnvironmentVariables', {})
+            env = plist.setdefault('EnvironmentVariables', {})
+            if 'LAST_STACK_APPS_OFF' in os.environ:
+                env['LAST_STACK_APPS_OFF'] = os.environ['LAST_STACK_APPS_OFF']
             if label.endswith('routinesd'):
                 args = ['daemon', '--stagger-ms', env.get('ROUTINES_STAGGER_MS', '60000')]
             elif label.endswith('routines-web'):

@@ -90,6 +90,7 @@ function runSituations(args: string[], timeoutMs = 30_000): {
   stdout: string;
   error?: string;
 } {
+  if (process.env.LAST_STACK_APPS_OFF === "1") return { ok: true, stdout: "[]" };
   const bin = fsituationsBinary();
   // One deadline covers the primary process, its output, and the legacy CLI.
   // Giving the fallback a new timeout could double an external host's budget.
