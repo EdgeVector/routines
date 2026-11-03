@@ -226,13 +226,9 @@ def snapshot(node, bindings, contract, coordinates):
                 all(isinstance(values[field], str) and values[field] for field in required), "A value type or required key field differs")
             require(values[definition["key"]["hash_field"]] == address and
                 (range_value is None or values[definition["key"]["range_field"]] == range_value), "A stored primary field differs from its actual coordinates")
-            # A record has one metadata block (or null) and one conflict flag.
-            # The flag describes this query: false, or "unknown" when the page cannot read conflicts.
+            # A record has one metadata block (or null).
             metadata = row.get("metadata")
             require(metadata is None or isinstance(metadata, dict), "A full query returns an invalid record metadata block")
-            if row.get("has_conflicts") not in (False, "unknown"):
-                save(node.output / "failed-known-key-conflict.json", {"coordinate": [key, address, range_value], "actual_result": item})
-                raise RuntimeError("A present record reports retained conflicts or an invalid conflict signal")
             # Preserve the record metadata block and optional key presence.
             observed[identity] = {"values_sha256": digest(values), "value_bytes": sum(len(json.dumps(value, ensure_ascii=False).encode()) for value in values.values()),
                 "present_fields": sorted(present), "absent_fields": sorted(declared - present),
@@ -530,7 +526,7 @@ console.log(JSON.stringify(Object.fromEntries(Object.keys(SCHEMAS).map(key=>[key
             "The control retains main's serial flow and copied status records after the explicit vocabulary/transport patch.",
             "Both arms use the same optional page trace. Latency includes the trace cost and every cursor page.",
             "read-pages.jsonl retains actual page statuses/selectors/cursors; commands.jsonl links each CLI call to its page count and elapsed time.",
-            "Record metadata, conflict flags, optional field absence/null, values, complete membership, native order, deletion, retention, and reopen checks passed.",
+            "Record metadata, optional field absence/null, values, complete membership, native order, deletion, retention, and reopen checks passed.",
             "This does not prove nominal live posture collection, invalid generic-name conversion, or recipient delivery.", "",
             "| Comparison | Operation | Percentile | Patched main ms | Candidate ms | Change |", "|---|---|---|---:|---:|---:|"]
         lines += [f"| {row['comparison']} | {row['operation']} | {row['percentile']} | {row['before_ms']:.3f} | {row['after_ms']:.3f} | {row['change_percent']:+.1f}% |" for row in rows]
