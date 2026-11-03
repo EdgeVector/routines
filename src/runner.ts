@@ -66,7 +66,6 @@ import {
 import { readOutcomeSink } from "./runs.ts";
 import { patchState, readState } from "./state.ts";
 import { envFromProjectConfig, loadProjectConfig, resolveRoutineCwd } from "./project-config.ts";
-import { discoveredRoutineSocketEnv } from "./socket-env.ts";
 import {
   escalateRoutineError,
   retractEscalateStateIfRecovered,
@@ -976,7 +975,6 @@ async function runOnce(
         enrichGateEnv(entry, {
           ...configuredEnv,
           ...(claudeAuth?.env ?? {}),
-          ...discoveredRoutineSocketEnv(configuredEnv),
           ...buildRoutineAttributionEnv(entry.id, runDir),
         }),
       ),
