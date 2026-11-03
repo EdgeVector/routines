@@ -435,6 +435,8 @@ A new home starts with no Routines schema, so `init-status` declares the schema-
 The primary-reset restrictions remain in force. These commands do not authorize a primary change.
 
 Fresh setup declares only the three active schemas and saves their exact identities and runtime addresses.
+`lastdb-app.json` lists the same three definitions, with every field typed, because a registry app lists every schema it declares.
+After a schema change, run `bun scripts/write-app-manifest.ts` to regenerate that list from `src/status-schema.ts`.
 Definitions must already exist in schema service under the registered app owner.
 Generic historical field names do not pass the current canonical-name policy.
 The source declares precise canonical names and preserves the original String field types.
