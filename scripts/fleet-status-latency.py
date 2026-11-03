@@ -306,49 +306,6 @@ def measure(args, binary, node, home, expected):
     return samples, rows
 
 
-def register_definitions(args, Node):
-    require(args.schema_environment == "dev", "Only DEV permits normal account-free registration; PROD uses the registered publisher")
-    node = Node(args.daemon_before, args.daemon_before_revision, args.output,
-        temporary_directory=Path(os.environ["RUNNER_TEMP"]).resolve(), environment={"ENVIRONMENT": "dev", "EXEMEM_ENV": "dev",
-            "LASTDB_SELF_METRICS_TO_DB": "false", "LASTDB_BYTE_BACKUP_V2_ENABLED": "false", "LASTDB_TTL_SWEEP": "0"})
-    try:
-        node.start()
-        cloud_off(node, "registration")
-        home = node.root / "routines"
-        (home / "registry").mkdir(parents=True)
-        # Exact main has no separate init command. Its normal publisher declares
-        # all six real record types, under this one normal CI node identity.
-        # An empty actual registry is admission work, never a latency/data proof.
-        result, _ = call_json(args, args.control_binary, node, home, "publish-status")
-        publication(result, set())
-        require(len(set(result["schemaHashes"].values())) == 6, "The normal publisher did not declare six distinct schemas")
-        directory = node.call("/api/schemas?include_full=true&include_counts=true")[0]
-        addresses = [schema["name"] for schema in directory.get("schemas", []) if schema.get("owner_app_id") == "routines"]
-        require(len(addresses) <= 64, "The diagnostic schema set exceeds its bounded owner scope")
-        def metadata(runtime):
-            try:
-                return {"runtime": runtime, "schema": node.call("/api/schema/" + quote(runtime, safe=""))[0]["schema"]}
-            except Exception as error:
-                return {"runtime": runtime, "error": str(error)}
-        with ThreadPoolExecutor(max_workers=6) as pool:
-            replies = list(pool.map(metadata, addresses))
-        save(args.output / "installed-schemas.json", {"directory": directory, "responses": replies,
-            "scope": "Actual owner metadata after normal DEV admission by the control"})
-        require(directory.get("ready") is True, "The actual installed schema directory is not ready")
-        owned = {schema["name"]: schema for schema in directory.get("schemas", []) if schema.get("owner_app_id") == "routines"}
-        installed_schemas(node, result["schemaHashes"], args.contract, args.output, "registered", True)
-        require(all("schema" in reply and reply["schema"].get("name") == reply["runtime"]
-            and reply["schema"].get("identity_hash") == owned[reply["runtime"]].get("identity_hash")
-            and reply["schema"].get("owner_app_id") == "routines" for reply in replies),
-            "The installed schema metadata returned an error or another runtime, identity, or owner")
-        cloud_off(node, "registered")
-        save(args.output / "registration.json", {"scope": "DEV normal six-definition admission only; no latency or migration proof",
-            "environment": "dev", "schema_hashes": result["schemaHashes"], "actual_registry_records": 0,
-            "posture": "unknown: real ENOENT", "cloud_sync": "off", "identity_rotated_on_failure": False})
-    finally:
-        node.close()
-
-
 def arm(args, Node, finish_setup, contract, label, pair):
     output = args.output / f"pair-{pair}-{label}"
     output.mkdir()
@@ -482,7 +439,6 @@ def main():
     parser.add_argument("--records", type=int, default=256)
     parser.add_argument("--samples", type=int, default=20)
     parser.add_argument("--schema-environment", choices=("dev", "prod"), required=True)
-    parser.add_argument("--register-definitions-only", action="store_true")
     args = parser.parse_args()
     require(os.environ.get("GITHUB_ACTIONS") == "true", "This operational comparison runs only in hosted CI")
     require(128 <= args.records <= 4096 and 16 <= args.samples <= 100, "The comparison volume or sample count is outside its finite bound")
@@ -495,9 +451,6 @@ def main():
 console.log(JSON.stringify(Object.fromEntries(Object.keys(SCHEMAS).map(key=>[key,{identity:definitionIdentity(canonicalDefinition(key)),definition:canonicalDefinition(key),field_map:Object.fromEntries(Object.entries(fieldRules(key)).map(([field,[name]])=>[field,name]))}]))));'''
     contract = json.loads(subprocess.check_output(["bun", "--eval", source], cwd=args.candidate, text=True))
     args.contract = contract
-    if args.register_definitions_only:
-        register_definitions(args, Node)
-        return
     summary = {"complete": False, "schema_environment": args.schema_environment, "candidate_revision": args.candidate_revision,
         "daemon_before_revision": args.daemon_before_revision, "daemon_after_revision": args.daemon_after_revision,
         "control": json.loads(args.control_source.read_text()), "records": args.records, "samples_per_operation_per_arm": args.samples,

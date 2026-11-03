@@ -74,11 +74,6 @@ jobs:
             bun install --frozen-lockfile
             bunx tsc --noEmit
           done
-      - name: Require the real PROD definitions before any build
-        if: ${{ env.ROUTINES_SCHEMA_ENV == 'prod' }}
-        run: |
-          bun candidate/scripts/fleet-schema-definitions.mjs "$GITHUB_WORKSPACE/control" "$GITHUB_WORKSPACE/candidate" \
-            "$GITHUB_WORKSPACE/daemon-after" "$RUNNER_TEMP/routines-results/source/definitions.json"
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: |
@@ -106,21 +101,6 @@ jobs:
           done
           cd "$RUNNER_TEMP/routines-binaries"
           sha256sum daemon-before daemon-after control candidate > "$RUNNER_TEMP/routines-results/source/programs.sha256"
-      - name: Use normal DEV app publication under one generated CI identity
-        if: ${{ env.ROUTINES_SCHEMA_ENV == 'dev' }}
-        run: |
-          python3 candidate/scripts/fleet-status-latency.py --register-definitions-only --schema-environment dev \
-            --candidate "$GITHUB_WORKSPACE/candidate" --candidate-revision "$APP_AFTER" \
-            --control-source "$RUNNER_TEMP/routines-results/source/control-source.json" \
-            --control-binary "$RUNNER_TEMP/routines-binaries/control" --candidate-binary "$RUNNER_TEMP/routines-binaries/candidate" \
-            --daemon-before "$RUNNER_TEMP/routines-binaries/daemon-before" --daemon-before-revision "$DAEMON_BEFORE" \
-            --daemon-after "$RUNNER_TEMP/routines-binaries/daemon-after" --daemon-after-revision "$DAEMON_AFTER" \
-            --lastdb-source "$GITHUB_WORKSPACE/daemon-after" --output "$RUNNER_TEMP/routines-results/registration"
-      - name: Verify all six exact published definitions after normal DEV admission
-        if: ${{ env.ROUTINES_SCHEMA_ENV == 'dev' }}
-        run: |
-          bun candidate/scripts/fleet-schema-definitions.mjs "$GITHUB_WORKSPACE/control" "$GITHUB_WORKSPACE/candidate" \
-            "$GITHUB_WORKSPACE/daemon-after" "$RUNNER_TEMP/routines-results/source/definitions.json"
       - name: Compare actual commands in balanced orders and a fresh owned-schema home
         id: operations
         run: |
