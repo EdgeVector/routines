@@ -11,7 +11,430 @@
     "runtime": "bun",
     "entrypoint": "src/cli.ts"
   },
-  "schemas": [],
+  "schemas": [
+    {
+      "name": "RoutineStatus",
+      "owner_app_id": "routines",
+      "descriptive_name": "RoutineStatus",
+      "purpose_statement": "One slim status row per routine for admin delivery",
+      "schema_type": "Hash",
+      "key": {
+        "hash_field": "routine_identifier"
+      },
+      "fields": [
+        "routine_fleet_bucket_key",
+        "routine_fleet_order_key",
+        "routine_identifier",
+        "routine_schedule_status_text",
+        "routine_harness_name",
+        "routine_model_name",
+        "routine_schedule_rule_text",
+        "routine_display_group_identifier",
+        "routine_display_group_label",
+        "routine_next_fire_time_text",
+        "routine_last_run_time_text",
+        "routine_last_exit_code_text",
+        "routine_running_flag_text",
+        "routine_harness_process_identifier_text",
+        "routine_current_run_stamp",
+        "routine_current_run_directory",
+        "routine_current_start_time_text",
+        "routine_dispatch_fence_text",
+        "routine_last_run_outcome",
+        "routine_last_run_outcome_detail",
+        "routine_recent_noop_rate_text",
+        "routine_recent_useful_rate_text",
+        "routine_outcome_window_count_text",
+        "routine_status_content_sha256",
+        "routine_record_update_time_text"
+      ],
+      "field_types": {
+        "routine_fleet_bucket_key": "String",
+        "routine_fleet_order_key": "String",
+        "routine_identifier": "String",
+        "routine_schedule_status_text": "String",
+        "routine_harness_name": "String",
+        "routine_model_name": "String",
+        "routine_schedule_rule_text": "String",
+        "routine_display_group_identifier": "String",
+        "routine_display_group_label": "String",
+        "routine_next_fire_time_text": "String",
+        "routine_last_run_time_text": "String",
+        "routine_last_exit_code_text": "String",
+        "routine_running_flag_text": "String",
+        "routine_harness_process_identifier_text": "String",
+        "routine_current_run_stamp": "String",
+        "routine_current_run_directory": "String",
+        "routine_current_start_time_text": "String",
+        "routine_dispatch_fence_text": "String",
+        "routine_last_run_outcome": "String",
+        "routine_last_run_outcome_detail": "String",
+        "routine_recent_noop_rate_text": "String",
+        "routine_recent_useful_rate_text": "String",
+        "routine_outcome_window_count_text": "String",
+        "routine_status_content_sha256": "String",
+        "routine_record_update_time_text": "String"
+      },
+      "field_descriptions": {
+        "routine_fleet_bucket_key": "the stable routines fleet hash bucket for one routine",
+        "routine_fleet_order_key": "the routine status, display group identifier, and routine identifier joined by # in that order",
+        "routine_identifier": "the stable identifier of one scheduled routine",
+        "routine_schedule_status_text": "the active or paused state recorded in a routine schedule",
+        "routine_harness_name": "the configured agent harness name for a routine",
+        "routine_model_name": "the configured model name for a routine",
+        "routine_schedule_rule_text": "the recurrence rule text for a routine schedule",
+        "routine_display_group_identifier": "the identifier of the display group for one routine",
+        "routine_display_group_label": "the display label of the group for one routine",
+        "routine_next_fire_time_text": "the next routine dispatch time as RFC 3339 text, or empty when no dispatch is due",
+        "routine_last_run_time_text": "the last routine run time as RFC 3339 text, or empty when no run exists",
+        "routine_last_exit_code_text": "the decimal exit code of the last routine run, or empty when no completed code exists",
+        "routine_running_flag_text": "the text true or false that reports whether a routine run is active",
+        "routine_harness_process_identifier_text": "the decimal operating system process identifier of an active routine harness, or empty when absent",
+        "routine_current_run_stamp": "the run stamp of the active routine execution, or empty when absent",
+        "routine_current_run_directory": "the filesystem directory of the active routine execution, or empty when absent",
+        "routine_current_start_time_text": "the active routine start time as RFC 3339 text, or empty when absent",
+        "routine_dispatch_fence_text": "the routine dispatch fence state as false, true, or a Situation identifier",
+        "routine_last_run_outcome": "the classified outcome of the most recent routine execution",
+        "routine_last_run_outcome_detail": "the bounded explanation of the most recent routine execution outcome",
+        "routine_recent_noop_rate_text": "the recent no-op fraction as decimal text, or empty when no completed outcomes exist",
+        "routine_recent_useful_rate_text": "the recent useful-outcome fraction as decimal text, or empty when no completed outcomes exist",
+        "routine_outcome_window_count_text": "the decimal count of recent routine outcomes that form the reported rates",
+        "routine_status_content_sha256": "the SHA-256 digest of the bounded routine status fields excluding the digest and capture time",
+        "routine_record_update_time_text": "the RFC 3339 text for the publication time of a stored routine status or run record"
+      },
+      "field_data_classifications": {
+        "routine_fleet_bucket_key": {
+          "sensitivity_level": 0,
+          "data_domain": "routines"
+        },
+        "routine_fleet_order_key": {
+          "sensitivity_level": 0,
+          "data_domain": "routines"
+        },
+        "routine_identifier": {
+          "sensitivity_level": 0,
+          "data_domain": "routines"
+        },
+        "routine_schedule_status_text": {
+          "sensitivity_level": 0,
+          "data_domain": "routines"
+        },
+        "routine_harness_name": {
+          "sensitivity_level": 0,
+          "data_domain": "routines"
+        },
+        "routine_model_name": {
+          "sensitivity_level": 0,
+          "data_domain": "routines"
+        },
+        "routine_schedule_rule_text": {
+          "sensitivity_level": 0,
+          "data_domain": "routines"
+        },
+        "routine_display_group_identifier": {
+          "sensitivity_level": 0,
+          "data_domain": "routines"
+        },
+        "routine_display_group_label": {
+          "sensitivity_level": 0,
+          "data_domain": "routines"
+        },
+        "routine_next_fire_time_text": {
+          "sensitivity_level": 0,
+          "data_domain": "routines"
+        },
+        "routine_last_run_time_text": {
+          "sensitivity_level": 0,
+          "data_domain": "routines"
+        },
+        "routine_last_exit_code_text": {
+          "sensitivity_level": 0,
+          "data_domain": "routines"
+        },
+        "routine_running_flag_text": {
+          "sensitivity_level": 0,
+          "data_domain": "routines"
+        },
+        "routine_harness_process_identifier_text": {
+          "sensitivity_level": 0,
+          "data_domain": "routines"
+        },
+        "routine_current_run_stamp": {
+          "sensitivity_level": 0,
+          "data_domain": "routines"
+        },
+        "routine_current_run_directory": {
+          "sensitivity_level": 0,
+          "data_domain": "routines"
+        },
+        "routine_current_start_time_text": {
+          "sensitivity_level": 0,
+          "data_domain": "routines"
+        },
+        "routine_dispatch_fence_text": {
+          "sensitivity_level": 0,
+          "data_domain": "routines"
+        },
+        "routine_last_run_outcome": {
+          "sensitivity_level": 0,
+          "data_domain": "routines"
+        },
+        "routine_last_run_outcome_detail": {
+          "sensitivity_level": 0,
+          "data_domain": "routines"
+        },
+        "routine_recent_noop_rate_text": {
+          "sensitivity_level": 0,
+          "data_domain": "routines"
+        },
+        "routine_recent_useful_rate_text": {
+          "sensitivity_level": 0,
+          "data_domain": "routines"
+        },
+        "routine_outcome_window_count_text": {
+          "sensitivity_level": 0,
+          "data_domain": "routines"
+        },
+        "routine_status_content_sha256": {
+          "sensitivity_level": 0,
+          "data_domain": "routines"
+        },
+        "routine_record_update_time_text": {
+          "sensitivity_level": 0,
+          "data_domain": "routines"
+        }
+      },
+      "alternate_keys": {
+        "by_fleet": {
+          "hash_field": "routine_fleet_bucket_key",
+          "range_field": null,
+          "range_separator": "#",
+          "range_parts": [
+            {
+              "field": "routine_schedule_status_text",
+              "format": "text"
+            },
+            {
+              "field": "routine_display_group_identifier",
+              "format": "text"
+            },
+            {
+              "field": "routine_identifier",
+              "format": "text"
+            }
+          ],
+          "missing": "reject"
+        }
+      }
+    },
+    {
+      "name": "RoutineRunSummaryV2",
+      "owner_app_id": "routines",
+      "descriptive_name": "RoutineRunSummaryV2",
+      "purpose_statement": "A bounded run summary keyed by routine and run stamp; each row stays below 8192 bytes and log_tail stays below 2048 bytes",
+      "schema_type": "HashRange",
+      "key": {
+        "hash_field": "routine_identifier",
+        "range_field": "routine_run_stamp"
+      },
+      "fields": [
+        "routine_identifier",
+        "routine_run_stamp",
+        "routine_run_start_time_text",
+        "routine_run_finish_time_text",
+        "routine_run_exit_code_text",
+        "routine_run_outcome",
+        "routine_run_outcome_detail",
+        "routine_run_duration_ms_text",
+        "routine_run_log_tail_text",
+        "routine_record_update_time_text"
+      ],
+      "field_types": {
+        "routine_identifier": "String",
+        "routine_run_stamp": "String",
+        "routine_run_start_time_text": "String",
+        "routine_run_finish_time_text": "String",
+        "routine_run_exit_code_text": "String",
+        "routine_run_outcome": "String",
+        "routine_run_outcome_detail": "String",
+        "routine_run_duration_ms_text": "String",
+        "routine_run_log_tail_text": "String",
+        "routine_record_update_time_text": "String"
+      },
+      "field_descriptions": {
+        "routine_identifier": "the stable identifier of one scheduled routine",
+        "routine_run_stamp": "the stable timestamp stamp that identifies a run under one routine",
+        "routine_run_start_time_text": "the routine execution start time as RFC 3339 text, or empty when absent",
+        "routine_run_finish_time_text": "the routine execution finish time as RFC 3339 text, or empty when the execution has no finish",
+        "routine_run_exit_code_text": "the decimal routine execution exit code, or empty when no code exists",
+        "routine_run_outcome": "the classified outcome of one routine execution",
+        "routine_run_outcome_detail": "the bounded explanation of one routine execution outcome",
+        "routine_run_duration_ms_text": "the decimal routine execution duration in milliseconds, or empty when no completed duration exists",
+        "routine_run_log_tail_text": "a bounded redacted suffix of routine execution output without its complete logs or prompts",
+        "routine_record_update_time_text": "the RFC 3339 text for the publication time of a stored routine status or run record"
+      },
+      "field_data_classifications": {
+        "routine_identifier": {
+          "sensitivity_level": 0,
+          "data_domain": "routines"
+        },
+        "routine_run_stamp": {
+          "sensitivity_level": 0,
+          "data_domain": "routines"
+        },
+        "routine_run_start_time_text": {
+          "sensitivity_level": 0,
+          "data_domain": "routines"
+        },
+        "routine_run_finish_time_text": {
+          "sensitivity_level": 0,
+          "data_domain": "routines"
+        },
+        "routine_run_exit_code_text": {
+          "sensitivity_level": 0,
+          "data_domain": "routines"
+        },
+        "routine_run_outcome": {
+          "sensitivity_level": 0,
+          "data_domain": "routines"
+        },
+        "routine_run_outcome_detail": {
+          "sensitivity_level": 0,
+          "data_domain": "routines"
+        },
+        "routine_run_duration_ms_text": {
+          "sensitivity_level": 0,
+          "data_domain": "routines"
+        },
+        "routine_run_log_tail_text": {
+          "sensitivity_level": 0,
+          "data_domain": "routines"
+        },
+        "routine_record_update_time_text": {
+          "sensitivity_level": 0,
+          "data_domain": "routines"
+        }
+      },
+      "alternate_keys": {}
+    },
+    {
+      "name": "FleetSummary",
+      "owner_app_id": "routines",
+      "descriptive_name": "FleetSummary",
+      "purpose_statement": "A bounded fleet manifest with counts and a digest; each row stays below 4096 bytes",
+      "schema_type": "Hash",
+      "key": {
+        "hash_field": "routine_fleet_identifier"
+      },
+      "fields": [
+        "routine_fleet_identifier",
+        "routine_fleet_capture_time_text",
+        "routine_fleet_layout_version_text",
+        "routine_fleet_bucket_count_text",
+        "routine_fleet_record_count_text",
+        "routine_fleet_active_count_text",
+        "routine_fleet_paused_count_text",
+        "routine_fleet_fenced_count_text",
+        "routine_fleet_running_count_text",
+        "routine_fleet_error_count_text",
+        "routine_fleet_run_summary_count_text",
+        "routine_fleet_posture_read_flag_text",
+        "routine_fleet_posture_error_text",
+        "routine_fleet_content_sha256"
+      ],
+      "field_types": {
+        "routine_fleet_identifier": "String",
+        "routine_fleet_capture_time_text": "String",
+        "routine_fleet_layout_version_text": "String",
+        "routine_fleet_bucket_count_text": "String",
+        "routine_fleet_record_count_text": "String",
+        "routine_fleet_active_count_text": "String",
+        "routine_fleet_paused_count_text": "String",
+        "routine_fleet_fenced_count_text": "String",
+        "routine_fleet_running_count_text": "String",
+        "routine_fleet_error_count_text": "String",
+        "routine_fleet_run_summary_count_text": "String",
+        "routine_fleet_posture_read_flag_text": "String",
+        "routine_fleet_posture_error_text": "String",
+        "routine_fleet_content_sha256": "String"
+      },
+      "field_descriptions": {
+        "routine_fleet_identifier": "the identifier of one routines fleet",
+        "routine_fleet_capture_time_text": "the RFC 3339 text of the time a routines fleet publication was captured",
+        "routine_fleet_layout_version_text": "the decimal version text of the stable routines fleet bucket layout",
+        "routine_fleet_bucket_count_text": "the decimal count of stable hash buckets in a routines fleet",
+        "routine_fleet_record_count_text": "the decimal number of routine status records in a complete fleet publication",
+        "routine_fleet_active_count_text": "the decimal number of active routine schedules in a fleet publication",
+        "routine_fleet_paused_count_text": "the decimal number of paused routine schedules in a fleet publication",
+        "routine_fleet_fenced_count_text": "the decimal number of fenced routine schedules in a fleet publication",
+        "routine_fleet_running_count_text": "the decimal number of active routine executions in a fleet publication",
+        "routine_fleet_error_count_text": "the decimal number of routines whose latest recorded outcome is an error",
+        "routine_fleet_run_summary_count_text": "the decimal number of recent run summaries selected for a fleet publication",
+        "routine_fleet_posture_read_flag_text": "the text true or false that reports whether the fleet posture read succeeded",
+        "routine_fleet_posture_error_text": "the error from a failed fleet posture read, or empty when the read succeeded",
+        "routine_fleet_content_sha256": "the SHA-256 digest of the complete sorted routine identifier and status-digest pairs"
+      },
+      "field_data_classifications": {
+        "routine_fleet_identifier": {
+          "sensitivity_level": 0,
+          "data_domain": "routines"
+        },
+        "routine_fleet_capture_time_text": {
+          "sensitivity_level": 0,
+          "data_domain": "routines"
+        },
+        "routine_fleet_layout_version_text": {
+          "sensitivity_level": 0,
+          "data_domain": "routines"
+        },
+        "routine_fleet_bucket_count_text": {
+          "sensitivity_level": 0,
+          "data_domain": "routines"
+        },
+        "routine_fleet_record_count_text": {
+          "sensitivity_level": 0,
+          "data_domain": "routines"
+        },
+        "routine_fleet_active_count_text": {
+          "sensitivity_level": 0,
+          "data_domain": "routines"
+        },
+        "routine_fleet_paused_count_text": {
+          "sensitivity_level": 0,
+          "data_domain": "routines"
+        },
+        "routine_fleet_fenced_count_text": {
+          "sensitivity_level": 0,
+          "data_domain": "routines"
+        },
+        "routine_fleet_running_count_text": {
+          "sensitivity_level": 0,
+          "data_domain": "routines"
+        },
+        "routine_fleet_error_count_text": {
+          "sensitivity_level": 0,
+          "data_domain": "routines"
+        },
+        "routine_fleet_run_summary_count_text": {
+          "sensitivity_level": 0,
+          "data_domain": "routines"
+        },
+        "routine_fleet_posture_read_flag_text": {
+          "sensitivity_level": 0,
+          "data_domain": "routines"
+        },
+        "routine_fleet_posture_error_text": {
+          "sensitivity_level": 0,
+          "data_domain": "routines"
+        },
+        "routine_fleet_content_sha256": {
+          "sensitivity_level": 0,
+          "data_domain": "routines"
+        }
+      },
+      "alternate_keys": {}
+    }
+  ],
   "install": {
     "prepare": [
       {
