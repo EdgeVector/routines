@@ -10,7 +10,20 @@ import sys
 
 
 def run(args, check=True):
-    return subprocess.run(args, capture_output=True, check=check, timeout=45)
+    result = subprocess.run(args, capture_output=True, timeout=45)
+    if check and result.returncode:
+        raise RuntimeError(f'{args[0]} {args[1]} failed ({result.returncode}): {result.stderr.decode().strip()}')
+    return result
+
+
+def unload(domain, label):
+    service = domain + '/' + label
+    run(['launchctl', 'bootout', service], False)
+    deadline = time.monotonic() + 45
+    while run(['launchctl', 'print', service], False).returncode == 0:
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f'{label} did not finish unloading; refusing replacement')
+        time.sleep(0.25)
 
 
 def main():
@@ -57,14 +70,14 @@ def main():
                 index = old.index('freeze-watch')
                 args = old[index:]
             plist['ProgramArguments'] = [command, *args]
-            run(['launchctl', 'bootout', domain + '/' + label])
+            unload(domain, label)
             path.write_bytes(plistlib.dumps(plist))
             run(['launchctl', 'bootstrap', domain, str(path)])
             run(['launchctl', 'print', domain + '/' + label])
             print('Reloaded registry service', label)
     except Exception:
         for label, (path, data) in originals.items():
-            run(['launchctl', 'bootout', domain + '/' + label], False)
+            unload(domain, label)
             path.write_bytes(data)
             run(['launchctl', 'bootstrap', domain, str(path)], False)
         raise
