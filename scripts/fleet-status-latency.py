@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Hosted-CI comparison of actual Routines commands, owned setup, and an engine upgrade."""
+"""Hosted-CI comparison of actual Routines commands and owned setup on the latest LastDB nightly."""
 import argparse
 import hashlib
 import json
@@ -36,6 +36,24 @@ def require_owned_node(node):
     version = node.call("/api/version")[0].get("api_version")
     require(isinstance(version, int) and not isinstance(version, bool) and version >= OWNED_SCHEMAS_API_VERSION,
         "The engine is older than LastDB API 13, where every declared schema owns its values")
+
+
+def nightly_node(Node):
+    class NightlyNode(Node):
+        # The lastdb node helper accepts only its own "bench-<revision>" builds. A prebuilt nightly
+        # reports "<core>-nightly.<date>.g<oid9>", so this replaces that one check and keeps every
+        # other start step. Valid only with workers=0: start() skips its worker check after the error.
+        def start(self):
+            require(not self.workers, "The nightly start check does not verify a worker count")
+            try:
+                super().start()
+            except RuntimeError as error:
+                if "differs from the selected revision" not in str(error) or self.process is None or self.process.poll() is not None:
+                    raise
+            reported = json.dumps(json.loads((self.output / "version.json").read_text()))
+            require("-nightly." in reported and f".g{self.revision[:9]}" in reported,
+                "The actual daemon version is not the nightly of the selected revision")
+    return NightlyNode
 
 
 def finish_setup(node, output, cleanup):
@@ -309,13 +327,10 @@ def measure(args, binary, node, home, expected):
 def arm(args, Node, finish_setup, contract, label, pair):
     output = args.output / f"pair-{pair}-{label}"
     output.mkdir()
-    fresh = label == "fresh"
-    # The control keeps main's old request flow. Both engine pins name the format 8 engine (API 21), so every
-    # arm declares owned schemas: "candidate" on the before engine, "fresh" on the after engine.
+    # The control keeps main's old request flow. Both arms run on the same latest nightly daemon.
     legacy = label == "control"
     binary = args.candidate_binary if not legacy else args.control_binary
-    daemon, revision = (args.daemon_after, args.daemon_after_revision) if fresh else (args.daemon_before, args.daemon_before_revision)
-    node = Node(daemon, revision, output, temporary_directory=Path(os.environ["RUNNER_TEMP"]).resolve(),
+    node = Node(args.daemon, args.daemon_revision, output, temporary_directory=Path(os.environ["RUNNER_TEMP"]).resolve(),
         environment={"ENVIRONMENT": args.schema_environment, "EXEMEM_ENV": args.schema_environment,
             "LASTDB_SELF_METRICS_TO_DB": "false", "LASTDB_BYTE_BACKUP_V2_ENABLED": "false", "LASTDB_TTL_SWEEP": "0"})
     try:
@@ -361,18 +376,6 @@ def arm(args, Node, finish_setup, contract, label, pair):
         # Normal publication refreshes the digest marker once before any timed native reader request.
         published, _ = call_json(args, binary, node, home, "publish-status")
         publication(published, expected)
-        same_engine_samples = None
-        if label == "candidate":
-            same_engine_samples, _ = measure(args, binary, node, home, expected)
-            current = snapshot(node, bindings, contract, coordinates + copied)
-            finish_setup(node, output)
-            node.stop()
-            node.binary, node.revision = args.daemon_after, args.daemon_after_revision
-            node.start()
-            cloud_off(node, "after-engine-reopen")
-            require(snapshot(node, bindings, contract, coordinates + copied) == current,
-                "The after-engine reopen changed values, record metadata, or membership")
-            save(output / "upgrade-records.json", current)
         samples, rows = measure(args, binary, node, home, expected)
         changed = sorted(expected)[0]
         volume = native_pages(node, bindings["status"], contract, rows) if label != "control" else {"logical_records": len(rows)}
@@ -415,7 +418,7 @@ def arm(args, Node, finish_setup, contract, label, pair):
             "Run-retention values or record metadata differ after the second actual reopen")
         save(output / "retention-records.json", retained)
         save(output / "samples.json", samples)
-        result = {"label": label, "pair": pair, "samples": samples, "same_engine_samples": same_engine_samples, "volume": volume,
+        result = {"label": label, "pair": pair, "samples": samples, "volume": volume,
             "initial_logical_records": len(before), "posture": "unknown: real ENOENT from explicit absent dependency",
             "cloud_sync": "off at every phase", "owned_setup": not legacy,
             "current_status_primary_and_alternate_delete": True, "actual_run_retention_and_reopen": True}
@@ -432,9 +435,9 @@ def percentile(values, fraction):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    for name in ("candidate", "control-binary", "candidate-binary", "daemon-before", "daemon-after", "lastdb-source", "output", "control-source"):
+    for name in ("candidate", "control-binary", "candidate-binary", "daemon", "lastdb-source", "output", "control-source"):
         parser.add_argument("--" + name, type=Path, required=True)
-    for name in ("candidate-revision", "daemon-before-revision", "daemon-after-revision"):
+    for name in ("candidate-revision", "daemon-revision"):
         parser.add_argument("--" + name, required=True)
     parser.add_argument("--records", type=int, default=256)
     parser.add_argument("--samples", type=int, default=20)
@@ -447,42 +450,40 @@ def main():
     sys.path.append(str(args.lastdb_source / "scripts/disk_v2"))
     from node import Node, file_hash
     import cleanup
+    Node = nightly_node(Node)
     source = '''import {SCHEMAS,canonicalDefinition,definitionIdentity,fieldRules} from "./src/status-schema.ts";
 console.log(JSON.stringify(Object.fromEntries(Object.keys(SCHEMAS).map(key=>[key,{identity:definitionIdentity(canonicalDefinition(key)),definition:canonicalDefinition(key),field_map:Object.fromEntries(Object.entries(fieldRules(key)).map(([field,[name]])=>[field,name]))}]))));'''
     contract = json.loads(subprocess.check_output(["bun", "--eval", source], cwd=args.candidate, text=True))
     args.contract = contract
     summary = {"complete": False, "schema_environment": args.schema_environment, "candidate_revision": args.candidate_revision,
-        "daemon_before_revision": args.daemon_before_revision, "daemon_after_revision": args.daemon_after_revision,
+        "daemon_revision": args.daemon_revision,
         "control": json.loads(args.control_source.read_text()), "records": args.records, "samples_per_operation_per_arm": args.samples,
         "scope": "publication/lookup with the real posture dependency absent; patched-main control; no generic-field migration proof",
-        "program_sha256": {key: file_hash(getattr(args, key)) for key in ("control_binary", "candidate_binary", "daemon_before", "daemon_after")}, "arms": []}
+        "program_sha256": {key: file_hash(getattr(args, key)) for key in ("control_binary", "candidate_binary", "daemon")}, "arms": []}
     try:
-        for pair, order in enumerate((("control", "candidate"), ("candidate", "control"), ("fresh",))):
+        for pair, order in enumerate((("control", "candidate"), ("candidate", "control"))):
             for label in order:
                 summary["arms"].append(arm(args, Node, lambda node, output: finish_setup(node, output, cleanup), contract, label, pair))
         rows = []
-        for comparison, selected in (("same engine", "same_engine_samples"), ("full engine upgrade", "samples")):
-            for operation in ("publish_unchanged", "read_complete", "publish_changed"):
-                before = [arm for arm in summary["arms"] if arm["label"] == "control"]
-                after = [arm for arm in summary["arms"] if arm["label"] == "candidate"]
-                require(len(before) == len(after) == 2, "The comparison lacks balanced AB/BA pairs")
-                for name, fraction in (("p50", 0.5), ("p95", 0.95)):
-                    old = statistics.median(percentile(arm["samples"][operation], fraction) for arm in before)
-                    new = statistics.median(percentile(arm[selected][operation], fraction) for arm in after)
-                    rows.append({"comparison": comparison, "operation": operation, "percentile": name, "before_ms": old, "after_ms": new, "change_percent": (new / old - 1) * 100})
+        for operation in ("publish_unchanged", "read_complete", "publish_changed"):
+            before = [arm for arm in summary["arms"] if arm["label"] == "control"]
+            after = [arm for arm in summary["arms"] if arm["label"] == "candidate"]
+            require(len(before) == len(after) == 2, "The comparison lacks balanced AB/BA pairs")
+            for name, fraction in (("p50", 0.5), ("p95", 0.95)):
+                old = statistics.median(percentile(arm["samples"][operation], fraction) for arm in before)
+                new = statistics.median(percentile(arm["samples"][operation], fraction) for arm in after)
+                rows.append({"operation": operation, "percentile": name, "before_ms": old, "after_ms": new, "change_percent": (new / old - 1) * 100})
         summary["rows"], summary["complete"] = rows, True
         lines = ["## Routines publication and lookup latency", "", f"Schema service environment: {args.schema_environment}.", "", summary["scope"], "",
-            "Both balanced orders and a fresh owned-schema arm passed actual CLI operations. Cloud sync stayed off.",
-            "Every arm ran on the LastDB format 8 engine (API 21), where every declared schema owns its values.",
-            "The candidate measured on the before engine, then reopened on the after engine."
-            + (" Both pins name the same engine." if args.daemon_before_revision == args.daemon_after_revision else ""),
+            "Both balanced orders passed actual CLI operations. Cloud sync stayed off.",
+            f"Every arm ran on the latest prebuilt LastDB nightly (source {args.daemon_revision}).",
             "The control retains main's serial flow and copied status records after the explicit vocabulary/transport patch.",
             "Both arms use the same optional page trace. Latency includes the trace cost and every cursor page.",
             "read-pages.jsonl retains actual page statuses/selectors/cursors; commands.jsonl links each CLI call to its page count and elapsed time.",
             "Record metadata, optional field absence/null, values, complete membership, native order, deletion, retention, and reopen checks passed.",
             "This does not prove nominal live posture collection, invalid generic-name conversion, or recipient delivery.", "",
-            "| Comparison | Operation | Percentile | Patched main ms | Candidate ms | Change |", "|---|---|---|---:|---:|---:|"]
-        lines += [f"| {row['comparison']} | {row['operation']} | {row['percentile']} | {row['before_ms']:.3f} | {row['after_ms']:.3f} | {row['change_percent']:+.1f}% |" for row in rows]
+            "| Operation | Percentile | Patched main ms | Candidate ms | Change |", "|---|---|---:|---:|---:|"]
+        lines += [f"| {row['operation']} | {row['percentile']} | {row['before_ms']:.3f} | {row['after_ms']:.3f} | {row['change_percent']:+.1f}% |" for row in rows]
         with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a") as stream:
             stream.write("\n".join(lines) + "\n")
     finally:
