@@ -28,16 +28,6 @@ def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
-OWNED_SCHEMAS_API_VERSION = 13  # lastdb#803: every declared schema owns its values.
-
-
-def require_owned_node(node):
-    # One node-level check replaces a per-schema ownership check.
-    version = node.call("/api/version")[0].get("api_version")
-    require(isinstance(version, int) and not isinstance(version, bool) and version >= OWNED_SCHEMAS_API_VERSION,
-        "The engine is older than LastDB API 13, where every declared schema owns its values")
-
-
 def nightly_node(Node):
     class NightlyNode(Node):
         # The lastdb node helper accepts only its own "bench-<revision>" builds. A prebuilt nightly
@@ -63,15 +53,14 @@ def finish_setup(node, output, cleanup):
     save(output / "setup-cleanup.json", cleanup.request_and_wait(node))
 
 
-def installed_schemas(node, bindings, contract, output, phase, legacy):
+def installed_schemas(node, bindings, contract, output, phase):
     directory = node.call("/api/schemas?include_full=true&include_counts=true")[0]
     save(output / f"installed-{phase}.json", directory)
     require(directory.get("ready") is True and directory.get("full_included") is True and directory.get("counts_included") is True,
         "The actual installed schema metadata is incomplete")
-    require_owned_node(node)
     owned = {schema["name"]: schema for schema in directory.get("schemas", []) if schema.get("owner_app_id") == "routines"}
     canonical = {key: owned[runtime] for key, runtime in bindings.items() if runtime in owned}
-    expected = set(contract) if legacy else {key for key, runtime in bindings.items() if runtime}
+    expected = {key for key, runtime in bindings.items() if runtime}
     require(set(canonical) == expected, "The publisher's actual schema bindings are incomplete")
     for key, schema in canonical.items():
         definition = contract[key]["definition"]
@@ -81,13 +70,11 @@ def installed_schemas(node, bindings, contract, output, phase, legacy):
             and set(schema.get("fields", [])) == set(definition["fields"])
             and all(schema.get(field) == definition[field] for field in ("field_types", "field_descriptions", "field_data_classifications")),
             "An actual local definition differs from the published field definition")
-        if not legacy:
-            require(not schema.get("transform_fields") and schema.get("alternate_keys", {}) == definition.get("alternate_keys", {}),
-                "A native runtime has transform fields or different keys")
+        require(not schema.get("transform_fields") and schema.get("alternate_keys", {}) == definition.get("alternate_keys", {}),
+            "A native runtime has transform fields or different keys")
     require(set(owned) == {schema["name"] for schema in canonical.values()}, "Setup retains an unexpected local schema")
-    if not legacy:
-        field_keys = [field_key for schema in canonical.values() for field_key in schema.get("field_key_ids", {}).values()]
-        require(len(set(field_keys)) == len(field_keys), "Two native schemas share a field key")
+    field_keys = [field_key for schema in canonical.values() for field_key in schema.get("field_key_ids", {}).values()]
+    require(len(set(field_keys)) == len(field_keys), "Two native schemas share a field key")
     return {key: schema["record_count"] for key, schema in canonical.items()}
 
 
@@ -327,22 +314,22 @@ def measure(args, binary, node, home, expected):
 def arm(args, Node, finish_setup, contract, label, pair):
     output = args.output / f"pair-{pair}-{label}"
     output.mkdir()
-    # The control keeps main's old request flow. Both arms run on the same latest nightly daemon.
-    legacy = label == "control"
-    binary = args.candidate_binary if not legacy else args.control_binary
+    args.contract = contract
+    binary = args.control_binary if label == "control" else args.candidate_binary
     node = Node(args.daemon, args.daemon_revision, output, temporary_directory=Path(os.environ["RUNNER_TEMP"]).resolve(),
         environment={"ENVIRONMENT": args.schema_environment, "EXEMEM_ENV": args.schema_environment,
             "LASTDB_SELF_METRICS_TO_DB": "false", "LASTDB_BYTE_BACKUP_V2_ENABLED": "false", "LASTDB_TTL_SWEEP": "0"})
     try:
         node.start()
+        version_body = node.call("/api/version")[0]
+        args.node_api_version = version_body.get("api_version") if isinstance(version_body, dict) else None
         cloud_off(node, "start")
         home = node.root / "routines"
         expected = registry(home, args.records)
-        setup = args.control_binary if legacy else args.candidate_binary
-        if not legacy:
-            installed, _ = call_json(args, setup, node, home, "init-status")
-            require(set(installed["schemas"]) == {"status", "runSummaryV2", "fleetSummary"},
-                "Fresh setup created a historical or duplicate record type")
+        setup = binary
+        installed, _ = call_json(args, setup, node, home, "init-status")
+        require(set(installed["schemas"]) == {"status", "runSummaryV2", "fleetSummary"},
+            "Fresh setup created a duplicate record type")
         # Run real checksum routines. These completed histories come from the
         # product runner, never handcrafted run metadata or collector responses.
         for identifier in sorted(expected)[:4]:
@@ -353,15 +340,14 @@ def arm(args, Node, finish_setup, contract, label, pair):
         read, _ = call_json(args, setup, node, home, "read-status")
         rows = view(read, expected)
         bindings = published["schemaHashes"]
-        actual_counts = installed_schemas(node, bindings, contract, output, "published", legacy)
+        actual_counts = installed_schemas(node, bindings, contract, output, "published")
         histories = run_keys(home)
         coordinates = [("status", identifier, None) for identifier in sorted(expected)]
         coordinates += [("fleetSummary", "routines", None)]
         coordinates += [("runSummaryV2", identifier, stamp) for identifier, stamp in histories]
-        copied = [("fleetStatus", row["fleet_bucket"], row["sk"]) for row in rows] if legacy else []
-        require(actual_counts == {key: sum(coordinate[0] == key for coordinate in coordinates + copied) for key in actual_counts},
+        require(actual_counts == {key: sum(coordinate[0] == key for coordinate in coordinates) for key in actual_counts},
             "Actual primary membership exceeds or differs from the complete known key set")
-        before = snapshot(node, bindings, contract, coordinates + copied)
+        before = snapshot(node, bindings, contract, coordinates)
         require(all(value is not None for value in before.values()), "An actual published record is absent before reopen")
         save(output / "before-records.json", before)
         save(output / "before-field-volume.json", field_volume(before, contract))
@@ -370,7 +356,7 @@ def arm(args, Node, finish_setup, contract, label, pair):
         node.stop()
         node.start()
         cloud_off(node, "reopened")
-        reopened = snapshot(node, bindings, contract, coordinates + copied)
+        reopened = snapshot(node, bindings, contract, coordinates)
         require(reopened == before, "The actual reopen changed values, record metadata, or membership")
         save(output / "reopened-records.json", reopened)
         # Normal publication refreshes the digest marker once before any timed native reader request.
@@ -378,7 +364,7 @@ def arm(args, Node, finish_setup, contract, label, pair):
         publication(published, expected)
         samples, rows = measure(args, binary, node, home, expected)
         changed = sorted(expected)[0]
-        volume = native_pages(node, bindings["status"], contract, rows) if label != "control" else {"logical_records": len(rows)}
+        volume = native_pages(node, bindings["status"], contract, rows)
         removed = changed
         (home / "registry" / f"{removed}.toml").unlink()
         expected.remove(removed)
@@ -388,12 +374,11 @@ def arm(args, Node, finish_setup, contract, label, pair):
         rows = view(value, expected)
         require(snapshot(node, bindings, contract, [("status", removed, None)])[json.dumps(["status", removed, None])] is None,
             "A normal stale primary deletion left the record visible")
-        if label != "control":
-            native_pages(node, bindings["status"], contract, rows)
-            removed_runs = [("runSummaryV2", identifier, stamp) for identifier, stamp in histories if identifier == removed]
-            require(snapshot(node, bindings, contract, removed_runs) == {key: before[key] for key in
-                (json.dumps([kind, identifier, stamp]) for kind, identifier, stamp in removed_runs)},
-                "A status deletion changed the separate retained run records")
+        native_pages(node, bindings["status"], contract, rows)
+        removed_runs = [("runSummaryV2", identifier, stamp) for identifier, stamp in histories if identifier == removed]
+        require(snapshot(node, bindings, contract, removed_runs) == {key: before[key] for key in
+            (json.dumps([kind, identifier, stamp]) for kind, identifier, stamp in removed_runs)},
+            "A status deletion changed the separate retained run records")
         changed = sorted(expected)[0]
         # Exercise the unchanged default retention policy through actual runs.
         for _ in range(101):
@@ -420,7 +405,7 @@ def arm(args, Node, finish_setup, contract, label, pair):
         save(output / "samples.json", samples)
         result = {"label": label, "pair": pair, "samples": samples, "volume": volume,
             "initial_logical_records": len(before), "posture": "unknown: real ENOENT from explicit absent dependency",
-            "cloud_sync": "off at every phase", "owned_setup": not legacy,
+            "cloud_sync": "off at every phase", "owned_setup": True, "node_api_version": args.node_api_version,
             "current_status_primary_and_alternate_delete": True, "actual_run_retention_and_reopen": True}
         save(output / "result.json", result)
         return result
@@ -435,9 +420,9 @@ def percentile(values, fraction):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    for name in ("candidate", "control-binary", "candidate-binary", "daemon", "lastdb-source", "output", "control-source"):
+    for name in ("candidate", "control", "control-binary", "candidate-binary", "daemon", "lastdb-source", "output"):
         parser.add_argument("--" + name, type=Path, required=True)
-    for name in ("candidate-revision", "daemon-revision"):
+    for name in ("candidate-revision", "control-revision", "daemon-revision"):
         parser.add_argument("--" + name, required=True)
     parser.add_argument("--records", type=int, default=256)
     parser.add_argument("--samples", type=int, default=20)
@@ -453,17 +438,17 @@ def main():
     Node = nightly_node(Node)
     source = '''import {SCHEMAS,canonicalDefinition,definitionIdentity,fieldRules} from "./src/status-schema.ts";
 console.log(JSON.stringify(Object.fromEntries(Object.keys(SCHEMAS).map(key=>[key,{identity:definitionIdentity(canonicalDefinition(key)),definition:canonicalDefinition(key),field_map:Object.fromEntries(Object.entries(fieldRules(key)).map(([field,[name]])=>[field,name]))}]))));'''
-    contract = json.loads(subprocess.check_output(["bun", "--eval", source], cwd=args.candidate, text=True))
-    args.contract = contract
+    contracts = {label: json.loads(subprocess.check_output(["bun", "--eval", source], cwd=checkout, text=True))
+        for label, checkout in (("candidate", args.candidate), ("control", args.control))}
     summary = {"complete": False, "schema_environment": args.schema_environment, "candidate_revision": args.candidate_revision,
-        "daemon_revision": args.daemon_revision,
-        "control": json.loads(args.control_source.read_text()), "records": args.records, "samples_per_operation_per_arm": args.samples,
-        "scope": "publication/lookup with the real posture dependency absent; patched-main control; no generic-field migration proof",
+        "control_revision": args.control_revision, "daemon_revision": args.daemon_revision,
+        "records": args.records, "samples_per_operation_per_arm": args.samples,
+        "scope": "publication/lookup with the real posture dependency absent; PR-base control; no generic-field migration proof",
         "program_sha256": {key: file_hash(getattr(args, key)) for key in ("control_binary", "candidate_binary", "daemon")}, "arms": []}
     try:
         for pair, order in enumerate((("control", "candidate"), ("candidate", "control"))):
             for label in order:
-                summary["arms"].append(arm(args, Node, lambda node, output: finish_setup(node, output, cleanup), contract, label, pair))
+                summary["arms"].append(arm(args, Node, lambda node, output: finish_setup(node, output, cleanup), contracts[label], label, pair))
         rows = []
         for operation in ("publish_unchanged", "read_complete", "publish_changed"):
             before = [arm for arm in summary["arms"] if arm["label"] == "control"]
@@ -477,16 +462,18 @@ console.log(JSON.stringify(Object.fromEntries(Object.keys(SCHEMAS).map(key=>[key
         lines = ["## Routines publication and lookup latency", "", f"Schema service environment: {args.schema_environment}.", "", summary["scope"], "",
             "Both balanced orders passed actual CLI operations. Cloud sync stayed off.",
             f"Every arm ran on the latest prebuilt LastDB nightly (source {args.daemon_revision}).",
-            "The control retains main's serial flow and copied status records after the explicit vocabulary/transport patch.",
+            "The control is the pull request base. Both arms run owned setup and native fleet reads.",
             "Both arms use the same optional page trace. Latency includes the trace cost and every cursor page.",
             "read-pages.jsonl retains actual page statuses/selectors/cursors; commands.jsonl links each CLI call to its page count and elapsed time.",
             "Record metadata, optional field absence/null, values, complete membership, native order, deletion, retention, and reopen checks passed.",
             "This does not prove nominal live posture collection, invalid generic-name conversion, or recipient delivery.", "",
-            "| Operation | Percentile | Patched main ms | Candidate ms | Change |", "|---|---|---:|---:|---:|"]
+            "| Operation | Percentile | PR base ms | Candidate ms | Change |", "|---|---|---:|---:|---:|"]
         lines += [f"| {row['operation']} | {row['percentile']} | {row['before_ms']:.3f} | {row['after_ms']:.3f} | {row['change_percent']:+.1f}% |" for row in rows]
         with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a") as stream:
             stream.write("\n".join(lines) + "\n")
     finally:
+        if getattr(args, "node_api_version", None) is not None:
+            summary["node_api_version"] = args.node_api_version
         save(args.output / "comparison.json", summary)
 
 

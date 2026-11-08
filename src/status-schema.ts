@@ -1,7 +1,7 @@
 /** Fixed schema and key rules for fleet publication. No requests or state access. */
 import { createHash } from "node:crypto";
 
-export type SchemaKey = "snapshot" | "status" | "runSummary" | "fleetStatus" | "fleetSummary" | "runSummaryV2";
+export type SchemaKey = "status" | "fleetSummary" | "runSummaryV2";
 export type FieldType = "String" | { Array: "String" };
 
 export interface SchemaDefinition {
@@ -18,18 +18,6 @@ export interface SchemaDefinition {
   alternate_keys?: Record<string, { hash_field: string; range_field: null; range_separator: string;
     range_parts: Array<{ field: string; format: "text" }>; missing: "reject" }>;
 }
-
-export const SNAPSHOT_FIELDS = [
-  "slug",
-  "captured_at",
-  "home",
-  "situations_ok",
-  "situations_error",
-  "rows_json",
-  "row_count",
-  "run_summary_count",
-  "schema_hashes_json",
-] as const;
 
 export const STATUS_FIELDS = [
   "fleet_bucket",
@@ -59,20 +47,6 @@ export const STATUS_FIELDS = [
   "updated_at",
 ] as const;
 
-export const RUN_SUMMARY_FIELDS = [
-  "slug",
-  "id",
-  "stamp",
-  "started_at",
-  "finished_at",
-  "exit_code",
-  "outcome",
-  "outcome_detail",
-  "duration_ms",
-  "log_tail",
-  "updated_at",
-] as const;
-
 export const ROUTINES_APP_ID = "routines";
 export const ROUTINES_FLEET_ID = "routines";
 export const FLEET_STATUS_BUCKET_COUNT = 16;
@@ -82,11 +56,6 @@ export const LAST_OUTCOME_DETAIL_MAX_BYTES = 1024;
 export const FLEET_SUMMARY_MAX_BYTES = 4 * 1024;
 export const RUN_SUMMARY_V2_MAX_BYTES = 8 * 1024;
 export const RUN_SUMMARY_LOG_TAIL_MAX_BYTES = 2 * 1024;
-
-// Preserve the exact field set of the historical copied status records.
-export const FLEET_STATUS_LAYOUT_VERSION = "1";
-const FLEET_STATUS_SCHEMA_NAME = "FleetRoutineStatusV2";
-export const FLEET_ROUTINE_STATUS_FIELDS = [...STATUS_FIELDS, "schema_layout_version"] as const;
 
 export const FLEET_SUMMARY_FIELDS = [
   "fleet_id",
@@ -105,33 +74,25 @@ export const FLEET_SUMMARY_FIELDS = [
   "content_digest",
 ] as const;
 
-export const RUN_SUMMARY_V2_FIELDS = RUN_SUMMARY_FIELDS.filter((field) => field !== "slug");
+export const RUN_SUMMARY_V2_FIELDS = [
+  "id",
+  "stamp",
+  "started_at",
+  "finished_at",
+  "exit_code",
+  "outcome",
+  "outcome_detail",
+  "duration_ms",
+  "log_tail",
+  "updated_at",
+] as const;
 
 export const SCHEMAS: Record<SchemaKey, SchemaDefinition> = {
-  snapshot: schema(
-    "RoutineFleetSnapshot",
-    "A slim point-in-time routines fleet snapshot safe for admin delivery",
-    [...SNAPSHOT_FIELDS],
-    "slug",
-  ),
   status: schema(
     "RoutineStatus",
     "One slim status row per routine for admin delivery",
     [...STATUS_FIELDS],
     "id",
-  ),
-  runSummary: schema(
-    "RoutineRunSummary",
-    "A capped recent run summary for one routine execution, without prompts or full logs",
-    [...RUN_SUMMARY_FIELDS],
-    "slug",
-  ),
-  fleetStatus: hashRangeSchema(
-    FLEET_STATUS_SCHEMA_NAME,
-    `A bounded routine status index split across ${FLEET_STATUS_BUCKET_COUNT} stable fleet buckets; each row stays below ${ROUTINE_STATUS_MAX_BYTES} bytes`,
-    [...FLEET_ROUTINE_STATUS_FIELDS],
-    "fleet_bucket",
-    "sk",
   ),
   fleetSummary: schema(
     "FleetSummary",
@@ -150,7 +111,6 @@ export const SCHEMAS: Record<SchemaKey, SchemaDefinition> = {
 
 export const ACTIVE_SCHEMA_KEYS = ["status", "runSummaryV2", "fleetSummary"] as const;
 export type ActiveSchemaKey = typeof ACTIVE_SCHEMA_KEYS[number];
-export type KeptSchemaKey = SchemaKey;
 
 type FieldRule = readonly [name: string, description: string];
 const FIELD_RULES: Record<string, FieldRule> = {
@@ -200,21 +160,13 @@ const FIELD_RULES: Record<string, FieldRule> = {
   run_summary_count: ["routine_fleet_run_summary_count_text", "the decimal number of recent run summaries selected for a fleet publication"],
   situations_ok: ["routine_fleet_posture_read_flag_text", "the text true or false that reports whether the fleet posture read succeeded"],
   situations_error: ["routine_fleet_posture_error_text", "the error from a failed fleet posture read, or empty when the read succeeded"],
-  home: ["routine_fleet_home_directory", "the filesystem home directory recorded by an earlier fleet snapshot"],
-  rows_json: ["routine_fleet_snapshot_json", "the bounded JSON-encoded routine status list in an earlier fleet snapshot"],
-  schema_hashes_json: ["routine_fleet_schema_bindings_json", "the JSON-encoded schema addresses recorded by an earlier fleet snapshot"],
-  schema_layout_version: ["routine_status_layout_marker_text", "the layout marker text recorded on an earlier copied fleet status record"],
 };
 
-export function fieldRules(key: KeptSchemaKey): Record<string, FieldRule> {
+export function fieldRules(key: SchemaKey): Record<string, FieldRule> {
   const rules = Object.fromEntries(SCHEMAS[key].fields.map((field) => {
-    const rule = field === "slug"
-      ? key === "snapshot"
-        ? ["routine_fleet_snapshot_key", "the stable primary key of an earlier routines fleet snapshot"] as const
-        : ["routine_run_legacy_key", "the routine identifier and run stamp joined by / for an earlier run-summary key"] as const
-      : key === "fleetSummary" && field === "content_digest"
-        ? ["routine_fleet_content_sha256", "the SHA-256 digest of the complete sorted routine identifier and status-digest pairs"] as const
-        : FIELD_RULES[field];
+    const rule = key === "fleetSummary" && field === "content_digest"
+      ? ["routine_fleet_content_sha256", "the SHA-256 digest of the complete sorted routine identifier and status-digest pairs"] as const
+      : FIELD_RULES[field];
     if (!rule) throw new Error(`No canonical field definition for ${SCHEMAS[key].name}.${field}`);
     return [field, rule];
   }));
@@ -224,7 +176,7 @@ export function fieldRules(key: KeptSchemaKey): Record<string, FieldRule> {
   return rules;
 }
 
-export function canonicalDefinition(key: KeptSchemaKey): SchemaDefinition {
+export function canonicalDefinition(key: SchemaKey): SchemaDefinition {
   const source = SCHEMAS[key];
   const rules = fieldRules(key);
   const name = (field: string) => {
@@ -252,7 +204,7 @@ export function definitionIdentity(schema: SchemaDefinition): string {
   return createHash("sha256").update(`app:${schema.owner_app_id}:${schema.descriptive_name}:${fields}:key:${schema.key.hash_field}:${schema.key.range_field ?? ""}`).digest("hex");
 }
 
-export function wireFields(key: KeptSchemaKey, fields: Record<string, string>): Record<string, string> {
+export function wireFields(key: SchemaKey, fields: Record<string, string>): Record<string, string> {
   const rules = fieldRules(key);
   return Object.fromEntries(Object.entries(fields).map(([field, value]) => {
     if (!rules[field]) throw new Error(`Unknown ${SCHEMAS[key].name} field ${field}`);
@@ -260,7 +212,7 @@ export function wireFields(key: KeptSchemaKey, fields: Record<string, string>): 
   }));
 }
 
-export function wireFieldNames(key: KeptSchemaKey, fields: readonly string[]): string[] {
+export function wireFieldNames(key: SchemaKey, fields: readonly string[]): string[] {
   const rules = fieldRules(key);
   return fields.map((field) => {
     const rule = rules[field];
@@ -269,7 +221,7 @@ export function wireFieldNames(key: KeptSchemaKey, fields: readonly string[]): s
   });
 }
 
-export function localFields(key: KeptSchemaKey, fields: Record<string, string>): Record<string, string> {
+export function localFields(key: SchemaKey, fields: Record<string, string>): Record<string, string> {
   const reverse = new Map(Object.entries(fieldRules(key)).map(([local, [canonical]]) => [canonical, local]));
   return Object.fromEntries(Object.entries(fields).map(([field, value]) => {
     const local = reverse.get(field);
