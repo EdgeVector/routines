@@ -133,16 +133,14 @@ Environment:
                               is not consulted)
   ROUTINES_SECURITY_BIN       macOS security(1) override for the keychain
                               lockout probe when explicitly allowed (unset ⇒ no probe)
-  ROUTINES_FSITUATIONS_BIN    fsituations binary (default: fsituations)
-  ROUTINES_FBRAIN_BIN         fbrain binary for heartbeats (default: fbrain)
+  ROUTINES_SITUATIONS_CLI     situations binary (default: situations)
 
 Hygiene:
   --dry-run                   report only; do not delete/truncate
   --json                      machine-readable summary
   --no-publish                skip routines publish-status
-  --ff-install                if CLI checkout is a clean git tree behind
-                              lastgit/main, fast-forward only (never on dirty trees)
-  --no-restart                with --ff-install, skip routinesd kickstart
+  --ff-install                refresh a stale app-registry daemon install
+  --no-restart                with --ff-install, skip the routinesd restart
   --keep-runs N               per-id CEILING on run dirs kept (default 20)
   --keep-days N               within that ceiling, drop runs older than N days
                               (default 7); never widens what --keep-runs allows
@@ -175,12 +173,10 @@ Show each routine's schedule, last run, running state, harness and model.
 Options:
   --json                      print one JSON object instead of text:
                                 {"situationsOk": <bool>, "rows": [...],
-                                 "entries": [...], "errors": [...]}
-                              rows holds one record per routine. entries is the
-                              same array under its older name, kept for old
-                              consumers. errors holds registry load errors. The top
-                              level is an object, not an array: read the routines
-                              with .rows[]
+                                 "errors": [...]}
+                              rows holds one record per routine. errors holds
+                              registry load errors. The top level is an object,
+                              not an array: read the routines with .rows[]
   -h, --help                  print this help
 
 In a row, harnessPid is the process id of the live harness, or null when the
@@ -343,12 +339,9 @@ function cmdStatus(rest: string[]): number {
   const { values } = parseArgs({ args: rest, options: { json: { type: "boolean" } }, allowPositionals: true });
   const snap = collectStatus();
   if (values.json) {
-    // Preserve the historical CLI JSON shape while keeping stale-but-common
-    // `.entries[]` consumers from null-iterating after the shared status
-    // snapshot renamed routine records to rows.
     console.log(
       JSON.stringify(
-        { situationsOk: snap.situationsOk, rows: snap.rows, entries: snap.rows, errors: snap.errors },
+        { situationsOk: snap.situationsOk, rows: snap.rows, errors: snap.errors },
         null,
         2,
       ),
@@ -975,10 +968,9 @@ function selfProgram(): string {
 
 function launchdEnv(): Record<string, string> {
   const env: Record<string, string> = {};
-  if (process.env.LASTGIT_SOCKET) env.LASTGIT_SOCKET = process.env.LASTGIT_SOCKET;
   // launchd's default PATH is /usr/bin:/bin:/usr/sbin:/sbin — no homebrew,
   // no ~/.local/bin, no ~/.bun/bin. Without an explicit PATH the daemon can't
-  // find claude/codex/fsituations/fbrain and dispatches fail (or the Situation
+  // find claude/codex/situations and dispatches fail (or the Situation
   // fence degrades every tick).
   const home = process.env.HOME ?? "";
   const pathBits = [

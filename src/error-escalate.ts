@@ -268,7 +268,6 @@ Base: main
 Branch: kanban/${cardSlug(entry.id)}
 Kind: pr
 Priority: ${priority}
-North Star: north-star-lastgit-native-forge
 
 ## GOAL
 
@@ -300,7 +299,7 @@ so the fleet no longer ships silent red runs.
 
 \`\`\`bash
 # Last run for this id should not be error:
-routines status --json 2>/dev/null | jq '.routines[]? | select(.id=="${entry.id}") | {id,lastOutcome,lastExit}'
+routines status --json 2>/dev/null | jq '.rows[]? | select(.id=="${entry.id}") | {id,lastOutcome,lastExit}'
 # Or inspect newest run meta under ~/.routines/runs/${entry.id}/
 ls -lt "$HOME/.routines/runs/${entry.id}" | head
 \`\`\`
@@ -312,7 +311,7 @@ exit 0 (or the routine is intentionally paused/retired with a documented reason)
 
 ## OUT OF SCOPE
 
-Restarting primary lastdbd/forgejo; force-green without a root cause; infinite
+Restarting primary lastdbd; force-green without a root cause; infinite
 re-dispatch loops (triage agent must not re-escalate itself).
 
 Auto-filed ${day} by routinesd error-escalate.
@@ -405,8 +404,6 @@ function fileRoutineErrorCard(
     "pr",
     "--tags",
     `routine,error,${priority.toLowerCase()},agent-runnable,fleet`,
-    "--north-star",
-    "north-star-lastgit-native-forge",
   ];
 
   let lastFailure = "unknown failure";
@@ -1041,7 +1038,7 @@ failed. Your only job is to figure out WHY and make the failure stop recurring.
 - board card (${priority}, already filed): ${cardSlugName}
 
 ## Hard rules
-- NEVER kill/restart primary lastdbd / brew Mini / forgejo.
+- NEVER kill/restart primary lastdbd / brew Mini.
 - NEVER escalate or re-dispatch yourself (you ARE the triage).
 - Prefer a durable fix (prompt / registry / last-stack / product code) + MERGED PR
   via the correct venue (last-stack-pr-venue).
@@ -1057,8 +1054,8 @@ failed. Your only job is to figure out WHY and make the failure stop recurring.
   card already tracks it, reclassify: document that the routine should heartbeat
   ok/noop after filing, and fix the prompt so soft blockers are not "error".
 - **Attribution:** you are a scheduled triage agent. Env sets DRIVEN_BY=routine,
-  AUTOMATION_ID=${TRIAGE_ID}, LASTGIT_ACTOR=routine:${TRIAGE_ID}. On every git
-  commit and PR/LastGit CR body, append trailers:
+  AUTOMATION_ID=${TRIAGE_ID}. On every git
+  commit and PR body, append trailers:
     Driven-By: routine
     Automation-Id: ${TRIAGE_ID}
     Run-Id: <this triage run stamp>

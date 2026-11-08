@@ -2,7 +2,8 @@
 #
 # Copy to $ROUTINES_HOME/registry/<id>.toml (the filename stem becomes the id).
 # The registry lives on disk so the scheduler keeps firing during a brain
-# outage; run history + heartbeats still flow to fbrain.
+# outage. Heartbeats are in ~/.last-stack/logs/routine-heartbeats.log.
+# Run history is in $ROUTINES_HOME/runs.
 
 harness        = "claude"
 model          = "claude-opus-4-8"

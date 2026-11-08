@@ -2,7 +2,7 @@
 //
 // Prunes run logs and memory growth that poison outcome parsers and fill disk,
 // asserts routinesd is loaded, optionally publishes slim fleet status, and
-// (opt-in) fast-forwards a *clean* install checkout to lastgit/main.
+// (opt-in) refreshes a stale app-registry daemon install.
 
 import { execFileSync } from "node:child_process";
 import {
@@ -44,9 +44,9 @@ export interface HygieneOptions {
   dryRun?: boolean;
   /** Call `routines publish-status` when the CLI is available (default true). */
   publishStatus?: boolean;
-  /** Opt-in: if the live CLI checkout is a clean git tree behind lastgit/main, ff-only. */
+  /** Opt-in: refresh a stale app-registry daemon install. */
   ffInstall?: boolean;
-  /** Opt-in with ffInstall: kickstart routinesd after a successful ff. */
+  /** With ffInstall: restart routinesd after a successful refresh. */
   restartDaemonAfterFf?: boolean;
   /** Override now (tests). */
   nowMs?: number;
@@ -581,106 +581,12 @@ function tryFfInstall(
 ): HygieneResult["installFf"] {
   const artifactRefresh = tryArtifactDaemonRefresh(dryRun, restart);
   if (artifactRefresh) return artifactRefresh;
-  // Resolve the live CLI tree from the running binary / argv.
-  const entry = process.argv[1] ?? "";
-  let root: string | null = null;
-  try {
-    if (entry) {
-      // realpathSync, not a python3 -c spawn: the interpreter start alone cost
-      // ~0.5-1.2 s on a loaded machine, for one symlink resolution the runtime
-      // already does natively. Same semantics — resolves relative to cwd and
-      // throws on a missing path, which the surrounding catch already ignores.
-      const real = realpathSync(entry);
-      // entry is …/src/cli.ts or …/bin/routines → repo root is parent of src|bin
-      const dir = real.replace(/\/src\/cli\.ts$/, "").replace(/\/bin\/routines$/, "");
-      if (dir && existsSync(join(dir, ".git"))) root = dir;
-    }
-  } catch {
-    /* ignore */
-  }
-  if (!root) {
-    return {
-      attempted: false,
-      ok: true,
-      detail: "no install git root resolved from CLI path",
-      restarted: false,
-    };
-  }
-  try {
-    const status = execFileSync("git", ["-C", root, "status", "--porcelain"], {
-      encoding: "utf8",
-    });
-    if (status.trim().length > 0) {
-      return {
-        attempted: false,
-        ok: true,
-        detail: `install tree dirty (${root}); skip ff`,
-        restarted: false,
-      };
-    }
-    execFileSync("git", ["-C", root, "fetch", "lastgit", "main"], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-      timeout: 120_000,
-    });
-    const behind = execFileSync(
-      "git",
-      ["-C", root, "rev-list", "--count", "HEAD..lastgit/main"],
-      { encoding: "utf8" },
-    ).trim();
-    const n = Number(behind) || 0;
-    if (n === 0) {
-      return {
-        attempted: false,
-        ok: true,
-        detail: `install tree current (${root})`,
-        restarted: false,
-      };
-    }
-    if (dryRun) {
-      return {
-        attempted: true,
-        ok: true,
-        detail: `would ff-only ${n} commit(s) at ${root}`,
-        restarted: false,
-      };
-    }
-    execFileSync("git", ["-C", root, "merge", "--ff-only", "lastgit/main"], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    let restarted = false;
-    if (restart) {
-      const uid = process.getuid?.() ?? 0;
-      try {
-        execFileSync("launchctl", ["kickstart", "-k", `gui/${uid}/com.edgevector.routinesd`], {
-          encoding: "utf8",
-          stdio: ["ignore", "pipe", "pipe"],
-        });
-        restarted = true;
-      } catch (err) {
-        return {
-          attempted: true,
-          ok: true,
-          detail: `ff-only +${n} at ${root}; kickstart failed: ${(err as Error).message}`,
-          restarted: false,
-        };
-      }
-    }
-    return {
-      attempted: true,
-      ok: true,
-      detail: `ff-only +${n} at ${root}${restarted ? "; routinesd kickstarted" : ""}`,
-      restarted,
-    };
-  } catch (err) {
-    return {
-      attempted: true,
-      ok: false,
-      detail: `install ff failed: ${(err as Error).message}`,
-      restarted: false,
-    };
-  }
+  return {
+    attempted: false,
+    ok: true,
+    detail: "no app registry routines install resolved",
+    restarted: false,
+  };
 }
 
 /** Run the full mechanical hygiene pass. */

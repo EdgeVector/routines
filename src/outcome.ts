@@ -85,7 +85,6 @@ const ALIAS_TO_CANONICAL: Record<string, string> = {
   "program-driver": "last-stack-program-driver",
   "drain-open-prs": "last-stack-drain-open-prs",
   "consolidate-brain": "last-stack-consolidate-brain",
-  "consolidate-fbrain": "last-stack-consolidate-brain",
   "north-star-rollup": "last-stack-north-star-rollup",
   "morning-sync": "last-stack-morning-sync",
   "papercut-sweep": "last-stack-papercut-sweep",
@@ -792,8 +791,8 @@ function parseHarnessExternalSkip(
     /\bclaimed=true\b/i.test(text) ||
     /\breason=claimed\b/i.test(text) ||
     /\bpr_url\b/i.test(text) ||
-    /\bPR:\s*(?:https?:\/\/|lastgit:\/\/)/i.test(text) ||
-    /\bpr=(?:https?:\/\/|lastgit:\/\/)/i.test(text);
+    /\bPR:\s*https?:\/\//i.test(text) ||
+    /\bpr=https?:\/\//i.test(text);
   if (claimedOrPublished) return null;
 
   let detail: string;
