@@ -2,10 +2,10 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { writeFileSync } from "node:fs";
-import { FLEET_ALTERNATE, SCHEMAS, fieldRules, localFields, wireFields, type KeptSchemaKey, type SchemaDefinition } from "./status-schema.ts";
+import { FLEET_ALTERNATE, SCHEMAS, fieldRules, localFields, wireFields, type SchemaDefinition, type SchemaKey } from "./status-schema.ts";
 
 export type FieldMap = Record<string, string>;
-export type SchemaProfile = { key: KeptSchemaKey; canonical: boolean };
+export type SchemaProfile = { key: SchemaKey; canonical: boolean };
 export type KeyRead = { schemaHash: string; keyHash: string; keyRange?: string; fields: string[] };
 export type HashRead = { schemaHash: string; keyHash: string; fields: string[]; maxRows: number; keyName?: "by_fleet" };
 export type Mutation = { schemaHash: string; keyHash: string; keyRange?: string; fields: FieldMap; mutationType: "create" | "update" | "delete";
@@ -13,8 +13,6 @@ export type Mutation = { schemaHash: string; keyHash: string; keyRange?: string;
 export type HashRow = { keyHash: string; keyRange: string; fields: FieldMap };
 export interface LastDbPublisherClient {
   request(method: "GET" | "POST", path: string, body?: unknown): Promise<unknown>;
-  /** The node's `/api/version` body, read once per client. */
-  nodeVersion(): Promise<Record<string, unknown>>;
   bindSchemas(profiles: Record<string, SchemaProfile>): void;
   declareAppSchema(appId: string, schema: SchemaDefinition): Promise<{ identity: string; canonical: string; schemaName: string }>;
   queryByKeys(reads: KeyRead[]): Promise<(FieldMap | null)[]>;
@@ -67,12 +65,6 @@ export function dataObject(value: unknown): Entry {
   return body.data === undefined ? body : object(body.data);
 }
 
-/** API 13 (lastdb#803) is the first node release where every declared schema owns its values. Setup refuses an older node. */
-export const OWNED_SCHEMAS_API_VERSION = 13;
-export function nodeApiVersion(version: Entry): number {
-  return Number.isSafeInteger(version.api_version) ? Number(version.api_version) : 0;
-}
-
 function rows(value: unknown): Array<{ hash: string; range: string | null; fields: FieldMap; matched?: { hash: string; range: string } }> {
   const reply = object(value);
   if (reply.ok !== true || !Array.isArray(reply.results) || typeof reply.has_more !== "boolean") {
@@ -98,9 +90,6 @@ function rows(value: unknown): Array<{ hash: string; range: string | null; field
 
 export function newLastDbPublisherClient(opts: LastDbClientOptions = {}): LastDbPublisherClient {
   const request = newLastDbJsonCaller(opts);
-  let version: Promise<Entry> | undefined;
-  const nodeVersion = () => version ??= request("GET", "/api/version").then(dataObject)
-    .catch((error: unknown) => { version = undefined; throw error; });
   let profiles: Record<string, SchemaProfile> = {};
   const selected = (schema: string) => {
     const profile = profiles[schema];
@@ -218,11 +207,9 @@ export function newLastDbPublisherClient(opts: LastDbClientOptions = {}): LastDb
   };
   return {
     request,
-    nodeVersion,
     bindSchemas(next) { profiles = { ...next }; },
     async declareAppSchema(appId, schema) {
       const reply = dataObject(await request("POST", "/api/apps/declare-schema", { app_id: appId, schema }));
-      // Setup checks the node API version once before any declare, so no per-schema ownership check remains here.
       if (reply.app_id !== appId || reply.schema_name !== `${appId}/${schema.name}` ||
           typeof reply.canonical !== "string" || !reply.canonical || typeof reply.identity_hash !== "string" || !/^[a-f0-9]{64}$/.test(reply.identity_hash)) {
         throw new LastDbPublishError("schema_declare_bad_response", "LastDB did not confirm the requested schema-owned definition.");
@@ -285,7 +272,7 @@ function newLastDbJsonCaller(opts: LastDbClientOptions) {
 }
 
 // Explicit operator diagnostics contain selectors and page metadata, never values.
-// The same transport records the patched control's ordinary range pages in CI.
+// The same transport records ordinary range pages for both CI arms.
 function recordReadPages(path: string, body: unknown, reply: unknown, status: number): void {
   const file = process.env.ROUTINES_STATUS_READ_TRACE_FILE;
   if (!file || (path !== "/api/query" && path !== "/api/queries/batch")) return;

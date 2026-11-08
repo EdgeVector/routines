@@ -1,13 +1,10 @@
 /** Explicit status schema setup. Ordinary requests read this config only.
  *
- * The one-time conversion of shared fleet values (`convert-status-schemas`) is gone.
- * It drove `POST /api/db/alternate-keys`, which LastDB API 15 removed together with the
- * app conversion capabilities. Setup requires API 13 or later, where every declared
- * schema owns its values. A new home starts empty, so `init-status` declares the owned schemas. */
-import { closeSync, constants, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+ * A new home starts empty, so `init-status` declares the owned schemas. */
+import { closeSync, constants, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { stateDir } from "./paths.ts";
-import { dataObject, LastDbPublishError, nodeApiVersion, object, OWNED_SCHEMAS_API_VERSION, type LastDbPublisherClient } from "./status-client.ts";
+import { dataObject, LastDbPublishError, object, type LastDbPublisherClient } from "./status-client.ts";
 import { ACTIVE_SCHEMA_KEYS, canonicalDefinition, definitionIdentity, ROUTINES_APP_ID, SCHEMAS, type SchemaDefinition, type SchemaKey } from "./status-schema.ts";
 
 type Binding = { identity: string; runtime: string };
@@ -41,21 +38,15 @@ function config(value: unknown): StatusSchemaConfig {
 }
 export function loadStatusSchemas(client: LastDbPublisherClient): Record<SchemaKey, string> {
   const path = statusSchemaPath();
-  requireNoConversionScope(path);
   const raw = readOptional(path);
   requireValue(raw, "Fleet schemas are not configured. Run init-status.");
   const saved = config(JSON.parse(raw.toString()));
   client.bindSchemas(Object.fromEntries(Object.entries(saved.schemas).map(([key, binding]) => [binding!.runtime, { key: key as SchemaKey, canonical: true }])));
-  return { status: saved.schemas.status!.runtime, fleetStatus: saved.schemas.fleetStatus?.runtime ?? "",
-    fleetSummary: saved.schemas.fleetSummary!.runtime, runSummaryV2: saved.schemas.runSummaryV2!.runtime,
-    snapshot: saved.schemas.snapshot?.runtime ?? "", runSummary: saved.schemas.runSummary?.runtime ?? "" };
-}
-
-// An older release saved a scope file next to the config while a conversion ran.
-// This release cannot resume or abort that conversion, so it refuses to guess.
-function requireNoConversionScope(path: string): void {
-  requireValue(!existsSync(path + ".conversion"),
-    `An older release left a fleet conversion scope at ${path}.conversion. This release has no conversion; review that file and remove it.`);
+  return {
+    status: saved.schemas.status!.runtime,
+    fleetSummary: saved.schemas.fleetSummary!.runtime,
+    runSummaryV2: saved.schemas.runSummaryV2!.runtime,
+  };
 }
 
 export function acquireStatusConfigLock(): () => void { return lock(statusSchemaPath()); }
@@ -109,15 +100,6 @@ function validateMetadata(source: Record<string, unknown>, definition: SchemaDef
     `Installed ${definition.name} differs from the reviewed fleet definition.`);
   return { identity: source.identity_hash as string, runtime: source.name as string };
 }
-// The one value-ownership check: from API 13 (lastdb#803) every declared schema owns its
-// values, so no installed or declared schema needs its own check.
-async function capabilities(client: LastDbPublisherClient): Promise<void> {
-  const version = await client.nodeVersion(), flags = object(version.capabilities);
-  requireValue(nodeApiVersion(version) >= OWNED_SCHEMAS_API_VERSION,
-    `Fleet setup requires LastDB API ${OWNED_SCHEMAS_API_VERSION} or later, where every declared schema owns its values.`);
-  requireValue(["owned_app_schemas_v1", "independent_hash_range_v1", "compound_alternate_keys_v1"].every((flag) => flags[flag] === true),
-    "Fleet setup requires a compatible LastDB release with owned app schemas and named keys.");
-}
 function keyFor(source: Record<string, unknown>): SchemaKey {
   const key = keys.find((key) => SCHEMAS[key].name === source.descriptive_name);
   requireValue(key, "An unreviewed Routines schema requires owner review before setup.");
@@ -133,9 +115,7 @@ function requireOwnedMetadata(source: Record<string, unknown>, key: SchemaKey): 
 export async function initializeStatusSchemas(client: LastDbPublisherClient): Promise<StatusSchemaConfig> {
   const path = statusSchemaPath(), release = lock(path);
   try {
-    requireNoConversionScope(path);
     const previous = readOptional(path), saved = previous ? config(JSON.parse(previous.toString())) : { version: 2 as const, schemas: {} as StatusSchemaConfig["schemas"] };
-    await capabilities(client);
     const installed = await directory(client);
     const current = await Promise.all(installed.map(async (entry) => {
       const key = keyFor(entry), source = await metadata(client, String(entry.name));

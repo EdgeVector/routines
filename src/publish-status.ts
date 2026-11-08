@@ -9,7 +9,7 @@ import { acquireStatusConfigLock, loadStatusSchemas } from "./status-setup.ts";
 
 import { ROUTINES_APP_ID, ROUTINES_FLEET_ID, FLEET_STATUS_BUCKET_COUNT, ROUTINE_STATUS_MAX_BYTES,
   LAST_OUTCOME_DETAIL_MAX_BYTES, FLEET_SUMMARY_MAX_BYTES, RUN_SUMMARY_V2_MAX_BYTES,
-  RUN_SUMMARY_LOG_TAIL_MAX_BYTES, SNAPSHOT_FIELDS, STATUS_FIELDS,
+  RUN_SUMMARY_LOG_TAIL_MAX_BYTES, STATUS_FIELDS,
   RUN_SUMMARY_V2_FIELDS, FLEET_SUMMARY_FIELDS, wireFields, wireFieldNames, type SchemaKey } from "./status-schema.ts";
 export { ROUTINES_APP_ID, ROUTINES_FLEET_ID, FLEET_STATUS_BUCKET_COUNT, ROUTINE_STATUS_MAX_BYTES,
   LAST_OUTCOME_DETAIL_MAX_BYTES, FLEET_SUMMARY_MAX_BYTES, RUN_SUMMARY_V2_MAX_BYTES, RUN_SUMMARY_LOG_TAIL_MAX_BYTES } from "./status-schema.ts";
@@ -69,7 +69,6 @@ export interface DeliverStatusOptions extends PublishStatusOptions {
   maxRecords?: number;
   approve?: boolean;
   boundedView?: boolean;
-  legacyView?: boolean;
   deliveryClient?: LastDbDeliveryClient;
 }
 
@@ -93,16 +92,6 @@ export interface ReadFleetStatusOptions {
   client?: LastDbPublisherClient;
   schemaHashes?: Record<SchemaKey, string>;
   maxAttempts?: number;
-}
-
-export interface LegacyFleetReadResult {
-  snapshot: FieldMap;
-  rows: FieldMap[];
-}
-
-export interface LegacySnapshotOptions {
-  client?: LastDbPublisherClient;
-  schemaHashes?: Record<SchemaKey, string>;
 }
 
 export function buildFleetPublication(options: PublishStatusOptions = {}): FleetPublication {
@@ -284,26 +273,15 @@ async function findStaleRoutineRows(client: LastDbPublisherClient, schema: strin
 export async function deliverFleetStatus(options: DeliverStatusOptions): Promise<DeliverStatusResult> {
   const publisherClient = options.client ?? newLastDbPublisherClient();
   const publication = await publishFleetStatus({ ...options, client: publisherClient });
-  const useLegacyView = options.legacyView === true;
-  if (useLegacyView) assertLegacyReadWindow(options.now ?? new Date());
-  const boundedView = !useLegacyView && !options.dryRun
+  const boundedView = !options.dryRun
     ? await readFleetStatus({ client: publisherClient, schemaHashes: publication.schemaHashes })
     : null;
-  if (useLegacyView && !options.dryRun) {
-    await readLegacyFleetStatus({ client: publisherClient, schemaHashes: publication.schemaHashes });
-  }
-  const deliveryRequests = useLegacyView
-    ? [buildDeliveryStageRequest({
-        schemaHashes: publication.schemaHashes,
-        recipient: options.recipient,
-        maxRecords: options.maxRecords,
-      })]
-    : buildBoundedDeliveryStageRequests({
-        schemaHashes: publication.schemaHashes,
-        recipient: options.recipient,
-        maxRecords: options.maxRecords,
-        rowIds: (boundedView?.rows ?? publication.rows).map((row) => row.id ?? ""),
-      });
+  const deliveryRequests = buildBoundedDeliveryStageRequests({
+    schemaHashes: publication.schemaHashes,
+    recipient: options.recipient,
+    maxRecords: options.maxRecords,
+    rowIds: (boundedView?.rows ?? publication.rows).map((row) => row.id ?? ""),
+  });
   const deliveryRequest = deliveryRequests[0]!;
 
   if (options.dryRun) {
@@ -408,73 +386,6 @@ export async function readFleetStatus(options: ReadFleetStatusOptions = {}): Pro
   throw new LastDbPublishError("fleet_view_inconsistent", `Bounded fleet view did not converge: ${lastReason}.`);
 }
 
-export async function readLegacyFleetStatus(options: LegacySnapshotOptions = {}): Promise<LegacyFleetReadResult> {
-  const client = options.client ?? newLastDbPublisherClient();
-  const schemaHashes = configuredSchemas(client, options.schemaHashes);
-  if (!schemaHashes.snapshot) throw new LastDbPublishError("legacy_fleet_missing", "No historical fleet snapshot schema is configured.");
-  const [snapshot] = await client.queryByKeys([{
-    schemaHash: schemaHashes.snapshot,
-    keyHash: "fleet-latest",
-    fields: [...SNAPSHOT_FIELDS],
-  }]);
-  if (!snapshot) throw new LastDbPublishError("legacy_fleet_missing", "Legacy fleet snapshot is missing.");
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(snapshot.rows_json ?? "");
-  } catch {
-    throw new LastDbPublishError("legacy_fleet_invalid", "Legacy fleet snapshot rows_json is invalid.");
-  }
-  if (!Array.isArray(parsed) || parsed.some((row) => !row || typeof row !== "object" || Array.isArray(row))) {
-    throw new LastDbPublishError("legacy_fleet_invalid", "Legacy fleet snapshot rows_json is not a row array.");
-  }
-  return { snapshot, rows: parsed as FieldMap[] };
-}
-
-export async function clearLegacyFleetSnapshot(options: LegacySnapshotOptions = {}): Promise<boolean> {
-  const release = acquireStatusConfigLock();
-  try {
-    const client = options.client ?? newLastDbPublisherClient();
-    const schemaHashes = configuredSchemas(client, options.schemaHashes);
-    if (!schemaHashes.snapshot) return false;
-    const [existing] = await client.queryByKeys([{
-      schemaHash: schemaHashes.snapshot,
-      keyHash: "fleet-latest",
-      fields: [...SNAPSHOT_FIELDS],
-    }]);
-    if (!existing || !existing.rows_json) return false;
-    const fields = Object.fromEntries(SNAPSHOT_FIELDS.map((field) => [field, existing[field] ?? ""]));
-    fields.rows_json = "";
-    await client.mutateBatch([{
-      schemaHash: schemaHashes.snapshot,
-      keyHash: "fleet-latest",
-      fields,
-      mutationType: "update",
-      expected: { field: "rows_json", value: existing.rows_json },
-    }]);
-    return true;
-  } finally { release(); }
-}
-
-function assertLegacyReadWindow(now: Date): void {
-  const raw = process.env.ROUTINES_FLEET_LEGACY_READ_UNTIL ?? "";
-  const deadline = Date.parse(raw);
-  const maxWindowMs = 7 * 24 * 60 * 60 * 1000;
-  if (!Number.isFinite(deadline) || deadline <= now.getTime() || deadline - now.getTime() > maxWindowMs) {
-    throw new LastDbPublishError(
-      "legacy_read_window_closed",
-      "Legacy fleet reads require ROUTINES_FLEET_LEGACY_READ_UNTIL within the next seven days.",
-    );
-  }
-}
-
-/** Snapshot fields safe for the ~64KB sealed-message cap. Exclude rows_json —
- * the admin tab reconstructs the grid from RoutineStatus rows, and embedding
- * the full fleet JSON twice is what blew past the Exemem size limit. */
-const SNAPSHOT_DELIVER_FIELDS = SNAPSHOT_FIELDS.filter((f) => f !== "rows_json");
-
-/** Status fields for deliver — drop free-text detail that can dominate size. */
-const STATUS_DELIVER_FIELDS = STATUS_FIELDS.filter((f) => f !== "last_outcome_detail");
-
 const BOUNDED_STATUS_DELIVER_FIELDS = [
   "fleet_bucket",
   "sk",
@@ -494,35 +405,6 @@ const BOUNDED_STATUS_DELIVER_FIELDS = [
   "content_digest",
   "updated_at",
 ] as const;
-
-export function buildDeliveryStageRequest(opts: {
-  schemaHashes: Record<SchemaKey, string>;
-  recipient: DeliveryRecipient;
-  maxRecords?: number;
-}): DeliveryStageRequest {
-  // Default 12 status rows + 1 snapshot keeps sealed size under Exemem's 64KB cap
-  // on Tom's full fleet (~50 routines). Override with --max-records when needed.
-  const maxRecords = positiveInt(opts.maxRecords, 12);
-  return {
-    recipient_pubkey: opts.recipient.recipientPubkey,
-    ...(opts.recipient.recipientDisplayName ? { recipient_display_name: opts.recipient.recipientDisplayName } : {}),
-    messaging_public_key: opts.recipient.messagingPublicKey,
-    messaging_pseudonym: opts.recipient.messagingPseudonym,
-    mode: "snapshot",
-    max_records: maxRecords,
-    legs: [
-      {
-        schema_name: opts.schemaHashes.snapshot,
-        fields: wireFieldNames("snapshot", SNAPSHOT_DELIVER_FIELDS),
-        hash_keys: ["fleet-latest"],
-      },
-      {
-        schema_name: opts.schemaHashes.status,
-        fields: wireFieldNames("status", STATUS_DELIVER_FIELDS),
-      },
-    ],
-  };
-}
 
 export function buildBoundedDeliveryStageRequest(opts: {
   schemaHashes: Record<SchemaKey, string>;

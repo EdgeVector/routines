@@ -56,7 +56,7 @@ import { registryDir, routinesHome, runsDir } from "./paths.ts";
 import { runRoutine } from "./runner.ts";
 import { startServer } from "./server.ts";
 import { loadProjectConfig } from "./project-config.ts";
-import { clearLegacyFleetSnapshot, deliverFleetStatus, publishFleetStatus, readFleetStatus, type DeliveryRecipient } from "./publish-status.ts";
+import { deliverFleetStatus, publishFleetStatus, readFleetStatus, type DeliveryRecipient } from "./publish-status.ts";
 import { newLastDbPublisherClient } from "./status-client.ts";
 import { initializeStatusSchemas } from "./status-setup.ts";
 import { canonicalDefinition, SCHEMAS, type SchemaKey } from "./status-schema.ts";
@@ -137,9 +137,6 @@ Environment:
                               lockout probe when explicitly allowed (unset ⇒ no probe)
   ROUTINES_FSITUATIONS_BIN    fsituations binary (default: fsituations)
   ROUTINES_FBRAIN_BIN         fbrain binary for heartbeats (default: fbrain)
-  ROUTINES_FLEET_LEGACY_READ_UNTIL
-                              temporary ISO deadline for deliver-status --legacy-view;
-                              must be within seven days
 
 Hygiene:
   --dry-run                   report only; do not delete/truncate
@@ -633,7 +630,6 @@ async function cmdPublishStatus(rest: string[]): Promise<number> {
       "dry-run": { type: "boolean" },
       runs: { type: "string" },
       "tail-bytes": { type: "string" },
-      "clear-legacy-snapshot": { type: "boolean" },
     },
     allowPositionals: true,
   });
@@ -647,21 +643,13 @@ async function cmdPublishStatus(rest: string[]): Promise<number> {
     console.error(`invalid --tail-bytes ${values["tail-bytes"]}`);
     return 2;
   }
-  if (values["dry-run"] && values["clear-legacy-snapshot"]) {
-    console.error("--clear-legacy-snapshot cannot be used with --dry-run");
-    return 2;
-  }
-
   const result = await publishFleetStatus({
     dryRun: values["dry-run"] === true,
     runLimit,
     logTailBytes,
   });
-  const legacySnapshotCleared = values["clear-legacy-snapshot"] === true
-    ? await clearLegacyFleetSnapshot()
-    : false;
   if (values.json) {
-    console.log(JSON.stringify({ ...result, legacySnapshotCleared }, null, 2));
+    console.log(JSON.stringify(result, null, 2));
     return 0;
   }
   const action = result.dryRun ? "DRY-RUN" : "PUBLISHED";
@@ -671,7 +659,6 @@ async function cmdPublishStatus(rest: string[]): Promise<number> {
   console.log(
     `schemas status=${result.schemaHashes.status} by_fleet=by_fleet run_summary=${result.schemaHashes.runSummaryV2} fleet_summary=${result.schemaHashes.fleetSummary}`,
   );
-  if (values["clear-legacy-snapshot"]) console.log(`legacy_snapshot_cleared=${legacySnapshotCleared}`);
   return 0;
 }
 
@@ -700,7 +687,6 @@ async function cmdDeliverStatus(rest: string[]): Promise<number> {
       "dry-run": { type: "boolean" },
       approve: { type: "boolean" },
       "bounded-view": { type: "boolean" },
-      "legacy-view": { type: "boolean" },
       runs: { type: "string" },
       "tail-bytes": { type: "string" },
       "max-records": { type: "string" },
@@ -744,7 +730,6 @@ async function cmdDeliverStatus(rest: string[]): Promise<number> {
     logTailBytes,
     maxRecords,
     boundedView: values["bounded-view"] === true,
-    legacyView: values["legacy-view"] === true,
   });
   if (values.json) {
     console.log(JSON.stringify(result, null, 2));
@@ -752,7 +737,7 @@ async function cmdDeliverStatus(rest: string[]): Promise<number> {
   }
   if (result.dryRun) {
     console.log(`DRY-RUN routines fleet delivery rows=${result.rows.length} pages=${result.deliveryRequests.length} max_records=${result.deliveryRequest.max_records}`);
-    console.log(`schemas snapshot=${result.schemaHashes.snapshot} status=${result.schemaHashes.status}`);
+    console.log(`schemas fleet_summary=${result.schemaHashes.fleetSummary} status=${result.schemaHashes.status}`);
     return 0;
   }
   if (!result.staged) {
@@ -770,7 +755,7 @@ async function cmdDeliverStatus(rest: string[]): Promise<number> {
       `STAGED routines fleet status deliveries=${result.stagedPages.length} records=${records}; re-run with --approve to send`,
     );
   }
-  console.log(`schemas snapshot=${result.schemaHashes.snapshot} status=${result.schemaHashes.status}`);
+  console.log(`schemas fleet_summary=${result.schemaHashes.fleetSummary} status=${result.schemaHashes.status}`);
   return 0;
 }
 

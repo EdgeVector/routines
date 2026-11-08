@@ -422,9 +422,7 @@ The fleet summary has a 4096-byte cap.
 
 ### Setup
 
-The release has no value conversion. `convert-status-schemas` is gone.
-It drove `POST /api/db/alternate-keys`, which LastDB API 15 removed with the app conversion capabilities.
-Setup requires LastDB API 13 or later. From API 13, every declared schema owns its values.
+The release has no value conversion.
 A new home starts with no Routines schema, so `init-status` declares the schema-owned definitions.
 The primary-reset restrictions remain in force. These commands do not authorize a primary change.
 
@@ -436,7 +434,7 @@ Generic historical field names do not pass the current canonical-name policy.
 The source declares precise canonical names and preserves the original String field types.
 
 ```sh
-routines init-status --dry-run --json    # export the six published definitions, without a node request
+routines init-status --dry-run --json    # export the three published definitions, without a node request
 routines init-status --json              # fresh setup only
 routines publish-status --json
 routines read-status --json
@@ -444,16 +442,13 @@ routines read-status --json
 
 `ROUTINES_STATUS_SCHEMA_CONFIG` selects the config path.
 The default is `ROUTINES_HOME/state/status-schemas.json`.
-Setup reads the node API version once and refuses a node before API 13.
-It also refuses a node without the owned app schema and named key capabilities.
-Setup and each request refuse a `status-schemas.json.conversion` scope file that an older release left.
-Review that file and remove it. This release cannot resume or abort that conversion.
-Fresh setup does not create historical schemas.
 
 ### Validation scope
 
 Source syntax and type checks do not prove the running app.
-The merge requires CI product operations, a valid latency comparison, and verified CI artifacts.
+The required merge checks are `ci-required` and `generated-evidence`.
+The latency workflow compares this change with the pull request base on the latest LastDB nightly.
+That comparison is not a required check. On API 30 both arms fail because the fleet client still sends the removed `fields` query key and `fields_and_values` mutations.
 A comparison with an absent posture dependency must retain the real ENOENT error and unknown posture in both arms.
 Such a result measures publication and lookup latency with that dependency absent.
 It does not prove nominal live posture collection, and no posture gate is changed.
@@ -466,7 +461,6 @@ CI retains every page's selectors, status, cursor, count, and continuation. Each
 The comparison enables the same transport trace in both arms, so both latency samples include the trace cost.
 A baseline that fails schema admission supplies no before latency and cannot count as a passing comparison.
 The comparison records each field's present, absent, or null state and the record metadata block.
-An absent optional historical layout marker stays absent after each reopen.
 It verifies complete primary membership and real per-field counts; it does not require a value in every declared field.
 
 ## Admin fleet status deliver
@@ -479,13 +473,7 @@ It verifies complete primary membership and real per-field counts; it does not r
 - explicit `routines/RoutineStatus` ids from the bounded reader
 
 The delivery uses the returned primary identifiers from the complete alternate-key read.
-Historical copied status payloads do not form part of the delivery.
-
-A rollback read needs both `--legacy-view` and an ISO deadline in
-`ROUTINES_FLEET_LEGACY_READ_UNTIL`. The deadline must be within seven days.
-This path reads retained historical data. The normal publisher never writes `RoutineFleetSnapshot`.
-An explicit `--clear-legacy-snapshot` request clears only that snapshot payload.
-Schema setup never requests that deletion.
+The delivery stages FleetSummary and RoutineStatus only.
 
 Recipient keys are operational inputs, not repository config. Pass them as
 flags or environment variables; do not commit them:

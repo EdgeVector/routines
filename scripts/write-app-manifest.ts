@@ -2,10 +2,8 @@
 // Write the schemas Routines declares into lastdb-app.json.
 // A registry app lists every schema it declares, with every field typed
 // (decision A8). The list is the exact canonical definition that
-// `init-status` declares (ACTIVE_SCHEMA_KEYS). The older fleet record types
-// are read on homes that already hold them; this release never declares
-// them, so they are not listed. This reads source definitions only. It never
-// contacts a node or Schema Service.
+// `init-status` declares (ACTIVE_SCHEMA_KEYS). This reads source definitions
+// only. It never contacts a node or Schema Service.
 import { readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { ACTIVE_SCHEMA_KEYS, canonicalDefinition } from "../src/status-schema.ts";
