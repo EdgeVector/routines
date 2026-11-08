@@ -162,7 +162,7 @@ export interface PlistOptions {
    * not append a second `daemon` word after the script path.
    */
   wrapper?: boolean;
-  /** Extra env to inject (e.g. LASTGIT_SOCKET, ROUTINES_HOME). */
+  /** Extra env to inject (e.g. ROUTINES_HOME). */
   env?: Record<string, string>;
 }
 

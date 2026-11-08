@@ -3,8 +3,7 @@
 Unified scheduler + dispatcher for agent routines (Claude Code / Codex), with
 global difficulty routing. **One scheduler owns dispatch; non-pinned routines
 declare only `difficulty = "fast" | "normal" | "hard"`, while explicit provider
-smokes use `pin = true` with `harness` and `model`.** Spec of record:
-`fbrain get design-routines-orchestrator`.
+smokes use `pin = true` with `harness` and `model`.**
 
 Today routine configs are split across three registries with two live
 schedulers (`~/.last-stack/routines/*.md` prompts, `~/.codex/automations/*`
@@ -24,8 +23,9 @@ Run without the shim via `bun run src/cli.ts <command>` or `bun run routines`.
 
 One TOML file per routine at `$ROUTINES_HOME/registry/<id>.toml` (default
 `~/.routines`). The registry lives on **disk, not in LastDB**, on purpose: the
-scheduler must keep firing — or fail loudly — during a brain outage. Run history
-and heartbeats still flow to fbrain.
+scheduler must keep firing — or fail loudly — during a brain outage. Heartbeats
+are in `~/.last-stack/logs/routine-heartbeats.log`. Run history is in
+`$ROUTINES_HOME/runs`.
 
 The versioned 3×3 provider/model matrix has one optional fleet owner at
 `$ROUTINES_HOME/routing-matrix.json`. If it is absent, the checked-in version 1
@@ -256,8 +256,8 @@ Three complementary layers:
    `memory.md` files to the last 100 lines, drops stale
    `error-escalate/*.json`, checks that `com.edgevector.routinesd` is loaded,
    and runs `publish-status`. The installed hourly agent also runs
-   `--ff-install`, so a clean CLI checkout fast-forwards to GitHub `main` and
-   kickstarts `routinesd` after updates. Install hourly via
+   `--ff-install`, which refreshes a stale app-registry daemon install.
+   Install hourly via
    `routines install-hygiene` (label `com.edgevector.routines-hygiene`), which
    writes a stable launcher at `~/.routines/daemon/run-hygiene.sh`. Shell
    wrapper for manual runs: `scripts/routines-hygiene.sh`.
@@ -307,13 +307,13 @@ the scheduler and `freeze-watch` never scan it. A line has these fields:
 - `caller`: `cli`, `web`, or `unknown`. `client` (web only): the HTTP
   User-Agent, cut to 200 characters, because the dashboard has no auth.
 - `actor`: the routine identity that the runner puts in the environment of every
-  harness child (`DRIVEN_BY`, `AUTOMATION_ID`, `LASTGIT_ACTOR`,
-  `ROUTINES_RUN_ID`; see `buildRoutineAttributionEnv` in `src/prompt.ts`). Only
-  those four names are copied, each value cut to 200 characters. `{}` means none
-  was set. Together with `cwd`, `pid`, `ppid` and `argv` (first three words) it
-  tells an agent inside a routine dispatch apart from a person at a terminal.
-  An interactive agent session that is not a dispatch sets none of the four
-  names, so it looks like a person.
+  harness child (`DRIVEN_BY`, `AUTOMATION_ID`, `ROUTINES_RUN_ID`; see
+  `buildRoutineAttributionEnv` in `src/prompt.ts`). Only those three names are
+  copied, each value cut to 200 characters. `{}` means none was set. Together
+  with `cwd`, `pid`, `ppid` and `argv` (first three words) it tells an agent
+  inside a routine dispatch apart from a person at a terminal. An interactive
+  agent session that is not a dispatch sets none of the three names, so it
+  looks like a person.
 
 For a `web` line, `actor`, `cwd`, `pid`, `ppid` and `argv` describe the
 dashboard server process, not the HTTP client. Only `client` says who called.
@@ -502,7 +502,7 @@ it survives session exit. Each tick it:
    an optional global concurrency cap (`--concurrency N`; default **unlimited** /
    `0`), and a per-run **timeout kill**,
 4. enforces the **dispatch-time Situation fence**: a run whose id matches an
-   active `fsituations` Situation's `scope_routines` glob is skipped and logged.
+   active `situations` Situation's `scope_routines` glob is skipped and logged.
 
 Per-run evidence lands at `$ROUTINES_HOME/runs/<id>/<ts>/`
 (`meta.json`, `prompt.txt`, `stdout.log`, `stderr.log`).

@@ -40,12 +40,12 @@ Fallback order only when no envelope path is present:
 2. `${CODEX_HOME:-$HOME/.codex}/automations/<automation-id>/memory.md`
 
 ## Hard guardrails
-- NEVER kill/restart the primary brain (`lastdbd` / brew Mini) or forgejo.
+- NEVER kill/restart the primary brain (`lastdbd` / brew Mini).
 - NEVER start/stop/restart `routinesd` unless Situations preflight allows
-  `restart-routine` **and** evidence is a clean install-worktree ff (prefer
-  leaving restarts to `routines hygiene --ff-install` or Tom). If the daemon
-  looks dead/wedged with no safe path, escalate needs_human — do not thrash.
-- Never use `brain doctor` / `kanban doctor` / TCP `:9001` as health checks.
+  `restart-routine` (prefer leaving restarts to `routines hygiene --ff-install`
+  or Tom). If the daemon looks dead/wedged with no safe path, escalate
+  needs_human — do not thrash.
+- Never use `brain doctor` / `kanban doctor` as health checks.
 - Before framing anything as an incident: `situations notices --since 1h` — a
   matching notice (LastDB upgrade, stack upgrade, cutover) means treat symptoms
   as expected fallout unless they outlast the notice window.
@@ -77,7 +77,7 @@ export PATH="$HOME/.local/bin:$PATH"
 "$last_stack/bin/last-stack-cli-preflight" git curl jq kanban brain routines || true
 ```
 
-Situations: `fsituations list --json` or the workspace fallback. Empty list = OK.
+Situations: `situations list --json` or the workspace fallback. Empty list = OK.
 This is a read-only probe; do not mutate active `harness-outage-*` records from
 this routine.
 Socket health: `kanban list --column todo >/dev/null`.
@@ -252,7 +252,6 @@ Repo: EdgeVector/routines
 Base: main
 Branch: kanban/<slug>
 Kind: pr
-North Star: north-star-lastgit-native-forge
 Priority: P2
 
 ## END STATE
@@ -301,5 +300,5 @@ routine-fleet-health <ISO-ts-Z> <ok|noop|error> reds=<n> open_error_cards=<n> cl
 - Bulk run-log deletion (that's `routines hygiene`)
 - Grooming unrelated board columns
 - Dogfood / probe recipes
-- Restarting lastdbd or forgejo
+- Restarting lastdbd
 - Dirty-tree `git reset --hard` / force-push

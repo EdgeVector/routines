@@ -3,7 +3,8 @@
 //
 // The registry lives on disk (NOT in LastDB) on purpose: the scheduler must
 // keep firing — or fail loudly — during a brain outage, per the workspace
-// brain-down standing rules. Run history and heartbeats still flow to fbrain.
+// brain-down standing rules. Heartbeats are in
+// ~/.last-stack/logs/routine-heartbeats.log. Run history is in $ROUTINES_HOME/runs.
 
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { basename, join } from "node:path";

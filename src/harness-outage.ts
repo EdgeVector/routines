@@ -669,7 +669,6 @@ function upsertSituation(
   const bin =
     opts.situationsBin ??
     process.env.ROUTINES_SITUATIONS_CLI?.trim() ??
-    process.env.ROUTINES_FSITUATIONS_BIN?.trim() ??
     "situations";
   const slug = outageSituationSlug(entry.harness);
   const reset = outage.resetAt ?? outage.resetHint;

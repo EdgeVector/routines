@@ -6,8 +6,8 @@
 // and write to missing ~/.codex/automations/<short>/memory.md paths under a
 // sandbox that cannot create them.
 //
-// Also injects a durable **attribution** contract so landings (commits / PRs /
-// LastGit CRs) can be distinguished from interactive agent work after the fact.
+// Also injects a durable **attribution** contract so landings (commits / PRs)
+// can be distinguished from interactive agent work after the fact.
 
 import { mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -23,11 +23,6 @@ export function ensureMemoryPath(id: string): string {
   return path;
 }
 
-/** Actor string recorded on LastGit CRs when a scheduled routine drives work. */
-export function routineActor(automationId: string): string {
-  return `routine:${automationId}`;
-}
-
 /**
  * Env vars injected into every harness child (and recommended for triage).
  * Interactive sessions do not set these — absence means "not a scheduled routine".
@@ -39,7 +34,6 @@ export function buildRoutineAttributionEnv(
   const env: Record<string, string> = {
     DRIVEN_BY: "routine",
     AUTOMATION_ID: automationId,
-    LASTGIT_ACTOR: routineActor(automationId),
   };
   if (runDir) {
     env.ROUTINES_RUN_DIR = runDir;
@@ -100,7 +94,7 @@ type DispatchEnvelopeOptions = {
  * Envelope prepended to every dispatched prompt. Agents must honor the
  * Automation memory path exactly (no short-alias invention). Always includes
  * a Situations notices FYI block (or a soft-degrade line if CLI unavailable)
- * and a mandatory attribution contract for git/LastGit landings.
+ * and a mandatory attribution contract for git landings.
  */
 export function buildDispatchEnvelope(
   entry: RoutineEntry,
@@ -173,10 +167,10 @@ export function buildDispatchEnvelope(
     "## Attribution (required — durable provenance)",
     "",
     "This run is a **scheduled routine**, not an interactive human session.",
-    "Environment is already set: `DRIVEN_BY=routine`, `AUTOMATION_ID=<id>`,",
-    "`LASTGIT_ACTOR=routine:<id>` (and `ROUTINES_RUN_DIR` / `ROUTINES_RUN_ID` when known).",
+    "Environment is already set: `DRIVEN_BY=routine`, `AUTOMATION_ID=<id>`",
+    "(and `ROUTINES_RUN_DIR` / `ROUTINES_RUN_ID` when known).",
     "",
-    "On **every** `git commit` and every PR / LastGit CR body that lands work,",
+    "On **every** `git commit` and every PR body that lands work,",
     "append these git trailers at the end of the message/body (exact keys):",
     "",
     "```",

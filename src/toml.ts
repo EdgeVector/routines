@@ -2,10 +2,8 @@
 //
 // The registry format is deliberately flat (id, prompt_path, harness, model,
 // effort, rrule, cwd, status, timeout_min, error_priority, heartbeat_slug) — a handful of
-// scalar key = value pairs. We parse exactly that subset so the app carries no
-// runtime npm dependency (the LastGit CI gate clones fresh and does NOT run
-// `bun install`, so every runtime import must resolve to a node builtin or a
-// local file). Supported value kinds: basic strings ("..."), literal strings
+// scalar key = value pairs. This parser reads exactly that subset. Supported
+// value kinds: basic strings ("..."), literal strings
 // ('...'), integers, floats, and booleans. Table headers ([x]) and arrays are
 // not part of the registry schema and are rejected loudly rather than silently
 // mis-parsed.

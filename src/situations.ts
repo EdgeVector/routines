@@ -1,20 +1,20 @@
 // Dispatch-time Situation fence + agent-impact notice context.
 //
-// Before spawning a run, the daemon asks F-Situations for the active
+// Before spawning a run, the daemon asks Situations for the active
 // operational posture and skips any routine whose id matches an active
 // Situation's `scope_routines` glob — but only when that Situation is p0 or
 // p1. Routines also self-check per workspace rules; this fence is defense in
 // depth at the scheduler boundary for genuine emergencies.
 //
-// `scope_routines` is informational metadata in the F-Situations app's own
+// `scope_routines` is informational metadata in the Situations app's own
 // contract (its record validators document "scope_routines is not a panic
 // button" — the real hazard belongs in `blocked_actions`/
 // `requires_human_clearance`, which this fence does not currently read). A
 // p2/p3 Situation naming a routine in Scope for context must not silently
 // stall it. Fixed 2026-10-01 (papercut
 // papercut-routines-fence-ignores-blocked-actions-scope-routines-hard-skip-20261001):
-// an active p2 Situation (lastdb-brain-cleanout-use-gbrain-20260923, whose
-// `blocked_actions` never named either routine) hard-fenced
+// an active p2 Situation whose `blocked_actions` never named either routine
+// hard-fenced
 // last-stack-milestone-driver and last-stack-north-star-driver — the only
 // routines that turn North Stars into milestones and todo cards — for 2+
 // days straight, starving the kanban board's todo column. A severity gate
@@ -28,7 +28,7 @@
 // of opening false incidents. Notices never fence a run.
 //
 // The Situations binary accepts explicit caller configuration through
-// ROUTINES_FSITUATIONS_BIN / ROUTINES_SITUATIONS_CLI. A failed read reports
+// ROUTINES_SITUATIONS_CLI. A failed read reports
 // unknown posture. The direct route engine refuses a provider in that case.
 // The scheduler handles cached posture separately.
 
@@ -77,12 +77,8 @@ export interface NoticesCheck {
   cached?: boolean;
 }
 
-function fsituationsBinary(): string {
-  return (
-    process.env.ROUTINES_SITUATIONS_CLI?.trim() ||
-    process.env.ROUTINES_FSITUATIONS_BIN?.trim() ||
-    "situations"
-  );
+function situationsBinary(): string {
+  return process.env.ROUTINES_SITUATIONS_CLI?.trim() || "situations";
 }
 
 function runSituations(args: string[], timeoutMs = 30_000): {
@@ -91,43 +87,32 @@ function runSituations(args: string[], timeoutMs = 30_000): {
   error?: string;
 } {
   if (process.env.LAST_STACK_APPS_OFF === "1") return { ok: true, stdout: "[]" };
-  const bin = fsituationsBinary();
-  // One deadline covers the primary process, its output, and the legacy CLI.
-  // Giving the fallback a new timeout could double an external host's budget.
+  const bin = situationsBinary();
   const deadline = performance.now() + timeoutMs;
-  const read = (command: string) => {
-    const remainingMs = Math.floor(deadline - performance.now());
-    if (remainingMs <= 0) {
-      return { ok: false, stdout: "", error: `${command}: read timed out after ${timeoutMs}ms` };
-    }
-    const res = spawnSync(command, args, {
-      encoding: "utf8",
-      timeout: remainingMs,
-      // A CLI that ignores SIGTERM must not outlive the caller's route lease.
-      killSignal: "SIGKILL",
-    });
-    if (performance.now() >= deadline) {
-      return { ok: false, stdout: "", error: `${command}: read timed out after ${timeoutMs}ms` };
-    }
-    if (res.error) {
-      return { ok: false, stdout: "", error: `${command}: ${res.error.message}` };
-    }
-    if (res.status !== 0) {
-      return {
-        ok: false,
-        stdout: "",
-        error: `${command} exited ${res.status ?? res.signal ?? "unknown"}: ${res.stderr?.trim() ?? ""}`,
-      };
-    }
-    return { ok: true, stdout: res.stdout ?? "" };
-  };
-  const primary = read(bin);
-  if (primary.ok || bin !== "situations") return primary;
-  // Older installs can provide the legacy CLI. It gets only the time left.
-  const fallback = read("fsituations");
-  return fallback.ok
-    ? fallback
-    : { ok: false, stdout: "", error: `${primary.error}; legacy fallback: ${fallback.error}` };
+  const remainingMs = Math.floor(deadline - performance.now());
+  if (remainingMs <= 0) {
+    return { ok: false, stdout: "", error: `${bin}: read timed out after ${timeoutMs}ms` };
+  }
+  const res = spawnSync(bin, args, {
+    encoding: "utf8",
+    timeout: remainingMs,
+    // A CLI that ignores SIGTERM must not outlive the caller's route lease.
+    killSignal: "SIGKILL",
+  });
+  if (performance.now() >= deadline) {
+    return { ok: false, stdout: "", error: `${bin}: read timed out after ${timeoutMs}ms` };
+  }
+  if (res.error) {
+    return { ok: false, stdout: "", error: `${bin}: ${res.error.message}` };
+  }
+  if (res.status !== 0) {
+    return {
+      ok: false,
+      stdout: "",
+      error: `${bin} exited ${res.status ?? res.signal ?? "unknown"}: ${res.stderr?.trim() ?? ""}`,
+    };
+  }
+  return { ok: true, stdout: res.stdout ?? "" };
 }
 
 export function loadActiveSituations(timeoutMs = 30_000): SituationCheck {
@@ -271,7 +256,7 @@ export function fenceFor(id: string, situations: ActiveSituation[]): FenceResult
 
 // Minimal shell-style glob: `*` matches any run of characters, `?` matches one.
 // Matches the whole string. Mirrors the `scope_routines` patterns in
-// fsituations records (e.g. "*dmg*", "*desktop*").
+// Situations records (e.g. "*dmg*", "*desktop*").
 export function globMatch(glob: string, value: string): boolean {
   let re = "^";
   for (const ch of glob) {
@@ -400,7 +385,7 @@ function runSituationsAsync(
   timeoutMs: number,
 ): Promise<{ ok: boolean; stdout: string; error?: string }> {
   return new Promise((resolve) => {
-    const bin = fsituationsBinary();
+    const bin = situationsBinary();
     let child: ReturnType<typeof spawn>;
     try {
       child = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"] });
@@ -519,7 +504,7 @@ function parseNotices(stdout: string): RecentNotice[] {
  */
 export function loadActiveSituationsCached(now = Date.now()): SituationCheck {
   if (!cacheEnabled) return loadActiveSituations();
-  keySlot(situationsSlot, `list|${fsituationsBinary()}`);
+  keySlot(situationsSlot, `list|${situationsBinary()}`);
   const ttl = envMs("ROUTINES_SITUATIONS_CACHE_TTL_MS", SITUATIONS_CACHE_TTL_MS);
   const maxAge = envMs("ROUTINES_SITUATIONS_MAX_AGE_MS", SITUATIONS_CACHE_MAX_AGE_MS);
 
@@ -576,7 +561,7 @@ export function loadActiveSituationsCached(now = Date.now()): SituationCheck {
 export function loadRecentNoticesCached(since?: string, now = Date.now()): NoticesCheck {
   const window = (since ?? process.env.ROUTINES_NOTICES_SINCE ?? "2h").trim() || "2h";
   if (!cacheEnabled) return loadRecentNotices(window);
-  keySlot(noticesSlot, `notices|${window}|${fsituationsBinary()}`);
+  keySlot(noticesSlot, `notices|${window}|${situationsBinary()}`);
   const ttl = envMs("ROUTINES_SITUATIONS_CACHE_TTL_MS", SITUATIONS_CACHE_TTL_MS);
   const maxAge = envMs("ROUTINES_SITUATIONS_MAX_AGE_MS", SITUATIONS_CACHE_MAX_AGE_MS);
 

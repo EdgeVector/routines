@@ -35,7 +35,7 @@ export interface AuditContext {
  * (src/prompt.ts) injects them into every harness child, and its doc comment says
  * that their absence means "not a scheduled routine". This is an allowlist and
  * not a copy of process.env: the environment holds secrets. */
-const ACTOR_ENV = ["DRIVEN_BY", "AUTOMATION_ID", "LASTGIT_ACTOR", "ROUTINES_RUN_ID"] as const;
+const ACTOR_ENV = ["DRIVEN_BY", "AUTOMATION_ID", "ROUTINES_RUN_ID"] as const;
 
 /** The longest env value or User-Agent that one log line keeps. */
 const MAX_FIELD = 200;
