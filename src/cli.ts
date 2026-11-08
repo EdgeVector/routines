@@ -12,14 +12,6 @@ import { parseArgs } from "node:util";
 import pkg from "../package.json" with { type: "json" };
 import { routeRoutine, setStatus, ActionError } from "./actions.ts";
 import {
-  planImport,
-  preserveExistingRouting,
-  renderDiffTable,
-  renderToml,
-  type ImportPlan,
-} from "./import.ts";
-import { migrateKanbanIds } from "./kanban-id-migration.ts";
-import {
   acquireLock,
   evaluateOnce,
   formatStagger,
@@ -72,29 +64,6 @@ import { initRoutinesSentry } from "./observability.ts";
 import { runCapacityControllerTick } from "./capacity-runtime.ts";
 import { resolveProbePath } from "./probes.ts";
 
-const IMPORT_OPTIONS = `  --write                     apply the plan (default is a dry-run)
-  --force                     refresh existing registry files
-  --replace-routing           with --force, also replace existing harness/model
-                              instead of preserving local route edits; live
-                              active/paused status and timeout_min are always
-                              preserved (fleet-health bumps must survive import)
-  --json                      machine-readable plan
-  --out <dir>                 registry dir to write (default $ROUTINES_HOME/registry)
-  --codex-dir <dir>           legacy Codex automations dir to read
-                              (default ~/.codex/automations)
-  --claude-registry <path>    legacy Claude scheduled-tasks registry to read
-  --claude-model <model>      model for imported Claude routines (default sonnet)
-  --prefer codex|claude       which source wins when both define one routine
-  --keep-duplicates           do not collapse same-name routines across sources
-  -h, --help                  print this help`;
-
-const IMPORT_HELP = `Usage: routines import [options]
-
-Import legacy schedulers into the registry. Dry-run unless --write.
-
-Options:
-${IMPORT_OPTIONS}`;
-
 const HELP = `routines ${pkg.version} — one scheduler for agent routines (claude|codex|grok|gemini)
 
 Usage:
@@ -125,10 +94,6 @@ Commands:
   deliver-status              publish + stage a fleet-status delivery; --approve sends it
   hygiene                     mechanical cleanup (prune runs/memory, daemon check,
                               publish-status). No LLM. See --help notes below.
-  import                      import legacy schedulers into the registry (dry-run;
-                              --write to apply). See --help notes below.
-  migrate-kanban-ids          one-time last-stack-fkanban-* → last-stack-kanban-*
-                              registry/state/memory migration (--write to apply)
   web                         serve the local dashboard (localhost); --port, --host
   doctor                      validate the registry + environment (+ configurations)
   daemon                      run the scheduler loop (launchd entrypoint); --once, --catchup <s>,
@@ -175,9 +140,6 @@ Environment:
   ROUTINES_FLEET_LEGACY_READ_UNTIL
                               temporary ISO deadline for deliver-status --legacy-view;
                               must be within seven days
-
-Import:
-${IMPORT_OPTIONS}
 
 Hygiene:
   --dry-run                   report only; do not delete/truncate
@@ -324,10 +286,6 @@ async function main(argv: string[]): Promise<number> {
       return cmdRoute(rest);
     case "agent-exec":
       return cmdAgentExec(rest);
-    case "import":
-      return cmdImport(rest);
-    case "migrate-kanban-ids":
-      return cmdMigrateKanbanIds(rest);
     case "logs":
       return cmdLogs(rest);
     case "probe-path":
@@ -385,29 +343,6 @@ function cmdProbePath(rest: string[]): number {
     console.error(err instanceof Error ? err.message : String(err));
     return 1;
   }
-}
-
-function cmdMigrateKanbanIds(rest: string[]): number {
-  const { values } = parseArgs({
-    args: rest,
-    options: { write: { type: "boolean" }, json: { type: "boolean" } },
-    allowPositionals: true,
-  });
-  const result = migrateKanbanIds({ write: values.write === true });
-  if (values.json) {
-    console.log(JSON.stringify(result, null, 2));
-    return 0;
-  }
-  console.log(
-    `${values.write ? "MIGRATED" : "DRY-RUN"} ${result.actions.length} kanban id path(s) under ${routinesHome()}`,
-  );
-  for (const a of result.actions) {
-    const dest = a.dest ? ` -> ${a.dest}` : "";
-    const reason = a.reason ? ` (${a.reason})` : "";
-    console.log(`  ${a.kind} ${a.path}${dest}${reason}`);
-  }
-  if (!values.write) console.log("Re-run with --write to apply.");
-  return 0;
 }
 
 function cmdList(rest: string[]): number {
@@ -674,114 +609,6 @@ function cmdAgentExecReportFailure(rest: string[]): number {
     quiet: true,
   });
   console.log(JSON.stringify(report, null, 2));
-  return 0;
-}
-
-function cmdImport(rest: string[]): number {
-  const { values } = parseArgs({
-    args: rest,
-    options: {
-      write: { type: "boolean" },
-      force: { type: "boolean" },
-      json: { type: "boolean" },
-      "keep-duplicates": { type: "boolean" },
-      prefer: { type: "string" },
-      "claude-model": { type: "string" },
-      "codex-dir": { type: "string" },
-      "claude-registry": { type: "string" },
-      "replace-routing": { type: "boolean" },
-      out: { type: "string" },
-      help: { type: "boolean", short: "h" },
-    },
-    allowPositionals: true,
-  });
-  if (values.help) {
-    console.log(IMPORT_HELP);
-    return 0;
-  }
-
-  const prefer = values.prefer;
-  if (prefer && prefer !== "codex" && prefer !== "claude") {
-    console.error(`invalid --prefer ${prefer} (codex|claude)`);
-    return 2;
-  }
-
-  let plan: ImportPlan;
-  try {
-    plan = planImport({
-      codexDir: values["codex-dir"],
-      claudeRegistry: values["claude-registry"] ?? undefined,
-      claudeModel: values["claude-model"],
-      prefer: prefer as "codex" | "claude" | undefined,
-      keepDuplicates: values["keep-duplicates"] === true,
-    });
-  } catch (err) {
-    console.error(`import failed: ${(err as Error).message}`);
-    return 1;
-  }
-
-  const outDir = values.out ?? registryDir();
-  const toCreate = plan.candidates.filter((c) => c.action === "create");
-  const written: string[] = [];
-  const skippedExisting: string[] = [];
-
-  if (values.write) {
-    mkdirSync(outDir, { recursive: true });
-    for (const c of toCreate) {
-      const dest = join(outDir, `${c.id}.toml`);
-      if (existsSync(dest) && !values.force) {
-        skippedExisting.push(c.id);
-        continue;
-      }
-      const candidate = existsSync(dest)
-        ? preserveExistingRouting(c, readFileSync(dest, "utf8"), dest, values["replace-routing"] === true)
-        : c;
-      writeFileSync(dest, renderToml(candidate));
-      written.push(c.id);
-    }
-  }
-
-  if (values.json) {
-    console.log(
-      JSON.stringify(
-        {
-          prefer: plan.prefer,
-          outDir,
-          write: values.write === true,
-          create: toCreate.map((c) => ({
-            id: c.id,
-            source: c.source,
-            harness: c.harness,
-            model: c.model,
-            rrule: c.rrule,
-            status: c.status,
-          })),
-          duplicates: plan.duplicates,
-          skipped: plan.skipped,
-          // Every LIVE legacy entry (created + skip-duplicate) — the exact set
-          // the cutover must pause in the legacy schedulers. Inactive `skipped`
-          // sources are already off and are not listed.
-          pauseTargets: plan.candidates.map((c) => ({ id: c.sourceId ?? c.id, source: c.source, sourcePath: c.sourcePath })),
-          written,
-          skippedExisting,
-        },
-        null,
-        2,
-      ),
-    );
-    return 0;
-  }
-
-  console.log(renderDiffTable(plan));
-  console.log("");
-  if (values.write) {
-    console.log(`WROTE ${written.length} file(s) to ${outDir}` + (written.length ? `: ${written.join(", ")}` : ""));
-    if (skippedExisting.length > 0) {
-      console.log(`skipped ${skippedExisting.length} existing (use --force to overwrite): ${skippedExisting.join(", ")}`);
-    }
-  } else {
-    console.log(`DRY-RUN: no files written. Re-run with --write to create ${toCreate.length} registry file(s) in ${outDir}.`);
-  }
   return 0;
 }
 
