@@ -62,7 +62,6 @@ import { initializeStatusSchemas } from "./status-setup.ts";
 import { canonicalDefinition, SCHEMAS, type SchemaKey } from "./status-schema.ts";
 import { initRoutinesSentry } from "./observability.ts";
 import { runCapacityControllerTick } from "./capacity-runtime.ts";
-import { resolveProbePath } from "./probes.ts";
 
 const HELP = `routines ${pkg.version} — one scheduler for agent routines (claude|codex|grok|gemini)
 
@@ -87,7 +86,6 @@ Commands:
                               harness-outage-<p>. Other text is a no-op.
                               Exit 0. Best-effort; does not fail the caller.
   logs <id>                   show recent runs for a routine (--json, --path, --tail)
-  probe-path <id>              print the installed path for a versioned probe harness
   publish-status              write slim fleet status records to LastDB (--json)
   init-status                 explicitly install published schema-owned fleet definitions
   read-status                 read and validate the bounded fleet view (--json)
@@ -285,8 +283,6 @@ async function main(argv: string[]): Promise<number> {
       return cmdAgentExec(rest);
     case "logs":
       return cmdLogs(rest);
-    case "probe-path":
-      return cmdProbePath(rest);
     case "publish-status":
       return await cmdPublishStatus(rest);
     case "init-status":
@@ -325,20 +321,6 @@ async function main(argv: string[]): Promise<number> {
       console.error(`unknown command: ${command}\n`);
       console.error(HELP);
       return 2;
-  }
-}
-
-function cmdProbePath(rest: string[]): number {
-  if (rest.length !== 1) {
-    console.error("usage: routines probe-path <id>");
-    return 2;
-  }
-  try {
-    console.log(resolveProbePath(rest[0]!));
-    return 0;
-  } catch (err) {
-    console.error(err instanceof Error ? err.message : String(err));
-    return 1;
   }
 }
 

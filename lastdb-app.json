@@ -460,10 +460,6 @@
         "command": "routines-cloud-sync-health-fix-gate"
       },
       {
-        "source": "scripts/lastdb-local-smoke-gate.sh",
-        "command": "routines-lastdb-local-smoke-gate"
-      },
-      {
         "source": "scripts/llms-txt-install-smoke-gate.sh",
         "command": "routines-llms-txt-install-smoke-gate"
       }

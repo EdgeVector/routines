@@ -1,4 +1,16 @@
 #!/usr/bin/env bash
+# Older installers link this file as the routines command. The registry
+# command beside it runs the source CLI. Resolve the link first: dirname of
+# a symlink is the directory that holds the link, not this file.
 set -euo pipefail
-root="$(CDPATH= cd -- "$(dirname "$0")/.." && pwd -P)"
-exec "$root/dist/routines" "$@"
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  case "$SOURCE" in
+    /*) ;;
+    *) SOURCE="$DIR/$SOURCE" ;;
+  esac
+done
+BIN="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+exec "$BIN/registry-routines" "$@"

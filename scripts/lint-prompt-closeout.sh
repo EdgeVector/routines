@@ -54,7 +54,7 @@ files=()
 for p in "${paths[@]}"; do
   if [ -d "$p" ]; then
     # -L follows symlinks. ~/.last-stack/routines is a symlink into the
-    # host-track artifact tree, and plain `find <symlink>` does not descend it:
+    # app registry tree, and plain `find <symlink>` does not descend it:
     # the lint silently checked 0 fleet prompts while reporting success. A
     # check that cannot observe what it claims to check is worse than no check.
     while IFS= read -r f; do
