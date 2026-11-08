@@ -7,7 +7,7 @@
 # skeleton-tolerant (macOS bash 3.2, no arrays under set -u): loops simply
 # don't execute while the repo has no src/ yet, and pick the files
 # up automatically as the MVP lands. The repo has no tests (deleted 2026-10-09);
-# the gate is syntax + typecheck + build.
+# the gate is syntax + typecheck.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 shopt -s nullglob
@@ -52,7 +52,3 @@ if [ -f tsconfig.json ]; then
   echo "bunx tsc --noEmit"
   bunx tsc --noEmit
 fi
-
-# 2c. compile host-track artifact binaries (published after green gate)
-echo "== artifact build =="
-bun run build

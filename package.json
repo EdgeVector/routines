@@ -11,8 +11,7 @@
   "scripts": {
     "routines": "bun src/cli.ts",
     "install-shim": "sh scripts/install-shim.sh",
-    "typecheck": "bash scripts/typecheck.sh",
-    "build": "bash scripts/build-artifact.sh"
+    "typecheck": "bash scripts/typecheck.sh"
   },
   "dependencies": {
     "@sentry/node": "^10.65.0"

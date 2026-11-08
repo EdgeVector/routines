@@ -176,14 +176,6 @@ The gate only exits 10 (LLM fix lane) on hard signals (auth/quota, staging
 ≥50%, `last_success=never`). Probe timeouts flush
 `outcome=timeout_partial` and exit 0.
 
-For `lastdb-local-smoke-test`, set
-`gate_command = "routines-lastdb-local-smoke-gate"`. The gate resolves only a
-prebuilt `lastdbd`, mirrors the live LaunchAgent's non-home `LASTDB_*` settings,
-and runs the existing real-data CoW smoke under a hard timeout. It never invokes
-Cargo; `lastdb-canary-build-main` owns cold builds. A missing staged candidate is
-a classified noop, GREEN is `ok`, and RED/timeout is `error`, each with an
-authoritative `outcome.txt` verdict.
-
 `tier` is the shared capacity-control priority. `spine` is the essential
 shipping loop, `worker` is normal product work, and `opportunistic` is the
 first class a capacity controller may skip. Omitting it preserves legacy
@@ -552,11 +544,6 @@ This repo merges through **GitHub pull requests** (moved from LastGit on
 protection on `main`, and its `gate` job runs `.lastgit/ci.sh` on a macOS runner.
 Open a PR with `gh pr create`, then `gh pr merge --squash --auto`.
 
-On a push to `main` the `publish` job calls last-stack's reusable workflow, which
-builds the host-track artifact (`dist/routines` and `dist/probes/*.sh`) on macOS and
-uploads `ht-artifact-<sha>`. `host-track refresh routines` pulls it through
-`last-stack-github-artifact-pull` (see brain `design-github-artifact-publish-path`).
-
 ## Claude credential without the login keychain
 
 Claude Code on macOS keeps its OAuth credential in the keychain item
@@ -584,12 +571,11 @@ the Telegram page still fire, but the remedy names the locator instead of
 ## Checks
 
 All tests in this repo are deleted (2026-10-09). The gate runs shell syntax,
-the prompt lint, typecheck, and the artifact build.
+the prompt lint, and typecheck.
 
 ```sh
 bun run typecheck   # scripts/typecheck.sh: installs locked devDeps if tsc is
                     # missing, keeps Bun temp files in .cache/bun-tmp, runs tsc --noEmit
-bun run build       # scripts/build-artifact.sh: compile dist/routines
 ```
 
 ## Scope

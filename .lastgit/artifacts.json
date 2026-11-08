@@ -1,9 +1,0 @@
-{
-  "artifacts": [
-    {
-      "app": "routines",
-      "platform": "darwin-arm64",
-      "paths": ["bin", "dist"]
-    }
-  ]
-}
