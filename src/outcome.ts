@@ -9,8 +9,6 @@
 // dashboard can show last outcome + rolling noop rates for cadence tuning.
 // Classification is best-effort and never fails a run.
 
-import { canonicalRoutineId } from "./kanban-id-migration.ts";
-
 export type OutcomeKind = "ok" | "noop" | "error" | "unknown";
 
 type OutcomeSource =
@@ -57,6 +55,18 @@ const BENIGN_HARNESS_NOISE_LINES: RegExp[] = [
   /^\s*(?:\d{4}-\d{2}-\d{2}T[^\s]+\s+)?ERROR\s+codex_models_manager::manager:\s+failed to renew cache TTL:\s+missing field `?[A-Za-z_][A-Za-z0-9_]*`?\b.*$/i,
   /^\s*(?:\d{4}-\d{2}-\d{2}T[^\s]+\s+)?ERROR\s+codex_models_manager::cache:\s+failed to load models cache:\s+missing field `?[A-Za-z_][A-Za-z0-9_]*`?\b.*$/i,
 ];
+
+const KANBAN_ID_RENAMES = [
+  { old: "last-stack-fkanban-pickup", next: "last-stack-kanban-pickup" },
+  { old: "last-stack-fkanban-watch", next: "last-stack-kanban-watch" },
+  { old: "last-stack-fkanban-validate", next: "last-stack-kanban-validate" },
+] as const;
+
+const OLD_TO_NEW: ReadonlyMap<string, string> = new Map(KANBAN_ID_RENAMES.map((r) => [r.old, r.next]));
+
+function canonicalRoutineId(id: string): string {
+  return OLD_TO_NEW.get(id) ?? id;
+}
 
 /** Names agents historically put in heartbeats that map to a registry id. */
 const ALIAS_TO_CANONICAL: Record<string, string> = {
