@@ -66,7 +66,8 @@ jobs:
           echo "lastdbd=$dir/lastdbd" >> "$GITHUB_OUTPUT"
           echo "lastdb=$dir/lastdb" >> "$GITHUB_OUTPUT"
           printf '### LastDB under test\n\nNightly `%s` (source `%s`), Linux tarball sha256 `%s`.\n' "$tag" "$oid" "$sum" >> "$GITHUB_STEP_SUMMARY"
-      # The node, cleanup and artifact helpers come from the same source as the nightly daemon.
+      # The node and artifact helpers come from the same source as the nightly daemon.
+      # Cleanup receipt checks live in scripts/cleanup.py. lastdb no longer ships scripts/disk_v2.
       - uses: actions/checkout@v4
         with:
           repository: EdgeVector/lastdb

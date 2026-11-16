@@ -431,8 +431,9 @@ def main():
     require(os.environ.get("GITHUB_ACTIONS") == "true", "This operational comparison runs only in hosted CI")
     require(128 <= args.records <= 4096 and 16 <= args.samples <= 100, "The comparison volume or sample count is outside its finite bound")
     args.output.mkdir(parents=True)
-    sys.path.insert(0, str(args.lastdb_source / "scripts/benchmarks"))
-    sys.path.append(str(args.lastdb_source / "scripts/disk_v2"))
+    # Receipt checks are the local scripts/cleanup.py. The node helper still comes from the nightly.
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    sys.path.insert(1, str(args.lastdb_source / "scripts/benchmarks"))
     from node import Node, file_hash
     import cleanup
     Node = nightly_node(Node)
