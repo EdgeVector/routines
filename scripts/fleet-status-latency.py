@@ -131,9 +131,17 @@ def call_json(args, binary, node, home, verb, *flags):
 
 
 def cloud_off(node, phase):
-    status = node.call("/api/sync/byte-backup-v2", {"action": "status"})[0]
-    status = status.get("status", status)
-    require(all(status.get(key) is False for key in ("enabled", "automatic_backup_enabled", "running")),
+    # Explicit off is GET /api/status cloud_sync: no connection, no accepted-write capture, no transfer.
+    body = node.call("/api/status")[0]
+    reported = body.get("status") if isinstance(body, dict) else None
+    status = reported.get("cloud_sync") if isinstance(reported, dict) else None
+    require(isinstance(status, dict)
+        and status.get("connected") is False
+        and status.get("captures_accepted") is False
+        and status.get("payment_hold") is False
+        and status.get("last_error") is None
+        and status.get("environment") is None
+        and status.get("databases") == {},
         "Cloud sync is not explicitly off; no app operations continue")
     save(node.output / f"cloud-off-{phase}.json", status)
 
