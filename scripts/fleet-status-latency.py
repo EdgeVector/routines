@@ -131,9 +131,17 @@ def call_json(args, binary, node, home, verb, *flags):
 
 
 def cloud_off(node, phase):
-    status = node.call("/api/sync/byte-backup-v2", {"action": "status"})[0]
-    status = status.get("status", status)
-    require(all(status.get(key) is False for key in ("enabled", "automatic_backup_enabled", "running")),
+    # Explicit off is GET /api/status cloud_sync: no connection, no accepted-write capture, no transfer.
+    body = node.call("/api/status")[0]
+    reported = body.get("status") if isinstance(body, dict) else None
+    status = reported.get("cloud_sync") if isinstance(reported, dict) else None
+    require(isinstance(status, dict)
+        and status.get("connected") is False
+        and status.get("captures_accepted") is False
+        and status.get("payment_hold") is False
+        and status.get("last_error") is None
+        and status.get("environment") is None
+        and status.get("databases") == {},
         "Cloud sync is not explicitly off; no app operations continue")
     save(node.output / f"cloud-off-{phase}.json", status)
 
@@ -431,8 +439,9 @@ def main():
     require(os.environ.get("GITHUB_ACTIONS") == "true", "This operational comparison runs only in hosted CI")
     require(128 <= args.records <= 4096 and 16 <= args.samples <= 100, "The comparison volume or sample count is outside its finite bound")
     args.output.mkdir(parents=True)
-    sys.path.insert(0, str(args.lastdb_source / "scripts/benchmarks"))
-    sys.path.append(str(args.lastdb_source / "scripts/disk_v2"))
+    # Receipt checks are the local scripts/cleanup.py. The node helper still comes from the nightly.
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    sys.path.insert(1, str(args.lastdb_source / "scripts/benchmarks"))
     from node import Node, file_hash
     import cleanup
     Node = nightly_node(Node)
