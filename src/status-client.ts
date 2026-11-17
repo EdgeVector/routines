@@ -1,21 +1,20 @@
-/** Native owner-socket requests for fleet status. No schema declarations on reads or writes. */
+/** Fleet records go through the LastDB app API. Sharing stays on its own routes. */
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, relative } from "node:path";
 import { writeFileSync } from "node:fs";
-import { FLEET_ALTERNATE, SCHEMAS, fieldRules, localFields, wireFields, type SchemaDefinition, type SchemaKey } from "./status-schema.ts";
+import { AppApiError, LastDbClient, TransportError, UnexpectedResponseError, udsTransport, type AppApiMutation, type AppApiRead, type AppApiReadResult, type AppApiRecord, type RowFields } from "@lastdb/app-sdk";
+import { FLEET_ALTERNATE, SCHEMA_NAMES, SCHEMAS, localFields, wireFields, type SchemaKey } from "./status-schema.ts";
 
 export type FieldMap = Record<string, string>;
 export type SchemaProfile = { key: SchemaKey; canonical: boolean };
+export type StoredRecord = { fields: FieldMap; revision: string };
 export type KeyRead = { schemaHash: string; keyHash: string; keyRange?: string; fields: string[] };
 export type HashRead = { schemaHash: string; keyHash: string; fields: string[]; maxRows: number; keyName?: "by_fleet" };
-export type Mutation = { schemaHash: string; keyHash: string; keyRange?: string; fields: FieldMap; mutationType: "create" | "update" | "delete";
-  expected?: { field: string; value: string } };
-export type HashRow = { keyHash: string; keyRange: string; fields: FieldMap };
+export type Mutation = { schemaHash: string; keyHash: string; keyRange?: string; fields: FieldMap; mutationType: "create" | "replace" | "delete"; revision?: string };
+export type HashRow = { keyHash: string; keyRange: string; fields: FieldMap; revision: string };
 export interface LastDbPublisherClient {
-  request(method: "GET" | "POST", path: string, body?: unknown): Promise<unknown>;
   bindSchemas(profiles: Record<string, SchemaProfile>): void;
-  declareAppSchema(appId: string, schema: SchemaDefinition): Promise<{ identity: string; canonical: string; schemaName: string }>;
-  queryByKeys(reads: KeyRead[]): Promise<(FieldMap | null)[]>;
+  queryByKeys(reads: KeyRead[]): Promise<(StoredRecord | null)[]>;
   queryByHashes(reads: HashRead[]): Promise<HashRow[][]>;
   mutateBatch(mutations: Mutation[]): Promise<void>;
 }
@@ -37,14 +36,14 @@ export class LastDbPublishError extends Error {
 type Entry = Record<string, unknown>;
 type FetchInit = RequestInit & { unix?: string };
 type LastDbFetch = (input: Parameters<typeof globalThis.fetch>[0], init?: FetchInit) => Promise<Response>;
-type LastDbClientOptions = { socketPath?: string; nodeUrl?: string; fetchImpl?: LastDbFetch };
+export type LastDbClientOptions = { socketPath?: string };
 const BATCH_SIZE = 64;
 const READ_WORK_KEYS = 10_000;
+const REQUEST_TIMEOUT_MS = 120_000;
 
 function hashReadPageLimit(reads: readonly HashRead[]): number {
-  // Core charges selected addresses and each field's value work to ONE
-  // batch budget. Keep half of that budget for probes, selectors and metadata.
-  // The native reader also loads its alternate fields to validate each address.
+  // The page size stays on the old 10,000-key work gate. The app API returns
+  // each full record, and this bound still keeps a range read finite.
   const keysPerRecord = reads.reduce((sum, read) => {
     const fields = new Set(read.fields);
     if (read.keyName) {
@@ -65,69 +64,76 @@ export function dataObject(value: unknown): Entry {
   return body.data === undefined ? body : object(body.data);
 }
 
-function rows(value: unknown): Array<{ hash: string; range: string | null; fields: FieldMap; matched?: { hash: string; range: string } }> {
-  const reply = object(value);
-  if (reply.ok !== true || !Array.isArray(reply.results) || typeof reply.has_more !== "boolean") {
-    throw new LastDbPublishError("query_incomplete", "LastDB did not return a resolved query page.");
+function defaultProfiles(): Record<string, SchemaProfile> {
+  return Object.fromEntries((Object.keys(SCHEMA_NAMES) as SchemaKey[]).map((key) => [SCHEMA_NAMES[key], { key, canonical: true }]));
+}
+
+function socketPath(opts: LastDbClientOptions): string {
+  return opts.socketPath || process.env.ROUTINES_LASTDB_SOCKET || process.env.LASTDB_SOCKET_PATH || process.env.FOLDDB_SOCKET_PATH ||
+    join(process.env.LASTDB_HOME || join(homedir(), ".lastdb"), "data", "folddb.sock");
+}
+
+function mapSdkError(error: unknown): LastDbPublishError {
+  if (error instanceof LastDbPublishError) return error;
+  if (error instanceof AppApiError) {
+    const response = { status: error.status, body: { code: error.code, message: error.message } };
+    if (error.status === 409 || error.code === "conflict") return new LastDbPublishError("conflict", error.message, response);
+    return new LastDbPublishError(`lastdb_http_${error.status}`, error.message, response);
   }
-  return reply.results.map((item) => {
-    const row = object(item), key = object(row.key), fields = object(row.fields);
-    if (typeof key.hash !== "string" || !key.hash || (key.range !== null && typeof key.range !== "string") ||
-        Object.values(fields).some((field) => typeof field !== "string")) {
-      throw new LastDbPublishError("bad_query_row", "LastDB returned invalid primary coordinates or field values.");
-    }
-    let matched: { hash: string; range: string } | undefined;
-    if (row.matched_key !== undefined) {
-      const address = object(row.matched_key);
-      if (typeof address.hash !== "string" || typeof address.range !== "string") {
-        throw new LastDbPublishError("bad_alternate_key", "LastDB returned invalid alternate coordinates.");
-      }
-      matched = { hash: address.hash, range: address.range };
-    }
-    return { hash: key.hash, range: key.range as string | null, fields: fields as FieldMap, matched };
-  });
+  if (error instanceof TransportError) return new LastDbPublishError("lastdb_unreachable", "LastDB did not complete the fleet request over the configured transport.");
+  if (error instanceof UnexpectedResponseError) return new LastDbPublishError("bad_reply", error.message, { status: error.status, body: error.body });
+  if (error instanceof Error) return new LastDbPublishError("lastdb_unreachable", error.message);
+  return new LastDbPublishError("lastdb_unreachable", "LastDB did not complete the fleet request over the configured transport.");
+}
+
+function stringFields(record: RowFields): FieldMap {
+  const fields: FieldMap = {};
+  for (const [name, value] of Object.entries(record)) {
+    if (typeof value !== "string") throw new LastDbPublishError("bad_query_row", "LastDB returned a non-string field value.");
+    fields[name] = value;
+  }
+  return fields;
+}
+
+function isReadError(result: AppApiReadResult): result is { error: { code: string; message: string } } {
+  return "error" in result;
 }
 
 export function newLastDbPublisherClient(opts: LastDbClientOptions = {}): LastDbPublisherClient {
-  const request = newLastDbJsonCaller(opts);
-  let profiles: Record<string, SchemaProfile> = {};
+  const db = new LastDbClient("routines", udsTransport(socketPath(opts), { "X-LastDB-Client": "routines" }, { timeoutMs: REQUEST_TIMEOUT_MS }));
+  let profiles = defaultProfiles();
   const selected = (schema: string) => {
     const profile = profiles[schema];
-    if (!profile) throw new LastDbPublishError("schema_not_configured", "Run init-status first.");
+    if (!profile) throw new LastDbPublishError("schema_not_configured", "The fleet schema name is not one of the installed names.");
     return profile;
   };
-  const names = (schema: string, fields: string[]) => {
-    const profile = selected(schema), rules = fieldRules(profile.key);
-    return fields.map((field) => {
-      if (!rules[field]) throw new LastDbPublishError("unknown_field", "A fleet request names an undeclared field.");
-      return profile.canonical ? rules[field]![0] : field;
-    });
-  };
-  const values = (schema: string, fields: FieldMap) => {
+  const mapped = (schema: string, record: RowFields) => {
+    const fields = stringFields(record);
     const profile = selected(schema);
     return profile.canonical ? localFields(profile.key, fields) : fields;
   };
+  const readBatch = async (reads: AppApiRead[]) => {
+    try { return await db.read(reads); }
+    catch (error) { throw mapSdkError(error); }
+  };
   const readKeys = async (reads: KeyRead[]) => {
-    const out: (FieldMap | null)[] = [];
+    const out: (StoredRecord | null)[] = [];
     for (let start = 0; start < reads.length; start += BATCH_SIZE) {
       const batch = reads.slice(start, start + BATCH_SIZE);
-      const reply = dataObject(await request("POST", "/api/queries/batch", { queries: batch.map((read) => ({
-        schema_name: read.schemaHash, fields: names(read.schemaHash, read.fields),
-        filter: read.keyRange === undefined ? { HashKey: read.keyHash } : { HashRangeKey: { hash: read.keyHash, range: read.keyRange } }, limit: 2,
-      })) }));
-      if (reply.count !== batch.length || !Array.isArray(reply.results) || reply.results.length !== batch.length) {
-        throw new LastDbPublishError("query_batch_incomplete", "LastDB did not return every requested key.");
-      }
-      reply.results.forEach((item, index) => {
-        const result = object(item), read = batch[index]!;
-        if (result.status !== 200) throw new LastDbPublishError("key_read_failed", `A fleet key read failed (HTTP ${result.status}).`,
-          { status: typeof result.status === "number" ? result.status : 0, body: result.response });
-        const page = object(result.response), resultRows = rows(page);
-        if (page.has_more !== false || resultRows.length > 1 || resultRows.some((row) =>
-          row.hash !== read.keyHash || row.range !== (read.keyRange ?? null))) {
+      const results = await readBatch(batch.map((read) => ({
+        schema: read.schemaHash, key: { hash: read.keyHash, range: read.keyRange ?? null }, limit: 2,
+      })));
+      results.forEach((result, index) => {
+        const read = batch[index]!;
+        if (isReadError(result)) throw new LastDbPublishError("key_read_failed", result.error.message);
+        if (!("records" in result)) throw new LastDbPublishError("bad_reply", "LastDB returned keys for a record read.");
+        const wantedRange = read.keyRange ?? null;
+        if (result.next_cursor !== null || result.records.length > 1 || result.records.some((row) =>
+          row.key.hash !== read.keyHash || row.key.range !== wantedRange)) {
           throw new LastDbPublishError("key_read_ambiguous", "LastDB returned an incomplete or different key.");
         }
-        out.push(resultRows[0] ? values(read.schemaHash, resultRows[0].fields) : null);
+        const row = result.records[0];
+        out.push(row ? { fields: mapped(read.schemaHash, row.record), revision: row.revision } : null);
       });
     }
     return out;
@@ -135,48 +141,43 @@ export function newLastDbPublisherClient(opts: LastDbClientOptions = {}): LastDb
   const readHashes = async (reads: HashRead[]) => {
     const out: HashRow[][] = reads.map(() => []);
     for (let start = 0; start < reads.length; start += BATCH_SIZE) {
-      let pending = reads.slice(start, start + BATCH_SIZE).map((read, index) => ({ read, index: start + index, cursor: undefined as unknown }));
+      let pending = reads.slice(start, start + BATCH_SIZE).map((read, index) => ({ read, index: start + index, cursor: undefined as string | undefined }));
       const seen = new Map<number, Set<string>>();
       const primaryKeys = new Map<number, Set<string>>();
-      const maxPages = 1 + Math.max(...pending.map(({ read }) => read.maxRows));
+      const maxPages = 1 + Math.max(...pending.map(({ read }) => read.maxRows), 0);
       for (let page = 0; pending.length && page < maxPages; page++) {
         const limit = hashReadPageLimit(pending.map(({ read }) => ({ ...read,
           fields: read.fields.length ? read.fields : SCHEMAS[selected(read.schemaHash).key].fields })));
-        const reply = dataObject(await request("POST", "/api/queries/batch", { queries: pending.map(({ read, cursor }) => ({
-          schema_name: read.schemaHash, fields: names(read.schemaHash, read.fields), filter: { HashKey: read.keyHash }, limit,
-          ...(read.keyName ? { key_name: read.keyName } : {}), ...(cursor === undefined ? {} : { cursor }),
-        })) }));
-        if (reply.count !== pending.length || !Array.isArray(reply.results) || reply.results.length !== pending.length) {
-          throw new LastDbPublishError("query_batch_incomplete", "LastDB did not return every requested hash.");
-        }
+        const results = await readBatch(pending.map(({ read, cursor }) => ({
+          schema: read.schemaHash, range: { hash: read.keyHash }, limit,
+          ...(read.keyName ? { via: read.keyName } : {}), ...(cursor === undefined ? {} : { cursor }),
+        })));
         const next: typeof pending = [];
-        reply.results.forEach((item, index) => {
-          const result = object(item), query = pending[index]!, { read } = query;
-          if (result.status !== 200) throw new LastDbPublishError("hash_read_failed", `A fleet hash read failed (HTTP ${result.status}).`,
-            { status: typeof result.status === "number" ? result.status : 0, body: result.response });
-          const response = object(result.response);
-          for (const row of rows(response)) {
-            const address = read.keyName ? row.matched : { hash: row.hash, range: row.range };
-            if (!address || address.hash !== read.keyHash || typeof address.range !== "string") {
-              throw new LastDbPublishError("hash_read_ambiguous", "A fleet hash returned different coordinates.");
-            }
-            const fields = values(read.schemaHash, row.fields);
-            if (read.keyName && (row.range !== null || row.hash !== fields.id || fields.fleet_bucket !== address.hash || fields.sk !== address.range)) {
-              throw new LastDbPublishError("alternate_read_ambiguous", "A fleet alternate key does not match its primary record.");
-            }
-            const primary = JSON.stringify([row.hash, row.range]), keys = primaryKeys.get(query.index) ?? new Set<string>();
+        results.forEach((result, index) => {
+          const query = pending[index]!, { read, cursor } = query;
+          if (isReadError(result)) {
+            recordRangePage(read, cursor, limit, 0, null, null, result.error.message);
+            throw new LastDbPublishError("hash_read_failed", result.error.message);
+          }
+          if (!("records" in result)) throw new LastDbPublishError("bad_reply", "LastDB returned keys for a record read.");
+          recordRangePage(read, cursor, limit, result.records.length, result.next_cursor, 200, null);
+          for (const row of result.records) {
+            const fields = mapped(read.schemaHash, row.record);
+            const stored = storedRow(read, row, fields);
+            const primary = JSON.stringify([stored.keyHash, row.key.range]);
+            const keys = primaryKeys.get(query.index) ?? new Set<string>();
             if (keys.has(primary)) throw new LastDbPublishError("hash_membership_ambiguous", "A complete fleet hash returned a primary key more than once.");
             keys.add(primary); primaryKeys.set(query.index, keys);
-            out[query.index]!.push({ keyHash: row.hash, keyRange: address.range, fields });
+            out[query.index]!.push(stored);
           }
           if (out[query.index]!.length > read.maxRows) throw new LastDbPublishError("hash_limit_exceeded", "A complete fleet read exceeds its configured record bound.");
-          if (response.has_more) {
-            const cursor = response.next_cursor, cursorJson = JSON.stringify(cursor);
+          if (result.next_cursor !== null) {
+            const cursorJson = JSON.stringify(result.next_cursor);
             const cursors = seen.get(query.index) ?? new Set<string>();
-            if (cursor === undefined || cursor === null || cursor === "" || cursors.has(cursorJson)) {
+            if (result.next_cursor === "" || cursors.has(cursorJson)) {
               throw new LastDbPublishError("cursor_did_not_advance", "A fleet read lacks a fresh continuation cursor.");
             }
-            cursors.add(cursorJson); seen.set(query.index, cursors); next.push({ ...query, cursor });
+            cursors.add(cursorJson); seen.set(query.index, cursors); next.push({ ...query, cursor: result.next_cursor });
           }
         });
         pending = next;
@@ -187,43 +188,55 @@ export function newLastDbPublisherClient(opts: LastDbClientOptions = {}): LastDb
   };
   const mutate = async (mutations: Mutation[]) => {
     for (let start = 0; start < mutations.length; start += BATCH_SIZE) {
-      const batch = mutations.slice(start, start + BATCH_SIZE);
-      const reply = dataObject(await request("POST", "/api/mutations/batch", { mutations: batch.map((mutation) => {
-        const profile = selected(mutation.schemaHash);
-        return { type: "mutation", schema: mutation.schemaHash,
-          fields_and_values: profile.canonical ? wireFields(profile.key, mutation.fields) : mutation.fields,
-          key_value: { hash: mutation.keyHash, range: mutation.keyRange ?? null }, mutation_type: mutation.mutationType,
-          ...(mutation.expected ? { expected: { type: "value", field: names(mutation.schemaHash, [mutation.expected.field])[0], value: mutation.expected.value } } : {}) };
-      }) }));
-      const operations = object(reply.operations);
-      if (reply.ok !== true || reply.count !== batch.length || !Array.isArray(reply.mutation_ids) || reply.mutation_ids.length !== batch.length ||
-          reply.mutation_ids.some((id) => typeof id !== "string" || !id) || new Set(reply.mutation_ids).size !== batch.length ||
-          operations.total !== batch.length || ![operations.created, operations.updated, operations.deleted, operations.no_op].every((count) => Number.isSafeInteger(count) && Number(count) >= 0) ||
-          Number(operations.created) + Number(operations.updated) + Number(operations.deleted) + Number(operations.no_op) !== batch.length ||
-          !["queued", "durable"].includes(String(reply.durability))) {
-        throw new LastDbPublishError("mutation_not_confirmed", "LastDB did not confirm every fleet mutation.");
-      }
+      const batch = mutations.slice(start, start + BATCH_SIZE).map((mutation) => appMutation(selected(mutation.schemaHash), mutation));
+      try { await db.write(batch); }
+      catch (error) { throw mapSdkError(error); }
     }
   };
   return {
-    request,
     bindSchemas(next) { profiles = { ...next }; },
-    async declareAppSchema(appId, schema) {
-      const reply = dataObject(await request("POST", "/api/apps/declare-schema", { app_id: appId, schema }));
-      if (reply.app_id !== appId || reply.schema_name !== `${appId}/${schema.name}` ||
-          typeof reply.canonical !== "string" || !reply.canonical || typeof reply.identity_hash !== "string" || !/^[a-f0-9]{64}$/.test(reply.identity_hash)) {
-        throw new LastDbPublishError("schema_declare_bad_response", "LastDB did not confirm the requested schema-owned definition.");
-      }
-      return { identity: reply.identity_hash, canonical: reply.canonical, schemaName: String(reply.schema_name) };
-    },
     queryByKeys: readKeys,
     queryByHashes: readHashes,
-    mutateBatch: mutate,
+    async mutateBatch(mutations) { if (mutations.length) await mutate(mutations); },
   };
 }
 
+function storedRow(read: HashRead, row: AppApiRecord, fields: FieldMap): HashRow {
+  if (read.keyName) {
+    if (row.key.range !== null || row.key.hash !== fields.id || fields.fleet_bucket !== read.keyHash || !fields.sk) {
+      throw new LastDbPublishError("alternate_read_ambiguous", "A fleet alternate key does not match its primary record.");
+    }
+    return { keyHash: row.key.hash, keyRange: fields.sk, fields, revision: row.revision };
+  }
+  if (row.key.hash !== read.keyHash || typeof row.key.range !== "string" || !row.key.range) {
+    throw new LastDbPublishError("hash_read_ambiguous", "A fleet hash returned different coordinates.");
+  }
+  return { keyHash: row.key.hash, keyRange: row.key.range, fields, revision: row.revision };
+}
+
+function appMutation(profile: SchemaProfile, mutation: Mutation): AppApiMutation {
+  const key = { hash: mutation.keyHash, range: mutation.keyRange ?? null };
+  if (mutation.mutationType === "delete") {
+    if (!mutation.revision) throw new LastDbPublishError("revision_required", "A delete needs the revision from the read.");
+    return { op: "delete", schema: mutation.schemaHash, key, revision: mutation.revision };
+  }
+  const record = profile.canonical ? wireFields(profile.key, mutation.fields) : mutation.fields;
+  const alternates = profile.key === "status" ? statusAlternate(mutation.fields) : undefined;
+  if (mutation.mutationType === "create") {
+    return { op: "create", schema: mutation.schemaHash, key, record, ...(alternates ? { alternates } : {}) };
+  }
+  if (!mutation.revision) throw new LastDbPublishError("revision_required", "A replace needs the revision from the read.");
+  return { op: "replace", schema: mutation.schemaHash, key, revision: mutation.revision, record, ...(alternates ? { alternates } : {}) };
+}
+
+function statusAlternate(fields: FieldMap): { by_fleet: { hash: string; range: string } } {
+  const hash = fields.fleet_bucket, range = fields.sk;
+  if (!hash || !range) throw new LastDbPublishError("alternate_incomplete", "A status write needs its fleet bucket and sort key.");
+  return { by_fleet: { hash, range } };
+}
+
 export function newLastDbDeliveryClient(opts: LastDbClientOptions = {}): LastDbDeliveryClient {
-  const request = newLastDbJsonCaller(opts);
+  const request = newSharingCaller(opts);
   return {
     async stageDelivery(body) {
       const reply = dataObject(await request("POST", "/api/sharing/deliver", body));
@@ -243,18 +256,15 @@ export function newLastDbDeliveryClient(opts: LastDbClientOptions = {}): LastDbD
   };
 }
 
-function newLastDbJsonCaller(opts: LastDbClientOptions) {
-  const socketPath = opts.socketPath || process.env.ROUTINES_LASTDB_SOCKET || process.env.LASTDB_SOCKET_PATH || process.env.FOLDDB_SOCKET_PATH ||
-    join(process.env.LASTDB_HOME || join(homedir(), ".lastdb"), "data", "folddb.sock");
-  const explicitUrl = opts.nodeUrl || process.env.ROUTINES_LASTDB_NODE_URL;
-  const fetchImpl: LastDbFetch = opts.fetchImpl ?? ((input, init) => globalThis.fetch(input, init));
+function newSharingCaller(opts: LastDbClientOptions) {
+  const unix = socketPath(opts);
+  const fetchImpl: LastDbFetch = (input, init) => globalThis.fetch(input, init);
   return async (method: "GET" | "POST", path: string, body?: unknown): Promise<unknown> => {
     let response: Response;
     try {
-      response = await fetchImpl(explicitUrl ? `${explicitUrl.replace(/\/+$/, "")}${path}` : `http://localhost${path}`, {
-        method, headers: { "X-LastDB-Client": "routines", ...(body === undefined ? {} : { "Content-Type": "application/json" }) },
-        ...(body === undefined ? {} : { body: JSON.stringify(body) }), ...(explicitUrl ? {} : { unix: socketPath }),
-        signal: AbortSignal.timeout(120000),
+      response = await fetchImpl(`http://localhost${path}`, {
+        method, unix, headers: { "X-LastDB-Client": "routines", ...(body === undefined ? {} : { "Content-Type": "application/json" }) },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       });
     } catch {
       throw new LastDbPublishError("lastdb_unreachable", "LastDB did not complete the fleet request over the configured transport.");
@@ -263,7 +273,6 @@ function newLastDbJsonCaller(opts: LastDbClientOptions) {
     let parsed: unknown;
     try { parsed = JSON.parse(text); }
     catch { parsed = text; }
-    recordReadPages(path, body, parsed, response.status);
     if (!response.ok) {
       throw new LastDbPublishError(`lastdb_http_${response.status}`, `LastDB ${method} ${path} returned HTTP ${response.status}.`, { status: response.status, body: parsed });
     }
@@ -271,27 +280,20 @@ function newLastDbJsonCaller(opts: LastDbClientOptions) {
   };
 }
 
-// Explicit operator diagnostics contain selectors and page metadata, never values.
-// The same transport records ordinary range pages for both CI arms.
-function recordReadPages(path: string, body: unknown, reply: unknown, status: number): void {
+function tracePathAllowed(file: string): boolean {
+  const root = process.env.LASTDB_APP_DATA;
+  if (!root) return true;
+  const fromRoot = relative(root, file);
+  return fromRoot === "" || (!fromRoot.startsWith("..") && !isAbsolute(fromRoot));
+}
+
+// Page selectors only. Field values stay out of the trace.
+function recordRangePage(read: HashRead, cursor: string | undefined, limit: number, returned: number, nextCursor: string | null, status: number | null, error: string | null): void {
   const file = process.env.ROUTINES_STATUS_READ_TRACE_FILE;
-  if (!file || (path !== "/api/query" && path !== "/api/queries/batch")) return;
-  const entry = (value: unknown): Record<string, unknown> => value && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, unknown> : {};
-  const request = entry(body), envelope = entry(reply), result = entry(envelope.data ?? envelope);
-  if (path === "/api/queries/batch" && (!Array.isArray(request.queries) || !Array.isArray(result.results))) return;
-  const queries = path === "/api/queries/batch" && Array.isArray(request.queries) ? request.queries : [request];
-  const replies = path === "/api/queries/batch" && Array.isArray(result.results) ? result.results : [{ status, response: result }];
-  const pages = queries.flatMap((value, index) => {
-    if (index >= replies.length) return [];
-    const query = entry(value), item = entry(replies[index]), page = entry(item.response);
-    if (!query.key_name && !(typeof query.limit === "number" && query.limit > 2)) return [];
-    return [{ call_id: process.env.ROUTINES_STATUS_READ_TRACE_ID ?? String(process.pid),
-      schema: query.schema_name, key_name: query.key_name ?? "primary", filter: query.filter,
-      fields: query.fields, limit: query.limit, offset: query.offset ?? 0, cursor: query.cursor ?? null,
-      status: item.status ?? null, returned_count: page.returned_count ?? (Array.isArray(page.results) ? page.results.length : null),
-      has_more: page.has_more ?? null, next_cursor: page.next_cursor ?? null,
-      error: typeof page.error === "string" ? page.error : null }];
-  });
-  if (pages.length) writeFileSync(file, pages.map((page) => JSON.stringify(page) + "\n").join(""), { flag: "a", mode: 0o600 });
+  if (!file || !tracePathAllowed(file) || (!read.keyName && !(limit > 2))) return;
+  const page = { call_id: process.env.ROUTINES_STATUS_READ_TRACE_ID ?? String(process.pid),
+    schema: read.schemaHash, key_name: read.keyName ?? "primary", filter: { HashKey: read.keyHash },
+    fields: read.fields, limit, offset: 0, cursor: cursor ?? null, status, returned_count: returned,
+    has_more: nextCursor !== null, next_cursor: nextCursor, error };
+  writeFileSync(file, JSON.stringify(page) + "\n", { flag: "a", mode: 0o600 });
 }

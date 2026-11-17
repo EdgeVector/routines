@@ -1,6 +1,6 @@
 {
   "app_id": "routines",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "source": "https://github.com/EdgeVector/routines.git",
   "metadata": {
     "display_name": "routines",
@@ -435,6 +435,19 @@
       "alternate_keys": {}
     }
   ],
+  "access": {
+    "read": [
+      "routines/RoutineStatus",
+      "routines/RoutineRunSummaryV2",
+      "routines/FleetSummary"
+    ],
+    "write": [
+      "routines/RoutineStatus",
+      "routines/RoutineRunSummaryV2",
+      "routines/FleetSummary"
+    ],
+    "extensions": []
+  },
   "install": {
     "prepare": [
       {

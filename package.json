@@ -1,6 +1,6 @@
 {
   "name": "routines",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Unified scheduler + dispatcher for agent routines with global difficulty routing and explicit provider pins.",
   "private": true,
   "license": "MIT",

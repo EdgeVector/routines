@@ -53,13 +53,39 @@ def finish_setup(node, output, cleanup):
     save(output / "setup-cleanup.json", cleanup.request_and_wait(node))
 
 
+def place_app_schemas(node, checkout):
+    # The app no longer declares schemas. Place them the way the installer does,
+    # through the owner socket, from this arm's manifest.
+    manifest = json.loads((Path(checkout) / "lastdb-app.json").read_text())
+    app_id = manifest.get("app_id")
+    schemas = manifest.get("schemas")
+    require(app_id == "routines" and isinstance(schemas, list) and schemas, "lastdb-app.json does not list routines schemas")
+    for entry in schemas:
+        schema = dict(entry)
+        retention = schema.pop("retention", None)
+        body = {"app_id": app_id, "schema": schema}
+        if retention is not None:
+            body["retention"] = retention
+        node.call("/api/apps/declare-schema", body)
+
+
+def bound_schema(owned, runtime, definition):
+    if runtime in owned:
+        return owned[runtime]
+    wanted = definition.get("descriptive_name")
+    matches = [schema for schema in owned.values()
+        if schema.get("descriptive_name") == wanted or schema.get("name") == f"routines/{wanted}"]
+    require(len(matches) == 1, "The publisher binding does not match one installed schema")
+    return matches[0]
+
+
 def installed_schemas(node, bindings, contract, output, phase):
     directory = node.call("/api/schemas?include_full=true&include_counts=true")[0]
     save(output / f"installed-{phase}.json", directory)
     require(directory.get("ready") is True and directory.get("full_included") is True and directory.get("counts_included") is True,
         "The actual installed schema metadata is incomplete")
     owned = {schema["name"]: schema for schema in directory.get("schemas", []) if schema.get("owner_app_id") == "routines"}
-    canonical = {key: owned[runtime] for key, runtime in bindings.items() if runtime in owned}
+    canonical = {key: bound_schema(owned, runtime, contract[key]["definition"]) for key, runtime in bindings.items() if runtime}
     expected = {key for key, runtime in bindings.items() if runtime}
     require(set(canonical) == expected, "The publisher's actual schema bindings are incomplete")
     for key, schema in canonical.items():
@@ -332,6 +358,7 @@ def arm(args, Node, finish_setup, contract, label, pair):
         version_body = node.call("/api/version")[0]
         args.node_api_version = version_body.get("api_version") if isinstance(version_body, dict) else None
         cloud_off(node, "start")
+        place_app_schemas(node, args.control if label == "control" else args.candidate)
         home = node.root / "routines"
         expected = registry(home, args.records)
         setup = binary

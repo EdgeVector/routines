@@ -1,5 +1,9 @@
 node_modules/
 dist/
+# The vendored LastDB app SDK is a committed prebuild. Refresh it by rebuilding
+# lastdb_app_sdk (`tsc -p tsconfig.json`) from EdgeVector/lastdb main.
+!vendor/lastdb-app-sdk/dist/
+!vendor/lastdb-app-sdk/dist/**
 coverage/
 .DS_Store
 *.log

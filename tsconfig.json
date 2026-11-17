@@ -9,7 +9,11 @@
     "strict": true,
     "noUncheckedIndexedAccess": true,
     "skipLibCheck": true,
-    "types": ["bun"]
+    "types": ["bun"],
+    "baseUrl": ".",
+    "paths": {
+      "@lastdb/app-sdk": ["./vendor/lastdb-app-sdk"]
+    }
   },
   "include": ["src/**/*.ts"]
 }

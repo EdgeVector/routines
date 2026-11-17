@@ -48,6 +48,12 @@ export const STATUS_FIELDS = [
 ] as const;
 
 export const ROUTINES_APP_ID = "routines";
+/** Exact names the installer places. A saved 64-hex id is not an address. */
+export const SCHEMA_NAMES: Record<SchemaKey, string> = {
+  status: `${ROUTINES_APP_ID}/RoutineStatus`,
+  fleetSummary: `${ROUTINES_APP_ID}/FleetSummary`,
+  runSummaryV2: `${ROUTINES_APP_ID}/RoutineRunSummaryV2`,
+};
 export const ROUTINES_FLEET_ID = "routines";
 export const FLEET_STATUS_BUCKET_COUNT = 16;
 export const FLEET_ALTERNATE = { hashField: "fleet_bucket", rangeFields: ["status", "group_id", "id"] } as const;
@@ -198,7 +204,7 @@ export function canonicalDefinition(key: SchemaKey): SchemaDefinition {
   };
 }
 
-/** Published identity algorithm v2. Runtime addresses always come from LastDB. */
+/** Local checksum of a published definition. It is not the wire address. */
 export function definitionIdentity(schema: SchemaDefinition): string {
   const fields = [...new Set(schema.fields)].sort().join(",");
   return createHash("sha256").update(`app:${schema.owner_app_id}:${schema.descriptive_name}:${fields}:key:${schema.key.hash_field}:${schema.key.range_field ?? ""}`).digest("hex");
