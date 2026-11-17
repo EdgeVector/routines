@@ -40,6 +40,20 @@ export function stateDir(): string {
   return join(routinesHome(), "state");
 }
 
+/**
+ * Copy `env` without this process's LastDB app id or app socket.
+ *
+ * The launcher sets `LASTDB_APP` and `LASTDB_SOCKET_PATH` on this process.
+ * A program this process starts is not this app. It gets its own id and
+ * socket from its own launcher. A re-exec of routines keeps both.
+ */
+export function withoutLastDbAppIdentity(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = { ...env };
+  delete out.LASTDB_APP;
+  delete out.LASTDB_SOCKET_PATH;
+  return out;
+}
+
 // Daemon's own stdout/stderr log directory (distinct from per-run logs).
 export function daemonLogDir(): string {
   return join(routinesHome(), "daemon");

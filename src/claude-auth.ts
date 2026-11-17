@@ -27,6 +27,8 @@
 import { execFile, spawnSync } from "node:child_process";
 import { promisify } from "node:util";
 
+import { withoutLastDbAppIdentity } from "./paths.ts";
+
 const execFileAsync = promisify(execFile);
 
 export type ClaudeAuthSource = "env" | "lastsecrets" | "keychain-default";
@@ -177,7 +179,7 @@ async function resolveLocator(
       timeout: 15_000,
       // Scrubbed: see LASTSECRETS_SCRUBBED_ENV_PREFIXES. A telemetry variable
       // in the daemon env must not decide whether this returns a value.
-      env: scrubLastsecretsEnv(env),
+      env: withoutLastDbAppIdentity(scrubLastsecretsEnv(env)),
     });
     // An empty stdout with a zero exit is a MISS, and it is the miss that took
     // the fleet down. Name it, so no caller has to infer it from the absence
@@ -259,7 +261,7 @@ export function claudeKeychainReadRefused(
     const res = spawnSync(
       bin,
       ["find-generic-password", "-s", CLAUDE_KEYCHAIN_SERVICE, "-w"],
-      { stdio: ["ignore", "ignore", "ignore"], timeout: 10_000 },
+      { stdio: ["ignore", "ignore", "ignore"], timeout: 10_000, env: withoutLastDbAppIdentity(env) },
     );
     return res.status === SECURITY_AUTH_FAILED_EXIT;
   } catch {

@@ -42,7 +42,7 @@ import {
 import { stripUnresolvedSentryLocators } from "./observability.ts";
 import { buildRoutineAttributionEnv } from "./prompt.ts";
 import type { ErrorPriority, RoutineEntry } from "./registry.ts";
-import { routinesHome, runsDir } from "./paths.ts";
+import { routinesHome, runsDir, withoutLastDbAppIdentity } from "./paths.ts";
 import type { RunResult } from "./runner.ts";
 
 const TRIAGE_ID = "routine-error-triage";
@@ -344,7 +344,7 @@ function existingCardPriority(kanban: string, slug: string): ErrorPriority | nul
   const res = spawnSync(kanban, ["show", slug, "--json"], {
     encoding: "utf8",
     timeout: 60_000,
-    env: process.env,
+    env: withoutLastDbAppIdentity(),
   });
   if (res.error || res.status !== 0) return null;
   try {
@@ -412,14 +412,14 @@ function fileRoutineErrorCard(
       input: body,
       encoding: "utf8",
       timeout: 60_000,
-      env: process.env,
+      env: withoutLastDbAppIdentity(),
     });
     if (!res.error && res.status === 0) {
       // Best-effort rank so pickup observes the resolved priority.
       spawnSync(kanban, ["rank", "--column", "todo"], {
         encoding: "utf8",
         timeout: 60_000,
-        env: process.env,
+        env: withoutLastDbAppIdentity(),
       });
 
       const detail = (res.stdout || "").trim() || "card upserted";
@@ -611,7 +611,7 @@ function brainGetReference(
   const res = spawnSync(brain, ["get", slug, "--type", "reference", "--json"], {
     encoding: "utf8",
     timeout: 60_000,
-    env: process.env,
+    env: withoutLastDbAppIdentity(),
   });
   if (res.error || res.status !== 0) {
     return {
@@ -663,7 +663,7 @@ ${body.trimEnd()}
     input,
     encoding: "utf8",
     timeout: 120_000,
-    env: process.env,
+    env: withoutLastDbAppIdentity(),
   });
   if (!res.error && res.status === 0) {
     return { ok: true, detail: (res.stdout || "").trim() || "put ok" };
@@ -942,7 +942,7 @@ ${entryBody}`;
     const append = spawnSync(
       brain,
       ["append", ROUTINE_PAPERCUT_SLUG, "--type", "reference"],
-      { input: entryBody, encoding: "utf8", timeout: 60_000, env: process.env },
+      { input: entryBody, encoding: "utf8", timeout: 60_000, env: withoutLastDbAppIdentity() },
     );
     if (!append.error && append.status === 0) {
       const detail = (append.stdout || "").trim() || "papercut appended";
@@ -967,7 +967,7 @@ ${entryBody}`;
       const retry = spawnSync(
         brain,
         ["append", ROUTINE_PAPERCUT_SLUG, "--type", "reference"],
-        { input: entryBody, encoding: "utf8", timeout: 60_000, env: process.env },
+        { input: entryBody, encoding: "utf8", timeout: 60_000, env: withoutLastDbAppIdentity() },
       );
       if (!retry.error && retry.status === 0) {
         const detail = (retry.stdout || "").trim() || "papercut appended";
@@ -986,7 +986,7 @@ ${entryBody}`;
         input: initialBody,
         encoding: "utf8",
         timeout: 60_000,
-        env: process.env,
+        env: withoutLastDbAppIdentity(),
       });
       if (!create.error && create.status === 0) {
         return {
@@ -1150,10 +1150,10 @@ function dispatchTriageAgent(
     const stderrFd = openSync(stderrPath, "a");
     const child = spawn(bin, args, {
       cwd: entry.cwd || process.cwd(),
-      env: stripUnresolvedSentryLocators({
+      env: withoutLastDbAppIdentity(stripUnresolvedSentryLocators({
         ...process.env,
         ...buildRoutineAttributionEnv(TRIAGE_ID, triageDir),
-      }),
+      })),
       stdio: [stdin !== undefined ? "pipe" : "ignore", stdoutFd, stderrFd],
       detached: true,
     });

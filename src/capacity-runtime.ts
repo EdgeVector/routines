@@ -9,7 +9,7 @@ import {
   type IdleLadderDecision,
   type IdleLadderState,
 } from "./capacity.ts";
-import { routinesHome, stateDir } from "./paths.ts";
+import { routinesHome, stateDir, withoutLastDbAppIdentity } from "./paths.ts";
 import { HARNESSES } from "./registry.ts";
 
 export interface CapacityControllerResult {
@@ -45,6 +45,7 @@ function readReadyCount(): number | null {
       encoding: "utf8",
       timeout: 10_000,
       stdio: ["ignore", "pipe", "ignore"],
+      env: withoutLastDbAppIdentity(),
     });
     const parsed = JSON.parse(raw) as { ready?: unknown; pickup_ready?: unknown };
     const ready = Number(parsed.ready ?? parsed.pickup_ready);

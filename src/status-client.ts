@@ -2,7 +2,7 @@
 import { homedir } from "node:os";
 import { isAbsolute, join, relative } from "node:path";
 import { writeFileSync } from "node:fs";
-import { AppApiError, LastDbClient, TransportError, UnexpectedResponseError, udsTransport, type AppApiMutation, type AppApiRead, type AppApiReadResult, type AppApiRecord, type RowFields } from "@lastdb/app-sdk";
+import { AppApiError, LastDbClient, TransportError, UnexpectedResponseError, udsTransport, type ErrorEnvelope, type FieldValues, type ReadItem, type ReadResult, type Record as SdkRecord, type WriteItem } from "@lastdb/app-sdk";
 import { FLEET_ALTERNATE, SCHEMA_NAMES, SCHEMAS, localFields, wireFields, type SchemaKey } from "./status-schema.ts";
 
 export type FieldMap = Record<string, string>;
@@ -86,7 +86,7 @@ function mapSdkError(error: unknown): LastDbPublishError {
   return new LastDbPublishError("lastdb_unreachable", "LastDB did not complete the fleet request over the configured transport.");
 }
 
-function stringFields(record: RowFields): FieldMap {
+function stringFields(record: FieldValues): FieldMap {
   const fields: FieldMap = {};
   for (const [name, value] of Object.entries(record)) {
     if (typeof value !== "string") throw new LastDbPublishError("bad_query_row", "LastDB returned a non-string field value.");
@@ -95,7 +95,7 @@ function stringFields(record: RowFields): FieldMap {
   return fields;
 }
 
-function isReadError(result: AppApiReadResult): result is { error: { code: string; message: string } } {
+function isReadError(result: ReadResult): result is ErrorEnvelope {
   return "error" in result;
 }
 
@@ -107,12 +107,12 @@ export function newLastDbPublisherClient(opts: LastDbClientOptions = {}): LastDb
     if (!profile) throw new LastDbPublishError("schema_not_configured", "The fleet schema name is not one of the installed names.");
     return profile;
   };
-  const mapped = (schema: string, record: RowFields) => {
+  const mapped = (schema: string, record: FieldValues) => {
     const fields = stringFields(record);
     const profile = selected(schema);
     return profile.canonical ? localFields(profile.key, fields) : fields;
   };
-  const readBatch = async (reads: AppApiRead[]) => {
+  const readBatch = async (reads: ReadItem[]) => {
     try { return await db.read(reads); }
     catch (error) { throw mapSdkError(error); }
   };
@@ -201,7 +201,7 @@ export function newLastDbPublisherClient(opts: LastDbClientOptions = {}): LastDb
   };
 }
 
-function storedRow(read: HashRead, row: AppApiRecord, fields: FieldMap): HashRow {
+function storedRow(read: HashRead, row: SdkRecord, fields: FieldMap): HashRow {
   if (read.keyName) {
     if (row.key.range !== null || row.key.hash !== fields.id || fields.fleet_bucket !== read.keyHash || !fields.sk) {
       throw new LastDbPublishError("alternate_read_ambiguous", "A fleet alternate key does not match its primary record.");
@@ -214,7 +214,7 @@ function storedRow(read: HashRead, row: AppApiRecord, fields: FieldMap): HashRow
   return { keyHash: row.key.hash, keyRange: row.key.range, fields, revision: row.revision };
 }
 
-function appMutation(profile: SchemaProfile, mutation: Mutation): AppApiMutation {
+function appMutation(profile: SchemaProfile, mutation: Mutation): WriteItem {
   const key = { hash: mutation.keyHash, range: mutation.keyRange ?? null };
   if (mutation.mutationType === "delete") {
     if (!mutation.revision) throw new LastDbPublishError("revision_required", "A delete needs the revision from the read.");

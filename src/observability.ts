@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
+import { withoutLastDbAppIdentity } from "./paths.ts";
 import type { RoutineEntry } from "./registry.ts";
 import type { RunResult } from "./runner.ts";
 
@@ -167,6 +168,7 @@ function resolveLastSecretsLocator(locator: string): string | undefined {
     return execFileSync("lastsecrets", ["get", slug], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
+      env: withoutLastDbAppIdentity(),
     }).trim();
   } catch {
     return undefined;
