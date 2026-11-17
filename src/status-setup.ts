@@ -1,20 +1,13 @@
-/** Explicit status schema setup. Ordinary requests read this config only.
- *
- * A new home starts empty, so `init-status` declares the owned schemas. */
+/** Local record of the exact fleet schema names. The installer places the schemas. */
 import { closeSync, constants, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { stateDir } from "./paths.ts";
-import { dataObject, LastDbPublishError, object, type LastDbPublisherClient } from "./status-client.ts";
-import { ACTIVE_SCHEMA_KEYS, canonicalDefinition, definitionIdentity, ROUTINES_APP_ID, SCHEMAS, type SchemaDefinition, type SchemaKey } from "./status-schema.ts";
+import { LastDbPublishError, type LastDbPublisherClient } from "./status-client.ts";
+import { SCHEMA_NAMES, type SchemaKey } from "./status-schema.ts";
 
-type Binding = { identity: string; runtime: string };
-export type StatusSchemaConfig = { version: 2; schemas: Partial<Record<SchemaKey, Binding>> };
-const keys = Object.keys(SCHEMAS) as SchemaKey[];
-const stable = (value: unknown): string => JSON.stringify(value, (_key, item) => item && typeof item === "object" && !Array.isArray(item)
-  ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => a.localeCompare(b))) : item);
-const same = (a: unknown, b: unknown) => stable(a) === stable(b);
+type Binding = { name: string; runtime: string };
+export type StatusSchemaConfig = { version: 3; schemas: Record<SchemaKey, Binding> };
 const bytes = (value: unknown) => Buffer.from(JSON.stringify(value, null, 2) + "\n");
-const identity = (value: unknown): value is string => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
 function requireValue(ok: unknown, message: string): asserts ok {
   if (!ok) throw new LastDbPublishError("status_schema_setup", message);
 }
@@ -23,30 +16,10 @@ function readOptional(path: string): Buffer | null {
   try { return readFileSync(path); }
   catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return null; throw error; }
 }
-function config(value: unknown): StatusSchemaConfig {
-  const parsed = object(value), schemas = object(parsed.schemas);
-  requireValue(parsed.version === 2 && ACTIVE_SCHEMA_KEYS.every((key) => schemas[key]), "The fleet schema config is incomplete. Run init-status.");
-  for (const [key, value] of Object.entries(schemas)) {
-    const binding = object(value);
-    requireValue(keys.includes(key as SchemaKey) && identity(binding.identity) && typeof binding.runtime === "string" && binding.runtime,
-      "The fleet schema config contains an invalid binding.");
-    requireValue(binding.identity === definitionIdentity(canonicalDefinition(key as SchemaKey)), "A saved fleet definition differs from this app release.");
-  }
-  requireValue(new Set(Object.values(schemas).map((value) => object(value).runtime)).size === Object.keys(schemas).length,
-    "Two fleet record types resolve to the same runtime schema.");
-  return parsed as unknown as StatusSchemaConfig;
-}
+
 export function loadStatusSchemas(client: LastDbPublisherClient): Record<SchemaKey, string> {
-  const path = statusSchemaPath();
-  const raw = readOptional(path);
-  requireValue(raw, "Fleet schemas are not configured. Run init-status.");
-  const saved = config(JSON.parse(raw.toString()));
-  client.bindSchemas(Object.fromEntries(Object.entries(saved.schemas).map(([key, binding]) => [binding!.runtime, { key: key as SchemaKey, canonical: true }])));
-  return {
-    status: saved.schemas.status!.runtime,
-    fleetSummary: saved.schemas.fleetSummary!.runtime,
-    runSummaryV2: saved.schemas.runSummaryV2!.runtime,
-  };
+  client.bindSchemas(Object.fromEntries((Object.keys(SCHEMA_NAMES) as SchemaKey[]).map((key) => [SCHEMA_NAMES[key], { key, canonical: true }])));
+  return { ...SCHEMA_NAMES };
 }
 
 export function acquireStatusConfigLock(): () => void { return lock(statusSchemaPath()); }
@@ -80,60 +53,20 @@ function save(path: string, previous: Buffer | null, value: unknown): Buffer {
   try { fsyncSync(directory); } finally { closeSync(directory); }
   return next;
 }
-async function directory(client: LastDbPublisherClient): Promise<Record<string, unknown>[]> {
-  const reply = dataObject(await client.request("GET", "/api/schemas"));
-  requireValue(reply.ready === true && Array.isArray(reply.schemas), "The schema directory is not ready.");
-  return reply.schemas.map(object).filter((schema) => schema.owner_app_id === ROUTINES_APP_ID);
-}
-async function metadata(client: LastDbPublisherClient, name: string): Promise<Record<string, unknown>> {
-  const reply = dataObject(await client.request("GET", `/api/schema/${encodeURIComponent(name)}`));
-  return object(reply.schema ?? reply);
-}
-function validateMetadata(source: Record<string, unknown>, definition: SchemaDefinition): Binding {
-  const key = object(source.key);
-  requireValue(source.owner_app_id === ROUTINES_APP_ID && source.descriptive_name === definition.descriptive_name &&
-    source.schema_type === definition.schema_type && Array.isArray(source.fields) && same([...source.fields].sort(), [...definition.fields].sort()) &&
-    key.hash_field === definition.key.hash_field && (key.range_field ?? null) === (definition.key.range_field ?? null) &&
-    same(source.field_types, definition.field_types) && same(source.field_descriptions, definition.field_descriptions) &&
-    same(source.field_data_classifications, definition.field_data_classifications) &&
-    (!source.transform_fields || Object.keys(object(source.transform_fields)).length === 0) && source.identity_hash === definitionIdentity(definition) && typeof source.name === "string" && source.name,
-    `Installed ${definition.name} differs from the reviewed fleet definition.`);
-  return { identity: source.identity_hash as string, runtime: source.name as string };
-}
-function keyFor(source: Record<string, unknown>): SchemaKey {
-  const key = keys.find((key) => SCHEMAS[key].name === source.descriptive_name);
-  requireValue(key, "An unreviewed Routines schema requires owner review before setup.");
-  return key;
-}
-function requireOwnedMetadata(source: Record<string, unknown>, key: SchemaKey): Binding {
-  const definition = canonicalDefinition(key), binding = validateMetadata(source, definition);
-  requireValue(binding.identity === definitionIdentity(definition) &&
-    same(source.alternate_keys ?? {}, definition.alternate_keys ?? {}), "The installed fleet identity or keys differ from this release.");
-  return binding;
+
+function binding(key: SchemaKey): Binding {
+  return { name: SCHEMA_NAMES[key], runtime: SCHEMA_NAMES[key] };
 }
 
-export async function initializeStatusSchemas(client: LastDbPublisherClient): Promise<StatusSchemaConfig> {
+export function initializeStatusSchemas(): StatusSchemaConfig {
   const path = statusSchemaPath(), release = lock(path);
   try {
-    const previous = readOptional(path), saved = previous ? config(JSON.parse(previous.toString())) : { version: 2 as const, schemas: {} as StatusSchemaConfig["schemas"] };
-    const installed = await directory(client);
-    const current = await Promise.all(installed.map(async (entry) => {
-      const key = keyFor(entry), source = await metadata(client, String(entry.name));
-      return { key, binding: requireOwnedMetadata(source, key) };
-    }));
-    requireValue(new Set(current.map(({ key }) => key)).size === current.length, "Several installed schemas claim the same Routines record type.");
-    for (const { key, binding } of current) {
-      requireValue(!saved.schemas[key] || same(saved.schemas[key], binding), "A saved Routines binding differs from its installed schema.");
-      saved.schemas[key] = binding;
-    }
-    const declared = await Promise.all(ACTIVE_SCHEMA_KEYS.map(async (key) => {
-      const definition = canonicalDefinition(key), reply = await client.declareAppSchema(ROUTINES_APP_ID, definition);
-      const binding = requireOwnedMetadata(await metadata(client, reply.canonical), key);
-      requireValue(binding.identity === reply.identity, "A Routines declaration returned a different identity.");
-      return { key, binding };
-    }));
-    for (const { key, binding } of declared) saved.schemas[key] = binding;
-    save(path, previous, config(saved));
+    const previous = readOptional(path);
+    const saved: StatusSchemaConfig = {
+      version: 3,
+      schemas: { status: binding("status"), runSummaryV2: binding("runSummaryV2"), fleetSummary: binding("fleetSummary") },
+    };
+    save(path, previous, saved);
     return saved;
   } finally { release(); }
 }

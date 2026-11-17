@@ -231,7 +231,7 @@ routines pause|resume <id>    # toggle status
 routines route <id> --harness codex --model gpt-5.5
 routines route <id> --harness grok --model grok-4.5
 routines logs <id>            # recent runs (--path, --tail, --json)
-routines init-status          # explicit setup of the schema-owned fleet definitions
+routines init-status          # record the exact fleet schema names for this home
 routines publish-status       # publish slim fleet status + recent run summaries to LastDB
 routines read-status          # read and validate the bounded fleet view
 routines deliver-status       # publish + stage/admin-approve a fleet-status delivery
@@ -396,12 +396,12 @@ The 16 bucket keys and the status, display-group, identifier range order stay th
 
 The request flow is explicit:
 
-1. Read the saved schema bindings. Ordinary reads and writes never declare schemas.
+1. Use the exact schema names. Ordinary reads and writes never declare schemas.
 2. Capture the actual registry and run history. Refuse an incomplete registry.
-3. Read current status records and all fleet buckets through native batch requests.
-4. Batch changed status records and stale primary deletions, with checks against the observed publication time.
-5. Batch new run records and bounded retention deletions.
-6. Write the fleet summary last. The reader checks this marker twice, full membership, and both record and fleet digests.
+3. Read current status records and all fleet buckets.
+4. Write changed status records and stale deletions at the revision from that read.
+5. Write new run records and bounded retention deletions at the revision from that read.
+6. Write the fleet summary last, at the revision from its read. The reader checks this marker twice, full membership, and both record and fleet digests.
 
 One config lock covers capture through the final marker, and setup.
 The lock belongs to the Routines schema config. It does not reserve a build slot.
@@ -415,11 +415,11 @@ The fleet summary has a 4096-byte cap.
 ### Setup
 
 The release has no value conversion.
-A new home starts with no Routines schema, so `init-status` declares the schema-owned definitions.
+The installer places the three schemas from `lastdb-app.json`. `init-status` records those exact names in the local config and does not declare schemas.
 The primary-reset restrictions remain in force. These commands do not authorize a primary change.
 
-Fresh setup declares only the three active schemas and saves their exact identities and runtime addresses.
-`lastdb-app.json` lists the same three definitions, with every field typed, because a registry app lists every schema it declares.
+`init-status` saves the three exact schema names. It does not contact LastDB.
+`lastdb-app.json` lists the same three definitions, with every field typed and explicit `record_keys`, because a registry app lists every schema it declares.
 After a schema change, run `bun scripts/write-app-manifest.ts` to regenerate that list from `src/status-schema.ts`.
 Definitions must already exist in schema service under the registered app owner.
 Generic historical field names do not pass the current canonical-name policy.
@@ -427,20 +427,21 @@ The source declares precise canonical names and preserves the original String fi
 
 ```sh
 routines init-status --dry-run --json    # export the three published definitions, without a node request
-routines init-status --json              # fresh setup only
+routines init-status --json              # record the exact schema names
 routines publish-status --json
 routines read-status --json
 ```
 
 `ROUTINES_STATUS_SCHEMA_CONFIG` selects the config path.
-The default is `ROUTINES_HOME/state/status-schemas.json`.
+The default is `state/status-schemas.json` under the routines home.
+`LASTDB_APP_DATA` selects that home when the launcher sets it. Otherwise `ROUTINES_HOME` or `~/.routines` does.
 
 ### Validation scope
 
 Source syntax and type checks do not prove the running app.
 The required merge checks are `ci-required` and `generated-evidence`.
 The latency workflow compares this change with the pull request base on the latest LastDB nightly.
-That comparison is not a required check. On API 30 both arms fail because the fleet client still sends the removed `fields` query key and `fields_and_values` mutations.
+That comparison is not a required check. The harness places each arm's manifest schemas on the owner socket before the app runs, because the app no longer declares schemas.
 A comparison with an absent posture dependency must retain the real ENOENT error and unknown posture in both arms.
 Such a result measures publication and lookup latency with that dependency absent.
 It does not prove nominal live posture collection, and no posture gate is changed.

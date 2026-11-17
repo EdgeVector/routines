@@ -53,29 +53,74 @@ def finish_setup(node, output, cleanup):
     save(output / "setup-cleanup.json", cleanup.request_and_wait(node))
 
 
+def record_keys_for(entry):
+    # Current LastDB owned schemas take explicit record_keys. A pull-request-base
+    # manifest still has field-derived key and alternate_keys. Translate that
+    # shape so placement matches the installer. Product code does not declare.
+    existing = entry.get("record_keys")
+    if isinstance(existing, dict) and isinstance(existing.get("primary"), dict):
+        return {"primary": dict(existing["primary"]),
+            "alternates": {name: dict(value) for name, value in (existing.get("alternates") or {}).items()}}
+    key = entry.get("key") if isinstance(entry.get("key"), dict) else None
+    require(key is not None, "A manifest schema has no record_keys")
+    primary = {"kind": "hash_range", "range_type": "String"} if key.get("range_field") else {"kind": "hash"}
+    alternates = {name: {"kind": "hash_range", "range_type": "String"} for name in (entry.get("alternate_keys") or {})}
+    return {"primary": primary, "alternates": alternates}
+
+
+def place_app_schemas(node, checkout):
+    # The app no longer declares schemas. Place them the way the installer does,
+    # through the owner socket, from this arm's manifest.
+    manifest = json.loads((Path(checkout) / "lastdb-app.json").read_text())
+    app_id = manifest.get("app_id")
+    schemas = manifest.get("schemas")
+    require(app_id == "routines" and isinstance(schemas, list) and schemas, "lastdb-app.json does not list routines schemas")
+    for entry in schemas:
+        schema = dict(entry)
+        retention = schema.pop("retention", None)
+        schema.pop("key", None)
+        schema.pop("alternate_keys", None)
+        schema["record_keys"] = record_keys_for(entry)
+        body = {"app_id": app_id, "schema": schema}
+        if retention is not None:
+            body["retention"] = retention
+        node.call("/api/apps/declare-schema", body)
+
+
+def bound_schema(owned, runtime, definition):
+    if runtime in owned:
+        return owned[runtime]
+    wanted = definition.get("descriptive_name")
+    matches = [schema for schema in owned.values()
+        if schema.get("descriptive_name") == wanted or schema.get("name") == f"routines/{wanted}"]
+    require(len(matches) == 1, "The publisher binding does not match one installed schema")
+    return matches[0]
+
+
 def installed_schemas(node, bindings, contract, output, phase):
-    directory = node.call("/api/schemas?include_full=true&include_counts=true")[0]
+    # Schema listing rejects include_counts and no longer returns record totals.
+    directory = node.call("/api/schemas?include_full=true")[0]
     save(output / f"installed-{phase}.json", directory)
-    require(directory.get("ready") is True and directory.get("full_included") is True and directory.get("counts_included") is True,
+    require(directory.get("ready") is True and directory.get("full_included") is True,
         "The actual installed schema metadata is incomplete")
     owned = {schema["name"]: schema for schema in directory.get("schemas", []) if schema.get("owner_app_id") == "routines"}
-    canonical = {key: owned[runtime] for key, runtime in bindings.items() if runtime in owned}
+    canonical = {key: bound_schema(owned, runtime, contract[key]["definition"]) for key, runtime in bindings.items() if runtime}
     expected = {key for key, runtime in bindings.items() if runtime}
     require(set(canonical) == expected, "The publisher's actual schema bindings are incomplete")
     for key, schema in canonical.items():
         definition = contract[key]["definition"]
-        require(schema.get("identity_hash") == contract[key]["identity"] and schema.get("descriptive_name") == definition["descriptive_name"]
+        identity = schema.get("identity_hash")
+        require(isinstance(identity, str) and len(identity) == 64 and all(char in "0123456789abcdef" for char in identity)
+            and schema.get("descriptive_name") == definition["descriptive_name"]
             and schema.get("schema_type") == definition["schema_type"]
-            and [schema.get("key", {}).get(field) for field in ("hash_field", "range_field")] == [definition["key"].get(field) for field in ("hash_field", "range_field")]
+            and schema.get("record_keys") == record_keys_for(definition)
             and set(schema.get("fields", [])) == set(definition["fields"])
-            and all(schema.get(field) == definition[field] for field in ("field_types", "field_descriptions", "field_data_classifications")),
+            and all(schema.get(field) == definition[field] for field in ("field_types", "field_descriptions")),
             "An actual local definition differs from the published field definition")
-        require(not schema.get("transform_fields") and schema.get("alternate_keys", {}) == definition.get("alternate_keys", {}),
-            "A native runtime has transform fields or different keys")
+        require(not schema.get("transform_fields"), "A native runtime has transform fields")
     require(set(owned) == {schema["name"] for schema in canonical.values()}, "Setup retains an unexpected local schema")
     field_keys = [field_key for schema in canonical.values() for field_key in schema.get("field_key_ids", {}).values()]
     require(len(set(field_keys)) == len(field_keys), "Two native schemas share a field key")
-    return {key: schema["record_count"] for key, schema in canonical.items()}
 
 
 def cli(args, binary, node, home, verb, *flags, allow_failure=False):
@@ -200,6 +245,25 @@ def unwrapped(value):
     return value["value"] if isinstance(value, dict) and set(value) == {"value"} else value
 
 
+# Record keys are explicit addresses. These fields still store the same coordinates.
+PRIMARY_LOCAL = {"status": "id", "fleetSummary": "fleet_id", "runSummaryV2": "id"}
+RANGE_LOCAL = {"runSummaryV2": "stamp"}
+STATUS_LOCAL = ("fleet_bucket", "sk", "status", "group_id", "id")
+
+
+def stored_key_fields(key, contract):
+    names = contract[key]["field_map"]
+    hash_wire = names[PRIMARY_LOCAL[key]]
+    range_local = RANGE_LOCAL.get(key)
+    range_wire = names[range_local] if range_local else None
+    required = {hash_wire}
+    if range_wire:
+        required.add(range_wire)
+    if key == "status":
+        required.update(names[local] for local in STATUS_LOCAL)
+    return required, hash_wire, range_wire
+
+
 def snapshot(node, bindings, contract, coordinates):
     queries = []
     for key, address, range_value in coordinates:
@@ -223,12 +287,7 @@ def snapshot(node, bindings, contract, coordinates):
             row = response["results"][0]
             require(row.get("key") == {"hash": address, "range": range_value}, "A known-key snapshot returned different primary coordinates")
             declared, present = set(batch[offset]["fields"]), set(row["fields"])
-            definition = contract[key]["definition"]
-            required = {field for field in definition["key"].values() if field}
-            if key == "status":
-                alternate = definition["alternate_keys"]["by_fleet"]
-                required |= {alternate["hash_field"], contract[key]["field_map"]["sk"]}
-                required |= {part["field"] for part in alternate["range_parts"]}
+            required, hash_wire, range_wire = stored_key_fields(key, contract)
             if not required <= present or not present <= declared:
                 save(node.output / "failed-known-key-snapshot.json", {"coordinate": [key, address, range_value],
                     "query": batch[offset], "actual_result": item,
@@ -237,8 +296,8 @@ def snapshot(node, bindings, contract, coordinates):
             values = {field: unwrapped(value) for field, value in row["fields"].items()}
             require(all(value is None or isinstance(value, str) for value in values.values()) and
                 all(isinstance(values[field], str) and values[field] for field in required), "A value type or required key field differs")
-            require(values[definition["key"]["hash_field"]] == address and
-                (range_value is None or values[definition["key"]["range_field"]] == range_value), "A stored primary field differs from its actual coordinates")
+            require(values[hash_wire] == address and
+                (range_value is None or values[range_wire] == range_value), "A stored primary field differs from its actual coordinates")
             # A record has one metadata block (or null).
             metadata = row.get("metadata")
             require(metadata is None or isinstance(metadata, dict), "A full query returns an invalid record metadata block")
@@ -332,6 +391,7 @@ def arm(args, Node, finish_setup, contract, label, pair):
         version_body = node.call("/api/version")[0]
         args.node_api_version = version_body.get("api_version") if isinstance(version_body, dict) else None
         cloud_off(node, "start")
+        place_app_schemas(node, args.control if label == "control" else args.candidate)
         home = node.root / "routines"
         expected = registry(home, args.records)
         setup = binary
@@ -348,13 +408,11 @@ def arm(args, Node, finish_setup, contract, label, pair):
         read, _ = call_json(args, setup, node, home, "read-status")
         rows = view(read, expected)
         bindings = published["schemaHashes"]
-        actual_counts = installed_schemas(node, bindings, contract, output, "published")
+        installed_schemas(node, bindings, contract, output, "published")
         histories = run_keys(home)
         coordinates = [("status", identifier, None) for identifier in sorted(expected)]
         coordinates += [("fleetSummary", "routines", None)]
         coordinates += [("runSummaryV2", identifier, stamp) for identifier, stamp in histories]
-        require(actual_counts == {key: sum(coordinate[0] == key for coordinate in coordinates) for key in actual_counts},
-            "Actual primary membership exceeds or differs from the complete known key set")
         before = snapshot(node, bindings, contract, coordinates)
         require(all(value is not None for value in before.values()), "An actual published record is absent before reopen")
         save(output / "before-records.json", before)

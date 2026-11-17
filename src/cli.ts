@@ -57,7 +57,6 @@ import { runRoutine } from "./runner.ts";
 import { startServer } from "./server.ts";
 import { loadProjectConfig } from "./project-config.ts";
 import { deliverFleetStatus, publishFleetStatus, readFleetStatus, type DeliveryRecipient } from "./publish-status.ts";
-import { newLastDbPublisherClient } from "./status-client.ts";
 import { initializeStatusSchemas } from "./status-setup.ts";
 import { canonicalDefinition, SCHEMAS, type SchemaKey } from "./status-schema.ts";
 import { initRoutinesSentry } from "./observability.ts";
@@ -87,7 +86,7 @@ Commands:
                               Exit 0. Best-effort; does not fail the caller.
   logs <id>                   show recent runs for a routine (--json, --path, --tail)
   publish-status              write slim fleet status records to LastDB (--json)
-  init-status                 explicitly install published schema-owned fleet definitions
+  init-status                 record the exact fleet schema names for this home
   read-status                 read and validate the bounded fleet view (--json)
   deliver-status              publish + stage a fleet-status delivery; --approve sends it
   hygiene                     mechanical cleanup (prune runs/memory, daemon check,
@@ -592,7 +591,7 @@ async function cmdInitStatus(rest: string[]): Promise<number> {
     }
     return 0;
   }
-  const result = await initializeStatusSchemas(newLastDbPublisherClient());
+  const result = initializeStatusSchemas();
   console.log(values.json ? JSON.stringify(result, null, 2) : "Fleet schemas are configured.");
   return 0;
 }

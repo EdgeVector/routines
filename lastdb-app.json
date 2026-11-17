@@ -1,6 +1,6 @@
 {
   "app_id": "routines",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "source": "https://github.com/EdgeVector/routines.git",
   "metadata": {
     "display_name": "routines",
@@ -18,8 +18,16 @@
       "descriptive_name": "RoutineStatus",
       "purpose_statement": "One slim status row per routine for admin delivery",
       "schema_type": "Hash",
-      "key": {
-        "hash_field": "routine_identifier"
+      "record_keys": {
+        "primary": {
+          "kind": "hash"
+        },
+        "alternates": {
+          "by_fleet": {
+            "kind": "hash_range",
+            "range_type": "String"
+          }
+        }
       },
       "fields": [
         "routine_fleet_bucket_key",
@@ -203,28 +211,6 @@
           "sensitivity_level": 0,
           "data_domain": "routines"
         }
-      },
-      "alternate_keys": {
-        "by_fleet": {
-          "hash_field": "routine_fleet_bucket_key",
-          "range_field": null,
-          "range_separator": "#",
-          "range_parts": [
-            {
-              "field": "routine_schedule_status_text",
-              "format": "text"
-            },
-            {
-              "field": "routine_display_group_identifier",
-              "format": "text"
-            },
-            {
-              "field": "routine_identifier",
-              "format": "text"
-            }
-          ],
-          "missing": "reject"
-        }
       }
     },
     {
@@ -233,9 +219,12 @@
       "descriptive_name": "RoutineRunSummaryV2",
       "purpose_statement": "A bounded run summary keyed by routine and run stamp; each row stays below 8192 bytes and log_tail stays below 2048 bytes",
       "schema_type": "HashRange",
-      "key": {
-        "hash_field": "routine_identifier",
-        "range_field": "routine_run_stamp"
+      "record_keys": {
+        "primary": {
+          "kind": "hash_range",
+          "range_type": "String"
+        },
+        "alternates": {}
       },
       "fields": [
         "routine_identifier",
@@ -314,8 +303,7 @@
           "sensitivity_level": 0,
           "data_domain": "routines"
         }
-      },
-      "alternate_keys": {}
+      }
     },
     {
       "name": "FleetSummary",
@@ -323,8 +311,11 @@
       "descriptive_name": "FleetSummary",
       "purpose_statement": "A bounded fleet manifest with counts and a digest; each row stays below 4096 bytes",
       "schema_type": "Hash",
-      "key": {
-        "hash_field": "routine_fleet_identifier"
+      "record_keys": {
+        "primary": {
+          "kind": "hash"
+        },
+        "alternates": {}
       },
       "fields": [
         "routine_fleet_identifier",
@@ -431,10 +422,22 @@
           "sensitivity_level": 0,
           "data_domain": "routines"
         }
-      },
-      "alternate_keys": {}
+      }
     }
   ],
+  "access": {
+    "read": [
+      "routines/RoutineStatus",
+      "routines/RoutineRunSummaryV2",
+      "routines/FleetSummary"
+    ],
+    "write": [
+      "routines/RoutineStatus",
+      "routines/RoutineRunSummaryV2",
+      "routines/FleetSummary"
+    ],
+    "extensions": []
+  },
   "install": {
     "prepare": [
       {
