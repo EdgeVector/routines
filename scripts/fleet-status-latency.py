@@ -267,7 +267,8 @@ def stored_key_fields(key, contract):
 def snapshot(node, bindings, contract, coordinates):
     queries = []
     for key, address, range_value in coordinates:
-        queries.append({"schema_name": bindings[key], "fields": contract[key]["definition"]["fields"],
+        # LastDB removed the query field projection: a read returns the whole record.
+        queries.append({"schema_name": bindings[key],
             "filter": {"HashKey": address} if range_value is None else {"HashRangeKey": {"hash": address, "range": range_value}},
             "limit": 2, "response_format": "full"})
     observed = {}
@@ -290,7 +291,7 @@ def snapshot(node, bindings, contract, coordinates):
                 continue
             row = response["results"][0]
             require(row.get("key") == {"hash": address, "range": range_value}, "A known-key snapshot returned different primary coordinates")
-            declared, present = set(batch[offset]["fields"]), set(row["fields"])
+            declared, present = set(contract[key]["definition"]["fields"]), set(row["fields"])
             required, hash_wire, range_wire = stored_key_fields(key, contract)
             if not required <= present or not present <= declared:
                 save(node.output / "failed-known-key-snapshot.json", {"coordinate": [key, address, range_value],
