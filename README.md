@@ -419,7 +419,7 @@ The installer places the three schemas from `lastdb-app.json`. `init-status` rec
 The primary-reset restrictions remain in force. These commands do not authorize a primary change.
 
 `init-status` saves the three exact schema names. It does not contact LastDB.
-`lastdb-app.json` lists the same three definitions, with every field typed, because a registry app lists every schema it declares.
+`lastdb-app.json` lists the same three definitions, with every field typed and explicit `record_keys`, because a registry app lists every schema it declares.
 After a schema change, run `bun scripts/write-app-manifest.ts` to regenerate that list from `src/status-schema.ts`.
 Definitions must already exist in schema service under the registered app owner.
 Generic historical field names do not pass the current canonical-name policy.

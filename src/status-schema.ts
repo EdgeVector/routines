@@ -4,19 +4,22 @@ import { createHash } from "node:crypto";
 export type SchemaKey = "status" | "fleetSummary" | "runSummaryV2";
 export type FieldType = "String" | { Array: "String" };
 
+export interface RecordKeyDefinition {
+  kind: "hash" | "hash_range";
+  range_type?: "String";
+}
+
 export interface SchemaDefinition {
   name: string;
   owner_app_id: string;
   descriptive_name: string;
   purpose_statement: string;
   schema_type: "Hash" | "HashRange";
-  key: { hash_field: string; range_field?: string };
+  record_keys: { primary: RecordKeyDefinition; alternates: Record<string, RecordKeyDefinition> };
   fields: string[];
   field_types: Record<string, FieldType>;
   field_descriptions: Record<string, string>;
   field_data_classifications: Record<string, { sensitivity_level: number; data_domain: string }>;
-  alternate_keys?: Record<string, { hash_field: string; range_field: null; range_separator: string;
-    range_parts: Array<{ field: string; format: "text" }>; missing: "reject" }>;
 }
 
 export const STATUS_FIELDS = [
@@ -98,20 +101,16 @@ export const SCHEMAS: Record<SchemaKey, SchemaDefinition> = {
     "RoutineStatus",
     "One slim status row per routine for admin delivery",
     [...STATUS_FIELDS],
-    "id",
   ),
   fleetSummary: schema(
     "FleetSummary",
     `A bounded fleet manifest with counts and a digest; each row stays below ${FLEET_SUMMARY_MAX_BYTES} bytes`,
     [...FLEET_SUMMARY_FIELDS],
-    "fleet_id",
   ),
   runSummaryV2: hashRangeSchema(
     "RoutineRunSummaryV2",
     `A bounded run summary keyed by routine and run stamp; each row stays below ${RUN_SUMMARY_V2_MAX_BYTES} bytes and log_tail stays below ${RUN_SUMMARY_LOG_TAIL_MAX_BYTES} bytes`,
     [...RUN_SUMMARY_V2_FIELDS],
-    "id",
-    "stamp",
   ),
 };
 
@@ -192,22 +191,21 @@ export function canonicalDefinition(key: SchemaKey): SchemaDefinition {
   };
   return {
     ...source,
-    key: { hash_field: name(source.key.hash_field), ...(source.key.range_field ? { range_field: name(source.key.range_field) } : {}) },
     fields: source.fields.map(name),
     field_types: Object.fromEntries(source.fields.map((field) => [name(field), source.field_types[field]!])),
     field_descriptions: Object.fromEntries(source.fields.map((field) => [name(field), rules[field]![1]])),
     field_data_classifications: Object.fromEntries(source.fields.map((field) => [name(field), source.field_data_classifications[field]!])),
-    alternate_keys: key === "status" ? {
-      by_fleet: { hash_field: name(FLEET_ALTERNATE.hashField), range_field: null, range_separator: "#",
-        range_parts: FLEET_ALTERNATE.rangeFields.map((field) => ({ field: name(field), format: "text" })), missing: "reject" },
-    } : {},
+    record_keys: key === "status" ? {
+      primary: { kind: "hash" },
+      alternates: { by_fleet: { kind: "hash_range", range_type: "String" } },
+    } : source.record_keys,
   };
 }
 
 /** Local checksum of a published definition. It is not the wire address. */
 export function definitionIdentity(schema: SchemaDefinition): string {
   const fields = [...new Set(schema.fields)].sort().join(",");
-  return createHash("sha256").update(`app:${schema.owner_app_id}:${schema.descriptive_name}:${fields}:key:${schema.key.hash_field}:${schema.key.range_field ?? ""}`).digest("hex");
+  return createHash("sha256").update(`app:${schema.owner_app_id}:${schema.descriptive_name}:${fields}:keys:${JSON.stringify(schema.record_keys)}`).digest("hex");
 }
 
 export function wireFields(key: SchemaKey, fields: Record<string, string>): Record<string, string> {
@@ -236,14 +234,14 @@ export function localFields(key: SchemaKey, fields: Record<string, string>): Rec
   }));
 }
 
-function schema(name: string, purpose: string, fields: string[], hashField: string): SchemaDefinition {
+function schema(name: string, purpose: string, fields: string[]): SchemaDefinition {
   return {
     name,
     owner_app_id: ROUTINES_APP_ID,
     descriptive_name: name,
     purpose_statement: purpose,
     schema_type: "Hash",
-    key: { hash_field: hashField },
+    record_keys: { primary: { kind: "hash" }, alternates: {} },
     fields,
     field_types: Object.fromEntries(fields.map((field) => [field, "String"])) as Record<string, FieldType>,
     field_descriptions: Object.fromEntries(fields.map((field) => [field, field.replaceAll("_", " ")])),
@@ -253,17 +251,11 @@ function schema(name: string, purpose: string, fields: string[], hashField: stri
   };
 }
 
-function hashRangeSchema(
-  name: string,
-  purpose: string,
-  fields: string[],
-  hashField: string,
-  rangeField: string,
-): SchemaDefinition {
-  const definition = schema(name, purpose, fields, hashField);
+function hashRangeSchema(name: string, purpose: string, fields: string[]): SchemaDefinition {
+  const definition = schema(name, purpose, fields);
   return {
     ...definition,
     schema_type: "HashRange",
-    key: { hash_field: hashField, range_field: rangeField },
+    record_keys: { primary: { kind: "hash_range", range_type: "String" }, alternates: {} },
   };
 }
