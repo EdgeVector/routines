@@ -160,7 +160,7 @@ def cli(args, binary, node, home, verb, *flags, allow_failure=False):
                 configured = json.loads((home / "state/status-schemas.json").read_text())
                 limit = max(1, min(128, 5000 // (16 * (1 + 2 * len(args.contract["status"]["definition"]["fields"])))))
                 queries = [{"schema_name": configured["schemas"]["status"]["runtime"],
-                    "fields": args.contract["status"]["definition"]["fields"], "filter": {"HashKey": f"routines#{bucket:02x}"},
+                    "filter": {"HashKey": f"routines#{bucket:02x}"},
                     "key_name": "by_fleet", "limit": limit} for bucket in range(16)]
                 save(node.output / "failed-native-read.json", {"queries": queries, "actual_reply": node.call("/api/queries/batch", {"queries": queries})[0]})
                 save(node.output / "failed-read-node-status.json", node.call("/api/status")[0])
@@ -267,7 +267,8 @@ def stored_key_fields(key, contract):
 def snapshot(node, bindings, contract, coordinates):
     queries = []
     for key, address, range_value in coordinates:
-        queries.append({"schema_name": bindings[key], "fields": contract[key]["definition"]["fields"],
+        # LastDB removed the query field projection: a read returns the whole record.
+        queries.append({"schema_name": bindings[key],
             "filter": {"HashKey": address} if range_value is None else {"HashRangeKey": {"hash": address, "range": range_value}},
             "limit": 2, "response_format": "full"})
     observed = {}
@@ -278,15 +279,19 @@ def snapshot(node, bindings, contract, coordinates):
         for offset, item in enumerate(reply["results"]):
             key, address, range_value = coordinates[start + offset]
             response = item.get("response", {})
-            require(item.get("status") == 200 and response.get("ok") is True
-                and response.get("has_more") is False and len(response.get("results", [])) <= 1, "A known-key snapshot is unresolved or ambiguous")
+            if not (item.get("status") == 200 and response.get("ok") is True
+                    and response.get("has_more") is False and len(response.get("results", [])) <= 1):
+                # Keep the node's answer. Without it the failure names no cause.
+                save(node.output / "failed-known-key-snapshot.json", {"coordinate": [key, address, range_value],
+                    "query": batch[offset], "actual_result": item})
+                raise RuntimeError("A known-key snapshot is unresolved or ambiguous; see failed-known-key-snapshot.json")
             identity = json.dumps([key, address, range_value])
             if not response["results"]:
                 observed[identity] = None
                 continue
             row = response["results"][0]
             require(row.get("key") == {"hash": address, "range": range_value}, "A known-key snapshot returned different primary coordinates")
-            declared, present = set(batch[offset]["fields"]), set(row["fields"])
+            declared, present = set(contract[key]["definition"]["fields"]), set(row["fields"])
             required, hash_wire, range_wire = stored_key_fields(key, contract)
             if not required <= present or not present <= declared:
                 save(node.output / "failed-known-key-snapshot.json", {"coordinate": [key, address, range_value],
@@ -323,13 +328,12 @@ def field_volume(observed, contract):
 
 
 def native_pages(node, binding, contract, expected_rows):
-    fields = contract["status"]["definition"]["fields"]
     names = contract["status"]["field_map"]
     observed = []
     for bucket in range(16):
         key, cursor, previous, seen = f"routines#{bucket:02x}", None, None, set()
         for page in range(10000):
-            request = {"schema_name": binding, "fields": fields, "filter": {"HashKey": key},
+            request = {"schema_name": binding, "filter": {"HashKey": key},
                 "key_name": "by_fleet", "limit": 7, "response_format": "full"}
             if cursor is not None:
                 request["cursor"] = cursor

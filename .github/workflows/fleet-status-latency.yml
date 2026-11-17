@@ -39,33 +39,24 @@ jobs:
           ref: ${{ env.APP_BEFORE }}
           path: control
           persist-credentials: false
-      - name: Fetch the latest lastdb nightly
+      - name: Fetch and verify the latest lastdb nightly
+        id: lastdb
+        uses: EdgeVector/.github/lastdb-node@9e14e0a569c77c7e7229ff9b6e00664c597ccabe
+        with:
+          start: "false"
+      - name: Name the daemon and the command
         id: nightly
         env:
-          GH_TOKEN: ${{ github.token }}
+          LASTDBD: ${{ steps.lastdb.outputs.lastdbd }}
+          LASTDB: ${{ steps.lastdb.outputs.lastdb }}
+          TAG: ${{ steps.lastdb.outputs.tag }}
+          OID: ${{ steps.lastdb.outputs.revision }}
+          VERSION: ${{ steps.lastdb.outputs.version }}
+          SHA256: ${{ steps.lastdb.outputs.sha256 }}
         shell: bash
         run: |
           set -euo pipefail
-          tag="$(gh release list -R EdgeVector/lastdb --exclude-drafts --limit 30 \
-            --json tagName,publishedAt --jq '[.[] | select(.tagName | startswith("nightly-"))] | sort_by(.publishedAt) | last | .tagName')"
-          test -n "$tag" && test "$tag" != null
-          dir="$RUNNER_TEMP/lastdb-nightly"
-          mkdir -p "$dir"
-          gh release download "$tag" -R EdgeVector/lastdb -D "$dir" \
-            -p 'lastdb-x86_64-unknown-linux-gnu.tar.gz' -p 'lastdb-x86_64-unknown-linux-gnu.manifest.json' -p SHA256SUMS.txt
-          (cd "$dir" && grep ' lastdb-x86_64-unknown-linux-gnu.tar.gz$' SHA256SUMS.txt | sha256sum -c -)
-          tar -xzf "$dir/lastdb-x86_64-unknown-linux-gnu.tar.gz" -C "$dir"
-          for name in lastdb lastdbd; do
-            want="$(jq -r --arg n "$name" '.binaries[] | select(.name == $n) | .sha256' "$dir/lastdb-x86_64-unknown-linux-gnu.manifest.json")"
-            test "$(sha256sum "$dir/$name" | cut -d' ' -f1)" = "$want"
-          done
-          oid="$(jq -r .source_git_oid "$dir/lastdb-x86_64-unknown-linux-gnu.manifest.json")"
-          sum="$(grep ' lastdb-x86_64-unknown-linux-gnu.tar.gz$' "$dir/SHA256SUMS.txt" | cut -d' ' -f1)"
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "oid=$oid" >> "$GITHUB_OUTPUT"
-          echo "lastdbd=$dir/lastdbd" >> "$GITHUB_OUTPUT"
-          echo "lastdb=$dir/lastdb" >> "$GITHUB_OUTPUT"
-          printf '### LastDB under test\n\nNightly `%s` (source `%s`), Linux tarball sha256 `%s`.\n' "$tag" "$oid" "$sum" >> "$GITHUB_STEP_SUMMARY"
+          printf 'tag=%s\noid=%s\nlastdbd=%s\nlastdb=%s\n' "$TAG" "$OID" "$LASTDBD" "$LASTDB" >> "$GITHUB_OUTPUT"
       # The node and artifact helpers come from the same source as the nightly daemon.
       # Cleanup receipt checks live in scripts/cleanup.py. lastdb no longer ships scripts/disk_v2.
       - uses: actions/checkout@v4
@@ -144,9 +135,9 @@ jobs:
           ARTIFACT_SHA256: ${{ steps.measurements.outputs.artifact-digest }}
         run: |
           set -euo pipefail
-          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID" > "$RUNNER_TEMP/routines-artifact-metadata.json"
+          # The nightly artifact.py reads ARTIFACT_ID itself. It no longer takes --metadata.
           python3 lastdb/scripts/benchmarks/artifact.py \
-            --metadata "$RUNNER_TEMP/routines-artifact-metadata.json" --output "$RUNNER_TEMP/routines-artifact-receipt"
+            --output "$RUNNER_TEMP/routines-artifact-receipt"
           gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > "$RUNNER_TEMP/routines-artifact.zip"
           printf '%s  %s\n' "${ARTIFACT_SHA256#sha256:}" "$RUNNER_TEMP/routines-artifact.zip" | sha256sum --check
           unzip -t "$RUNNER_TEMP/routines-artifact.zip" > /dev/null
