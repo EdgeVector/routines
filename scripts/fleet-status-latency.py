@@ -278,8 +278,12 @@ def snapshot(node, bindings, contract, coordinates):
         for offset, item in enumerate(reply["results"]):
             key, address, range_value = coordinates[start + offset]
             response = item.get("response", {})
-            require(item.get("status") == 200 and response.get("ok") is True
-                and response.get("has_more") is False and len(response.get("results", [])) <= 1, "A known-key snapshot is unresolved or ambiguous")
+            if not (item.get("status") == 200 and response.get("ok") is True
+                    and response.get("has_more") is False and len(response.get("results", [])) <= 1):
+                # Keep the node's answer. Without it the failure names no cause.
+                save(node.output / "failed-known-key-snapshot.json", {"coordinate": [key, address, range_value],
+                    "query": batch[offset], "actual_result": item})
+                raise RuntimeError("A known-key snapshot is unresolved or ambiguous; see failed-known-key-snapshot.json")
             identity = json.dumps([key, address, range_value])
             if not response["results"]:
                 observed[identity] = None
