@@ -160,7 +160,7 @@ def cli(args, binary, node, home, verb, *flags, allow_failure=False):
                 configured = json.loads((home / "state/status-schemas.json").read_text())
                 limit = max(1, min(128, 5000 // (16 * (1 + 2 * len(args.contract["status"]["definition"]["fields"])))))
                 queries = [{"schema_name": configured["schemas"]["status"]["runtime"],
-                    "fields": args.contract["status"]["definition"]["fields"], "filter": {"HashKey": f"routines#{bucket:02x}"},
+                    "filter": {"HashKey": f"routines#{bucket:02x}"},
                     "key_name": "by_fleet", "limit": limit} for bucket in range(16)]
                 save(node.output / "failed-native-read.json", {"queries": queries, "actual_reply": node.call("/api/queries/batch", {"queries": queries})[0]})
                 save(node.output / "failed-read-node-status.json", node.call("/api/status")[0])
@@ -328,13 +328,12 @@ def field_volume(observed, contract):
 
 
 def native_pages(node, binding, contract, expected_rows):
-    fields = contract["status"]["definition"]["fields"]
     names = contract["status"]["field_map"]
     observed = []
     for bucket in range(16):
         key, cursor, previous, seen = f"routines#{bucket:02x}", None, None, set()
         for page in range(10000):
-            request = {"schema_name": binding, "fields": fields, "filter": {"HashKey": key},
+            request = {"schema_name": binding, "filter": {"HashKey": key},
                 "key_name": "by_fleet", "limit": 7, "response_format": "full"}
             if cursor is not None:
                 request["cursor"] = cursor
