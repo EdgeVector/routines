@@ -54,7 +54,7 @@ import {
 } from "./harness-outage.ts";
 import type { RoutineEntry } from "./registry.ts";
 import { buildRoutineAttributionEnv, resolveDispatchPrompt } from "./prompt.ts";
-import { runsDir } from "./paths.ts";
+import { runsDir, withoutLastDbAppIdentity } from "./paths.ts";
 import { writeHeartbeat, type HeartbeatOutcome } from "./heartbeat.ts";
 import {
   filterBenignHarnessNoise,
@@ -967,7 +967,7 @@ async function runOnce(
       /* ignore */
     }
   }
-  const childEnv = filterHarnessEnv(
+  const childEnv = withoutLastDbAppIdentity(filterHarnessEnv(
     entry.harness,
     enrichWorktreeCleanupLivenessEnv(
       entry.id,
@@ -979,7 +979,7 @@ async function runOnce(
         }),
       ),
     ),
-  );
+  ));
 
   // Optional zero-LLM gate: skip expensive harness when the gate says so.
   // Contract (last-stack-kanban-pickup-gate and friends):

@@ -9,7 +9,7 @@ import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "no
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-import { daemonLogDir, routinesHome } from "./paths.ts";
+import { daemonLogDir, routinesHome, withoutLastDbAppIdentity } from "./paths.ts";
 
 export const LAUNCHD_LABEL = "com.edgevector.routinesd";
 
@@ -358,7 +358,7 @@ export function writePlist(opts: PlistOptions): string {
 export type LaunchctlRunner = (args: string[]) => void;
 
 function systemLaunchctl(args: string[]): void {
-  execFileSync("launchctl", args, { stdio: "pipe" });
+  execFileSync("launchctl", args, { stdio: "pipe", env: withoutLastDbAppIdentity() });
 }
 
 function daemonLoaded(uid: number, runLaunchctl: LaunchctlRunner): boolean {
@@ -426,7 +426,7 @@ export function uninstallDaemon(): InstallResult {
   const uid = process.getuid?.() ?? 0;
   let msg = "";
   try {
-    execFileSync("launchctl", ["bootout", `gui/${uid}/${LAUNCHD_LABEL}`], { stdio: "pipe" });
+    execFileSync("launchctl", ["bootout", `gui/${uid}/${LAUNCHD_LABEL}`], { stdio: "pipe", env: withoutLastDbAppIdentity() });
     msg = `booted out gui/${uid}/${LAUNCHD_LABEL}`;
   } catch (err) {
     msg = `bootout skipped: ${(err as Error).message}`;
@@ -528,11 +528,12 @@ export function installFreezeWatch(opts: {
     try {
       execFileSync("launchctl", ["bootout", `gui/${uid}/${FREEZE_WATCH_LAUNCHD_LABEL}`], {
         stdio: "ignore",
+        env: withoutLastDbAppIdentity(),
       });
     } catch {
       /* not loaded */
     }
-    execFileSync("launchctl", ["bootstrap", `gui/${uid}`, p], { stdio: "pipe" });
+    execFileSync("launchctl", ["bootstrap", `gui/${uid}`, p], { stdio: "pipe", env: withoutLastDbAppIdentity() });
     return {
       plistPath: p,
       loaded: true,
@@ -556,6 +557,7 @@ export function uninstallFreezeWatch(): InstallResult {
   try {
     execFileSync("launchctl", ["bootout", `gui/${uid}/${FREEZE_WATCH_LAUNCHD_LABEL}`], {
       stdio: "pipe",
+      env: withoutLastDbAppIdentity(),
     });
     msg = `booted out gui/${uid}/${FREEZE_WATCH_LAUNCHD_LABEL}`;
   } catch {

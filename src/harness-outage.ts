@@ -35,7 +35,7 @@ import { join } from "node:path";
 import { claudeKeychainReadRefused, DEFAULT_CLAUDE_OAUTH_LOCATOR } from "./claude-auth.ts";
 import { buildRouteChain, type RouteStep } from "./fallback.ts";
 import { isHarness, loadAll, type Harness, type RoutineEntry } from "./registry.ts";
-import { routinesHome } from "./paths.ts";
+import { routinesHome, withoutLastDbAppIdentity } from "./paths.ts";
 import { parseRRule } from "./rrule.ts";
 import type { RunResult } from "./runner.ts";
 
@@ -713,7 +713,7 @@ function upsertSituation(
     input: JSON.stringify(record) + "\n",
     encoding: "utf8",
     timeout: 30_000,
-    env: process.env,
+    env: withoutLastDbAppIdentity(),
   });
   if (res.error) return { ok: false, detail: `situations spawn: ${res.error.message}` };
   if (res.status !== 0) {
@@ -744,10 +744,10 @@ function notifyTelegram(
   const res = spawnSync(bin, ["notify", "--priority", "high", msg], {
     encoding: "utf8",
     timeout: 30_000,
-    env: {
+    env: withoutLastDbAppIdentity({
       ...process.env,
       PATH: `${join(routinesHome(), "..", ".local", "bin")}:${process.env.PATH ?? ""}`,
-    },
+    }),
   });
   if (res.error) return { ok: false, detail: `ra spawn: ${res.error.message}` };
   if (res.status !== 0) {

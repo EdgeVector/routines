@@ -35,6 +35,8 @@
 import { spawn, spawnSync } from "node:child_process";
 import { performance } from "node:perf_hooks";
 
+import { withoutLastDbAppIdentity } from "./paths.ts";
+
 /** Severities whose active Situations may hard-fence a routine via scope_routines. */
 const FENCING_SEVERITIES = new Set(["p0", "p1"]);
 
@@ -98,6 +100,7 @@ function runSituations(args: string[], timeoutMs = 30_000): {
     timeout: remainingMs,
     // A CLI that ignores SIGTERM must not outlive the caller's route lease.
     killSignal: "SIGKILL",
+    env: withoutLastDbAppIdentity(),
   });
   if (performance.now() >= deadline) {
     return { ok: false, stdout: "", error: `${bin}: read timed out after ${timeoutMs}ms` };
@@ -388,7 +391,7 @@ function runSituationsAsync(
     const bin = situationsBinary();
     let child: ReturnType<typeof spawn>;
     try {
-      child = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"] });
+      child = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"], env: withoutLastDbAppIdentity() });
     } catch (err) {
       resolve({ ok: false, stdout: "", error: `${bin}: ${(err as Error).message}` });
       return;

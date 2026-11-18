@@ -6,6 +6,8 @@ import { spawnSync } from "node:child_process";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+import { withoutLastDbAppIdentity } from "./paths.ts";
+
 export type ProjectConfig = {
   /** Absolute workspace root (parent of repo checkouts). */
   workspaceRoot?: string;
@@ -66,7 +68,7 @@ function tryCmd(bin: string, args: string[]): string | null {
   try {
     const r = spawnSync(bin, args, {
       encoding: "utf8",
-      env: process.env,
+      env: withoutLastDbAppIdentity(),
       timeout: 8_000,
     });
     if (r.status !== 0) return null;

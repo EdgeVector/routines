@@ -52,7 +52,7 @@ import { DIFFICULTIES, difficultyMatrixSource, isDifficulty } from "./difficulty
 import { HARNESSES, isHarness } from "./registry.ts";
 import { loadAll, loadEntry, resolvePrompt, type RoutineEntry } from "./registry.ts";
 import { collectStatus } from "./status.ts";
-import { registryDir, routinesHome, runsDir } from "./paths.ts";
+import { registryDir, routinesHome, runsDir, withoutLastDbAppIdentity } from "./paths.ts";
 import { runRoutine } from "./runner.ts";
 import { startServer } from "./server.ts";
 import { loadProjectConfig } from "./project-config.ts";
@@ -1231,7 +1231,7 @@ function postFreezeNotice(kind: string, v: FreezeVerdict, nowIso: string): void 
         "--summary",
         summary,
       ],
-      { stdio: "pipe", timeout: 20_000 },
+      { stdio: "pipe", timeout: 20_000, env: withoutLastDbAppIdentity() },
     );
   } catch (err) {
     // Never fatal. The exit code and the printed line already carry the verdict.

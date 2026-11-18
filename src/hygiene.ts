@@ -19,7 +19,7 @@ import {
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-import { daemonLogDir, routinesHome } from "./paths.ts";
+import { daemonLogDir, routinesHome, withoutLastDbAppIdentity } from "./paths.ts";
 import {
   isExecutableWrapper,
   isThrottledProcessType,
@@ -269,6 +269,7 @@ function probeDaemon(): HygieneResult["daemon"] {
     const out = execFileSync("launchctl", ["list", label], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
+      env: withoutLastDbAppIdentity(),
     });
     // launchctl list prints a small dict-ish block with "PID" = N;
     const pidM = out.match(/"PID"\s*=\s*(\d+)/);
@@ -328,6 +329,7 @@ function probePromptDoctor(): HygieneResult["promptDoctor"] {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
       timeout: 60_000,
+      env: withoutLastDbAppIdentity(),
     });
   } catch (err) {
     const e = err as { status?: number; stdout?: string; code?: string };
@@ -519,7 +521,7 @@ export function tryArtifactDaemonRefresh(
       : execFileSync(
           "launchctl",
           ["print", `gui/${uid}/com.edgevector.routinesd`],
-          { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+          { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], env: withoutLastDbAppIdentity() },
         );
   } catch (err) {
     const message = (err as Error).message;
@@ -1062,11 +1064,12 @@ export function installHygieneDaemon(opts: {
     try {
       execFileSync("launchctl", ["bootout", `gui/${uid}/${HYGIENE_LAUNCHD_LABEL}`], {
         stdio: "ignore",
+        env: withoutLastDbAppIdentity(),
       });
     } catch {
       /* not loaded */
     }
-    execFileSync("launchctl", ["bootstrap", `gui/${uid}`, p], { stdio: "pipe" });
+    execFileSync("launchctl", ["bootstrap", `gui/${uid}`, p], { stdio: "pipe", env: withoutLastDbAppIdentity() });
     return {
       plistPath: p,
       loaded: true,
@@ -1090,6 +1093,7 @@ export function uninstallHygieneDaemon(): HygieneInstallResult {
   try {
     execFileSync("launchctl", ["bootout", `gui/${uid}/${HYGIENE_LAUNCHD_LABEL}`], {
       stdio: "pipe",
+      env: withoutLastDbAppIdentity(),
     });
     msg = `booted out gui/${uid}/${HYGIENE_LAUNCHD_LABEL}`;
   } catch {

@@ -2,6 +2,8 @@ import { spawnSync } from "node:child_process";
 import { homedir, userInfo } from "node:os";
 import { join } from "node:path";
 
+import { withoutLastDbAppIdentity } from "./paths.ts";
+
 type Probe = {
   status: number | null;
   stdout: string;
@@ -99,10 +101,12 @@ export function enrichWorktreeCleanupLivenessEnv(
   const lsof = spawnSync("/usr/sbin/lsof", ["-nP", "-a", "-u", username, "-d", "cwd", "-Fn"], {
     encoding: "utf8",
     maxBuffer: 8_000_000,
+    env: withoutLastDbAppIdentity(base),
   });
   const ps = spawnSync("/bin/ps", ["-axo", "pid=,comm=,command="], {
     encoding: "utf8",
     maxBuffer: 8_000_000,
+    env: withoutLastDbAppIdentity(base),
   });
 
   return deriveWorktreeLivenessEnv(entryId, base, {

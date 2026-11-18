@@ -4,7 +4,7 @@ import { existsSync, lstatSync, readFileSync, realpathSync, writeFileSync } from
 import { join, relative, resolve } from "node:path";
 import { validSessionId } from "./execution-record.ts";
 import { resolvePrompt, type RoutineEntry } from "./registry.ts";
-import { runsDir } from "./paths.ts";
+import { runsDir, withoutLastDbAppIdentity } from "./paths.ts";
 
 export interface WorktreeIdentity { cwd: string; gitDir: string; head: string; digest: string }
 export function recoveryTaskHash(entry: RoutineEntry): string {
@@ -13,7 +13,7 @@ export function recoveryTaskHash(entry: RoutineEntry): string {
 export function worktreeIdentity(cwd: string): WorktreeIdentity | null {
   try {
     const root = realpathSync(cwd);
-    const git = (...args: string[]) => execFileSync("git", ["-C", root, ...args], { timeout: 10_000, maxBuffer: 32 * 1024 * 1024, stdio: ["ignore", "pipe", "ignore"] });
+    const git = (...args: string[]) => execFileSync("git", ["-C", root, ...args], { timeout: 10_000, maxBuffer: 32 * 1024 * 1024, stdio: ["ignore", "pipe", "ignore"], env: withoutLastDbAppIdentity() });
     if (realpathSync(git("rev-parse", "--show-toplevel").toString().trim()) !== root) return null;
     const hash = createHash("sha256");
     hash.update(git("status", "--porcelain=v1", "-z"));
@@ -58,7 +58,7 @@ export function validateResume(entry: RoutineEntry, from: string, cwd: string): 
   if (!current || !meta.recoveryWorktree || JSON.stringify(current) !== JSON.stringify(meta.recoveryWorktree)) throw new Error("resume refused: worktree identity or contents changed");
   const check = spawnSync("/bin/bash", ["-c", entry.resumeCheck], {
     cwd, timeout: 30_000, maxBuffer: 8192, stdio: "ignore",
-    env: { ...process.env, ROUTINES_RESUME_RUN_DIR: dir, ROUTINES_RESUME_SESSION_ID: execution.sessionId },
+    env: withoutLastDbAppIdentity({ ...process.env, ROUTINES_RESUME_RUN_DIR: dir, ROUTINES_RESUME_SESSION_ID: execution.sessionId }),
   });
   if (check.status !== 0 || check.error) throw new Error("resume effect check failed or timed out");
   if (JSON.stringify(worktreeIdentity(cwd)) !== JSON.stringify(current)) throw new Error("resume effect check changed the worktree");
