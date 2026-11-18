@@ -1,4 +1,4 @@
-/** Fleet records go through the LastDB app API. Sharing stays on its own routes. */
+/** Fleet records go through the LastDB app API. */
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { writeFileSync } from "node:fs";
@@ -18,24 +18,10 @@ export interface LastDbPublisherClient {
   queryByHashes(reads: HashRead[]): Promise<HashRow[][]>;
   mutateBatch(mutations: Mutation[]): Promise<void>;
 }
-export interface LastDbDeliveryClient {
-  stageDelivery(request: DeliveryStageRequest): Promise<DeliveryStageResult>;
-  approveDelivery(deliveryId: string): Promise<DeliveryApproveResult>;
-}
-export interface DeliveryStageRequest {
-  recipient_pubkey: string; recipient_display_name?: string;
-  messaging_public_key: string; messaging_pseudonym: string; mode: "snapshot"; max_records: number;
-  legs: Array<{ schema_name: string; fields: string[]; hash_keys?: string[] }>;
-}
-export interface DeliveryStageResult { deliveryId: string; recordCount: number; fields: string[]; note: string }
-export interface DeliveryApproveResult { deliveryId: string; shared: number; messageType: string }
 export class LastDbPublishError extends Error {
   readonly name = "LastDbPublishError";
   constructor(readonly code: string, message: string, readonly response?: { status: number; body: unknown }) { super(message); }
 }
-type Entry = Record<string, unknown>;
-type FetchInit = RequestInit & { unix?: string };
-type LastDbFetch = (input: Parameters<typeof globalThis.fetch>[0], init?: FetchInit) => Promise<Response>;
 export type LastDbClientOptions = { socketPath?: string };
 const BATCH_SIZE = 64;
 const READ_WORK_KEYS = 10_000;
@@ -53,15 +39,6 @@ function hashReadPageLimit(reads: readonly HashRead[]): number {
     return sum + 1 + 2 * fields.size;
   }, 0);
   return Math.max(1, Math.min(128, Math.floor((READ_WORK_KEYS / 2) / keysPerRecord)));
-}
-
-export function object(value: unknown): Entry {
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw new LastDbPublishError("bad_reply", "LastDB returned an invalid object.");
-  return value as Entry;
-}
-export function dataObject(value: unknown): Entry {
-  const body = object(value);
-  return body.data === undefined ? body : object(body.data);
 }
 
 function defaultProfiles(): Record<string, SchemaProfile> {
@@ -233,51 +210,6 @@ function statusAlternate(fields: FieldMap): { by_fleet: { hash: string; range: s
   const hash = fields.fleet_bucket, range = fields.sk;
   if (!hash || !range) throw new LastDbPublishError("alternate_incomplete", "A status write needs its fleet bucket and sort key.");
   return { by_fleet: { hash, range } };
-}
-
-export function newLastDbDeliveryClient(opts: LastDbClientOptions = {}): LastDbDeliveryClient {
-  const request = newSharingCaller(opts);
-  return {
-    async stageDelivery(body) {
-      const reply = dataObject(await request("POST", "/api/sharing/deliver", body));
-      const delivery = object(reply.delivery), preview = object(delivery.preview);
-      if (typeof delivery.delivery_id !== "string" || !delivery.delivery_id || !Number.isSafeInteger(preview.record_count) || !Array.isArray(preview.fields)) {
-        throw new LastDbPublishError("delivery_stage_bad_response", "LastDB did not confirm the staged fleet delivery.");
-      }
-      return { deliveryId: delivery.delivery_id, recordCount: Number(preview.record_count), fields: preview.fields.map(String), note: String(reply.note ?? "") };
-    },
-    async approveDelivery(deliveryId) {
-      const reply = dataObject(await request("POST", `/api/sharing/deliveries/${encodeURIComponent(deliveryId)}/approve`));
-      if (reply.delivery_id !== deliveryId || !Number.isSafeInteger(reply.shared) || typeof reply.message_type !== "string") {
-        throw new LastDbPublishError("delivery_approve_bad_response", "LastDB did not confirm the requested fleet delivery.");
-      }
-      return { deliveryId, shared: Number(reply.shared), messageType: reply.message_type };
-    },
-  };
-}
-
-function newSharingCaller(opts: LastDbClientOptions) {
-  const unix = socketPath(opts);
-  const fetchImpl: LastDbFetch = (input, init) => globalThis.fetch(input, init);
-  return async (method: "GET" | "POST", path: string, body?: unknown): Promise<unknown> => {
-    let response: Response;
-    try {
-      response = await fetchImpl(`http://localhost${path}`, {
-        method, unix, headers: { "X-LastDB-Client": "routines", ...(body === undefined ? {} : { "Content-Type": "application/json" }) },
-        ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-      });
-    } catch {
-      throw new LastDbPublishError("lastdb_unreachable", "LastDB did not complete the fleet request over the configured transport.");
-    }
-    const text = await response.text();
-    let parsed: unknown;
-    try { parsed = JSON.parse(text); }
-    catch { parsed = text; }
-    if (!response.ok) {
-      throw new LastDbPublishError(`lastdb_http_${response.status}`, `LastDB ${method} ${path} returned HTTP ${response.status}.`, { status: response.status, body: parsed });
-    }
-    return parsed;
-  };
 }
 
 // Page selectors only. Field values stay out of the trace.

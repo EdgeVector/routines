@@ -1,6 +1,6 @@
 {
   "app_id": "routines",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "source": "https://github.com/EdgeVector/routines.git",
   "metadata": {
     "display_name": "routines",

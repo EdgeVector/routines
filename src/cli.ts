@@ -56,7 +56,7 @@ import { registryDir, routinesHome, runsDir, withoutLastDbAppIdentity } from "./
 import { runRoutine } from "./runner.ts";
 import { startServer } from "./server.ts";
 import { loadProjectConfig } from "./project-config.ts";
-import { deliverFleetStatus, publishFleetStatus, readFleetStatus, type DeliveryRecipient } from "./publish-status.ts";
+import { publishFleetStatus, readFleetStatus } from "./publish-status.ts";
 import { initializeStatusSchemas } from "./status-setup.ts";
 import { canonicalDefinition, SCHEMAS, type SchemaKey } from "./status-schema.ts";
 import { initRoutinesSentry } from "./observability.ts";
@@ -88,7 +88,6 @@ Commands:
   publish-status              write slim fleet status records to LastDB (--json)
   init-status                 record the exact fleet schema names for this home
   read-status                 read and validate the bounded fleet view (--json)
-  deliver-status              publish + stage a fleet-status delivery; --approve sends it
   hygiene                     mechanical cleanup (prune runs/memory, daemon check,
                               publish-status). No LLM. See --help notes below.
   web                         serve the local dashboard (localhost); --port, --host
@@ -284,8 +283,6 @@ async function main(argv: string[]): Promise<number> {
       return await cmdInitStatus(rest);
     case "read-status":
       return await cmdReadStatus(rest);
-    case "deliver-status":
-      return await cmdDeliverStatus(rest);
     case "hygiene":
       return cmdHygiene(rest);
     case "web":
@@ -651,102 +648,6 @@ async function cmdReadStatus(rest: string[]): Promise<number> {
     `READ routines fleet status captured_at=${result.summary.captured_at} rows=${result.rows.length} attempts=${result.attempts}`,
   );
   return 0;
-}
-
-async function cmdDeliverStatus(rest: string[]): Promise<number> {
-  const { values } = parseArgs({
-    args: rest,
-    options: {
-      json: { type: "boolean" },
-      "dry-run": { type: "boolean" },
-      approve: { type: "boolean" },
-      "bounded-view": { type: "boolean" },
-      runs: { type: "string" },
-      "tail-bytes": { type: "string" },
-      "max-records": { type: "string" },
-      "recipient-pubkey": { type: "string" },
-      "recipient-name": { type: "string" },
-      "messaging-public-key": { type: "string" },
-      "messaging-pseudonym": { type: "string" },
-    },
-    allowPositionals: true,
-  });
-  const runLimit = parsePositiveIntFlag(values.runs, "--runs");
-  if (runLimit instanceof Error) return badFlag(runLimit);
-  const logTailBytes = parsePositiveIntFlag(values["tail-bytes"], "--tail-bytes");
-  if (logTailBytes instanceof Error) return badFlag(logTailBytes);
-  const maxRecords = parsePositiveIntFlag(values["max-records"], "--max-records");
-  if (maxRecords instanceof Error) return badFlag(maxRecords);
-
-  const recipient: DeliveryRecipient = {
-    recipientPubkey: firstString(values["recipient-pubkey"], process.env.ROUTINES_ADMIN_RECIPIENT_PUBKEY),
-    messagingPublicKey: firstString(values["messaging-public-key"], process.env.ROUTINES_ADMIN_MESSAGING_PUBLIC_KEY),
-    messagingPseudonym: firstString(values["messaging-pseudonym"], process.env.ROUTINES_ADMIN_MESSAGING_PSEUDONYM),
-    recipientDisplayName: firstString(values["recipient-name"], process.env.ROUTINES_ADMIN_RECIPIENT_NAME),
-  };
-  const missing = [
-    ["--recipient-pubkey", recipient.recipientPubkey],
-    ["--messaging-public-key", recipient.messagingPublicKey],
-    ["--messaging-pseudonym", recipient.messagingPseudonym],
-  ].filter(([, value]) => !value);
-  if (missing.length > 0) {
-    console.error(
-      `missing ${missing.map(([flag]) => flag).join(", ")} (or ROUTINES_ADMIN_RECIPIENT_PUBKEY / ROUTINES_ADMIN_MESSAGING_PUBLIC_KEY / ROUTINES_ADMIN_MESSAGING_PSEUDONYM)`,
-    );
-    return 2;
-  }
-
-  const result = await deliverFleetStatus({
-    recipient,
-    approve: values.approve === true,
-    dryRun: values["dry-run"] === true,
-    runLimit,
-    logTailBytes,
-    maxRecords,
-    boundedView: values["bounded-view"] === true,
-  });
-  if (values.json) {
-    console.log(JSON.stringify(result, null, 2));
-    return 0;
-  }
-  if (result.dryRun) {
-    console.log(`DRY-RUN routines fleet delivery rows=${result.rows.length} pages=${result.deliveryRequests.length} max_records=${result.deliveryRequest.max_records}`);
-    console.log(`schemas fleet_summary=${result.schemaHashes.fleetSummary} status=${result.schemaHashes.status}`);
-    return 0;
-  }
-  if (!result.staged) {
-    console.error("delivery stage returned no result");
-    return 1;
-  }
-  if (result.approvedPages.length > 0) {
-    const shared = result.approvedPages.reduce((sum, page) => sum + page.shared, 0);
-    console.log(
-      `DELIVERED routines fleet status deliveries=${result.approvedPages.length} shared=${shared} message_type=${result.approvedPages[0]!.messageType}`,
-    );
-  } else {
-    const records = result.stagedPages.reduce((sum, page) => sum + page.recordCount, 0);
-    console.log(
-      `STAGED routines fleet status deliveries=${result.stagedPages.length} records=${records}; re-run with --approve to send`,
-    );
-  }
-  console.log(`schemas fleet_summary=${result.schemaHashes.fleetSummary} status=${result.schemaHashes.status}`);
-  return 0;
-}
-
-function parsePositiveIntFlag(value: string | undefined, name: string): number | undefined | Error {
-  if (value === undefined) return undefined;
-  const parsed = Number(value);
-  if (!Number.isInteger(parsed) || parsed < 1) return new Error(`invalid ${name} ${value}`);
-  return parsed;
-}
-
-function badFlag(err: Error): number {
-  console.error(err.message);
-  return 2;
-}
-
-function firstString(...values: Array<string | undefined>): string {
-  return values.find((value) => value && value.trim())?.trim() ?? "";
 }
 
 function cmdLogs(rest: string[]): number {

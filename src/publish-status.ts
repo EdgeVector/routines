@@ -10,15 +10,14 @@ import { acquireStatusConfigLock, loadStatusSchemas } from "./status-setup.ts";
 import { ROUTINES_APP_ID, ROUTINES_FLEET_ID, FLEET_STATUS_BUCKET_COUNT, ROUTINE_STATUS_MAX_BYTES,
   LAST_OUTCOME_DETAIL_MAX_BYTES, FLEET_SUMMARY_MAX_BYTES, RUN_SUMMARY_V2_MAX_BYTES,
   RUN_SUMMARY_LOG_TAIL_MAX_BYTES, STATUS_FIELDS,
-  RUN_SUMMARY_V2_FIELDS, FLEET_SUMMARY_FIELDS, wireFields, wireFieldNames, type SchemaKey } from "./status-schema.ts";
+  RUN_SUMMARY_V2_FIELDS, FLEET_SUMMARY_FIELDS, wireFields, type SchemaKey } from "./status-schema.ts";
 export { ROUTINES_APP_ID, ROUTINES_FLEET_ID, FLEET_STATUS_BUCKET_COUNT, ROUTINE_STATUS_MAX_BYTES,
   LAST_OUTCOME_DETAIL_MAX_BYTES, FLEET_SUMMARY_MAX_BYTES, RUN_SUMMARY_V2_MAX_BYTES, RUN_SUMMARY_LOG_TAIL_MAX_BYTES } from "./status-schema.ts";
 
-import { newLastDbPublisherClient, newLastDbDeliveryClient, LastDbPublishError,
-  type FieldMap, type LastDbPublisherClient, type LastDbDeliveryClient, type DeliveryStageRequest,
-  type DeliveryStageResult, type DeliveryApproveResult, type HashRow, type Mutation } from "./status-client.ts";
-export { newLastDbPublisherClient, newLastDbDeliveryClient, LastDbPublishError } from "./status-client.ts";
-export type { FieldMap, LastDbPublisherClient, LastDbDeliveryClient, DeliveryStageRequest, DeliveryStageResult, DeliveryApproveResult } from "./status-client.ts";
+import { newLastDbPublisherClient, LastDbPublishError,
+  type FieldMap, type LastDbPublisherClient, type HashRow, type Mutation } from "./status-client.ts";
+export { newLastDbPublisherClient, LastDbPublishError } from "./status-client.ts";
+export type { FieldMap, LastDbPublisherClient } from "./status-client.ts";
 
 export interface PublishStatusOptions {
   now?: Date;
@@ -55,31 +54,6 @@ export interface PublishStatusResult extends FleetPublication {
     fleetSummaries: number;
   };
   dryRun: boolean;
-}
-
-export interface DeliveryRecipient {
-  recipientPubkey: string;
-  messagingPublicKey: string;
-  messagingPseudonym: string;
-  recipientDisplayName?: string;
-}
-
-export interface DeliverStatusOptions extends PublishStatusOptions {
-  recipient: DeliveryRecipient;
-  maxRecords?: number;
-  approve?: boolean;
-  boundedView?: boolean;
-  deliveryClient?: LastDbDeliveryClient;
-}
-
-export interface DeliverStatusResult extends PublishStatusResult {
-  deliveryRequest: DeliveryStageRequest;
-  deliveryRequests: DeliveryStageRequest[];
-  staged: DeliveryStageResult | null;
-  stagedPages: DeliveryStageResult[];
-  approved: DeliveryApproveResult | null;
-  approvedPages: DeliveryApproveResult[];
-  boundedView: FleetReadResult | null;
 }
 
 export interface FleetReadResult {
@@ -293,53 +267,6 @@ async function findStaleRoutineRows(client: LastDbPublisherClient, schema: strin
   return rows.filter((row) => !currentIds.has(requiredField(row.fields, "id")));
 }
 
-export async function deliverFleetStatus(options: DeliverStatusOptions): Promise<DeliverStatusResult> {
-  const publisherClient = options.client ?? newLastDbPublisherClient();
-  const publication = await publishFleetStatus({ ...options, client: publisherClient });
-  const boundedView = !options.dryRun
-    ? await readFleetStatus({ client: publisherClient, schemaHashes: publication.schemaHashes })
-    : null;
-  const deliveryRequests = buildBoundedDeliveryStageRequests({
-    schemaHashes: publication.schemaHashes,
-    recipient: options.recipient,
-    maxRecords: options.maxRecords,
-    rowIds: (boundedView?.rows ?? publication.rows).map((row) => row.id ?? ""),
-  });
-  const deliveryRequest = deliveryRequests[0]!;
-
-  if (options.dryRun) {
-    return {
-      ...publication,
-      deliveryRequest,
-      deliveryRequests,
-      staged: null,
-      stagedPages: [],
-      approved: null,
-      approvedPages: [],
-      boundedView,
-    };
-  }
-
-  const client = options.deliveryClient ?? newLastDbDeliveryClient();
-  const stagedPages: DeliveryStageResult[] = [];
-  const approvedPages: DeliveryApproveResult[] = [];
-  for (const request of deliveryRequests) {
-    const page = await client.stageDelivery(request);
-    stagedPages.push(page);
-    if (options.approve) approvedPages.push(await client.approveDelivery(page.deliveryId));
-  }
-  return {
-    ...publication,
-    deliveryRequest,
-    deliveryRequests,
-    staged: stagedPages[0] ?? null,
-    stagedPages,
-    approved: approvedPages[0] ?? null,
-    approvedPages,
-    boundedView,
-  };
-}
-
 export async function readFleetStatus(options: ReadFleetStatusOptions = {}): Promise<FleetReadResult> {
   const client = options.client ?? newLastDbPublisherClient();
   const schemaHashes = configuredSchemas(client, options.schemaHashes);
@@ -409,86 +336,6 @@ export async function readFleetStatus(options: ReadFleetStatusOptions = {}): Pro
     };
   }
   throw new LastDbPublishError("fleet_view_inconsistent", `Bounded fleet view did not converge: ${lastReason}.`);
-}
-
-const BOUNDED_STATUS_DELIVER_FIELDS = [
-  "fleet_bucket",
-  "sk",
-  "id",
-  "status",
-  "harness",
-  "model",
-  "group_id",
-  "group_label",
-  "next_fire",
-  "last_run",
-  "running",
-  "fenced",
-  "last_outcome",
-  "noop_rate",
-  "useful_rate",
-  "content_digest",
-  "updated_at",
-] as const;
-
-export function buildBoundedDeliveryStageRequest(opts: {
-  schemaHashes: Record<SchemaKey, string>;
-  recipient: DeliveryRecipient;
-  maxRecords?: number;
-  rowIds?: string[];
-}): DeliveryStageRequest {
-  return buildBoundedDeliveryStageRequests(opts)[0]!;
-}
-
-/** Live hourly seal limit is 87382 base64 chars. A HashRange bucket list still
- * serialized the whole 72-row fleet (~118 KiB) on each page. Hash-keyed
- * RoutineStatus batches of 12 match the last successful live slice size. */
-const STATUS_IDS_PER_DELIVERY_PAGE = 12;
-
-/** Deliver explicit primary keys in bounded pages, after the complete by_fleet read. */
-export function buildBoundedDeliveryStageRequests(opts: {
-  schemaHashes: Record<SchemaKey, string>;
-  recipient: DeliveryRecipient;
-  maxRecords?: number;
-  rowIds?: string[];
-}): DeliveryStageRequest[] {
-  const ids = uniqueSortedIds(opts.rowIds ?? []);
-  const chunkSize = positiveInt(opts.maxRecords, STATUS_IDS_PER_DELIVERY_PAGE);
-  const chunks = ids.length === 0 ? [[]] : chunkIds(ids, chunkSize);
-  return chunks.map((chunk) => ({
-    recipient_pubkey: opts.recipient.recipientPubkey,
-    ...(opts.recipient.recipientDisplayName ? { recipient_display_name: opts.recipient.recipientDisplayName } : {}),
-    messaging_public_key: opts.recipient.messagingPublicKey,
-    messaging_pseudonym: opts.recipient.messagingPseudonym,
-    mode: "snapshot" as const,
-    max_records: Math.max(chunk.length + 1, 1),
-    legs: [
-      {
-        schema_name: opts.schemaHashes.fleetSummary,
-        fields: wireFieldNames("fleetSummary", FLEET_SUMMARY_FIELDS),
-        hash_keys: [ROUTINES_FLEET_ID],
-      },
-      ...(chunk.length === 0
-        ? []
-        : [{
-            schema_name: opts.schemaHashes.status,
-            fields: wireFieldNames("status", BOUNDED_STATUS_DELIVER_FIELDS),
-            hash_keys: chunk,
-          }]),
-    ],
-  }));
-}
-
-function uniqueSortedIds(ids: string[]): string[] {
-  return [...new Set(ids.map((id) => id.trim()).filter(Boolean))].sort();
-}
-
-function chunkIds(ids: string[], chunkSize: number): string[][] {
-  const chunks: string[][] = [];
-  for (let offset = 0; offset < ids.length; offset += chunkSize) {
-    chunks.push(ids.slice(offset, offset + chunkSize));
-  }
-  return chunks;
 }
 
 function statusFields(row: StatusRow, capturedAt: string): FieldMap {
