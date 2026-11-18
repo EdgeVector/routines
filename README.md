@@ -433,8 +433,7 @@ routines read-status --json
 ```
 
 `ROUTINES_STATUS_SCHEMA_CONFIG` selects the config path.
-The default is `state/status-schemas.json` under the routines home.
-`LASTDB_APP_DATA` selects that home when the launcher sets it. Otherwise `ROUTINES_HOME` or `~/.routines` does.
+The default is `$ROUTINES_HOME/state/status-schemas.json` (`~/.routines` when `ROUTINES_HOME` is unset).
 
 ### Validation scope
 

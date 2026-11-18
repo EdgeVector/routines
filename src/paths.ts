@@ -1,15 +1,13 @@
 // Filesystem layout for routines state.
 //
 // The registry, run logs, locks, and per-routine state all live under a single
-// home directory. A restricted launch names that directory in LASTDB_APP_DATA.
-// A direct run keeps ROUTINES_HOME, or ~/.routines when that is unset.
+// home directory. It defaults to ~/.routines but is overridable via
+// ROUTINES_HOME for an explicit independent registry and its own run state.
 
 import { homedir } from "node:os";
 import { join } from "node:path";
 
 export function routinesHome(): string {
-  const appData = process.env.LASTDB_APP_DATA;
-  if (appData && appData.length > 0) return appData;
   const override = process.env.ROUTINES_HOME;
   if (override && override.length > 0) return override;
   return join(homedir(), ".routines");

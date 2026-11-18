@@ -1,6 +1,6 @@
 /** Fleet records go through the LastDB app API. Sharing stays on its own routes. */
 import { homedir } from "node:os";
-import { isAbsolute, join, relative } from "node:path";
+import { join } from "node:path";
 import { writeFileSync } from "node:fs";
 import { AppApiError, LastDbClient, TransportError, UnexpectedResponseError, udsTransport, type ErrorEnvelope, type FieldValues, type ReadItem, type ReadResult, type Record as SdkRecord, type WriteItem } from "@lastdb/app-sdk";
 import { FLEET_ALTERNATE, SCHEMA_NAMES, SCHEMAS, localFields, wireFields, type SchemaKey } from "./status-schema.ts";
@@ -280,17 +280,10 @@ function newSharingCaller(opts: LastDbClientOptions) {
   };
 }
 
-function tracePathAllowed(file: string): boolean {
-  const root = process.env.LASTDB_APP_DATA;
-  if (!root) return true;
-  const fromRoot = relative(root, file);
-  return fromRoot === "" || (!fromRoot.startsWith("..") && !isAbsolute(fromRoot));
-}
-
 // Page selectors only. Field values stay out of the trace.
 function recordRangePage(read: HashRead, cursor: string | undefined, limit: number, returned: number, nextCursor: string | null, status: number | null, error: string | null): void {
   const file = process.env.ROUTINES_STATUS_READ_TRACE_FILE;
-  if (!file || !tracePathAllowed(file) || (!read.keyName && !(limit > 2))) return;
+  if (!file || (!read.keyName && !(limit > 2))) return;
   const page = { call_id: process.env.ROUTINES_STATUS_READ_TRACE_ID ?? String(process.pid),
     schema: read.schemaHash, key_name: read.keyName ?? "primary", filter: { HashKey: read.keyHash },
     fields: read.fields, limit, offset: 0, cursor: cursor ?? null, status, returned_count: returned,
