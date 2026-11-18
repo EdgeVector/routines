@@ -234,7 +234,6 @@ routines logs <id>            # recent runs (--path, --tail, --json)
 routines init-status          # record the exact fleet schema names for this home
 routines publish-status       # publish slim fleet status + recent run summaries to LastDB
 routines read-status          # read and validate the bounded fleet view
-routines deliver-status       # publish + stage/admin-approve a fleet-status delivery
 routines hygiene              # mechanical cleanup (prune runs/memory, daemon check, publish)
 routines hygiene --dry-run    # report only
 routines web                  # serve the local dashboard (localhost); --port, --host
@@ -454,38 +453,6 @@ The comparison enables the same transport trace in both arms, so both latency sa
 A baseline that fails schema admission supplies no before latency and cannot count as a passing comparison.
 The comparison records each field's present, absent, or null state and the record metadata block.
 It verifies complete primary membership and real per-field counts; it does not require a value in every declared field.
-
-## Admin fleet status deliver
-
-`routines deliver-status` uses the bounded view by default. It validates the
-`FleetSummary` marker against all 16 bucket pages, then stages one
-`lastdb.slice.v1` delivery per batch of at most 12 `RoutineStatus` Hash keys:
-
-- `routines/FleetSummary` key `routines`
-- explicit `routines/RoutineStatus` ids from the bounded reader
-
-The delivery uses the returned primary identifiers from the complete alternate-key read.
-The delivery stages FleetSummary and RoutineStatus only.
-
-Recipient keys are operational inputs, not repository config. Pass them as
-flags or environment variables; do not commit them:
-
-```sh
-export ROUTINES_ADMIN_RECIPIENT_PUBKEY=...
-export ROUTINES_ADMIN_MESSAGING_PUBLIC_KEY=...
-export ROUTINES_ADMIN_MESSAGING_PSEUDONYM=...
-
-routines deliver-status --dry-run --json
-routines deliver-status --max-records 20
-routines deliver-status --approve --max-records 20
-```
-
-Without `--approve`, the command stages only and prints the pending
-`delivery_id`; with `--approve`, Mini seals and sends a `delivery_slice` through
-Exemem messaging and prints non-secret evidence (`delivery_id`, shared count,
-message type, schema hashes). Mailbox polling/decryption is intentionally left
-to the receiving admin consumer tooling because the send path and read path are
-owned by different apps.
 
 ## Daemon
 

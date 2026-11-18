@@ -216,15 +216,6 @@ export function wireFields(key: SchemaKey, fields: Record<string, string>): Reco
   }));
 }
 
-export function wireFieldNames(key: SchemaKey, fields: readonly string[]): string[] {
-  const rules = fieldRules(key);
-  return fields.map((field) => {
-    const rule = rules[field];
-    if (!rule) throw new Error(`Unknown ${SCHEMAS[key].name} field ${field}`);
-    return rule[0];
-  });
-}
-
 export function localFields(key: SchemaKey, fields: Record<string, string>): Record<string, string> {
   const reverse = new Map(Object.entries(fieldRules(key)).map(([local, [canonical]]) => [canonical, local]));
   return Object.fromEntries(Object.entries(fields).map(([field, value]) => {
