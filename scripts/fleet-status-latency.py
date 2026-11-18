@@ -6,6 +6,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import shlex
 import statistics
 import subprocess
@@ -159,10 +160,10 @@ def cli(args, binary, node, home, verb, *flags, allow_failure=False):
             try:
                 configured = json.loads((home / "state/status-schemas.json").read_text())
                 limit = max(1, min(128, 5000 // (16 * (1 + 2 * len(args.contract["status"]["definition"]["fields"])))))
-                queries = [{"schema_name": configured["schemas"]["status"]["runtime"],
-                    "filter": {"HashKey": f"routines#{bucket:02x}"},
-                    "key_name": "by_fleet", "limit": limit} for bucket in range(16)]
-                save(node.output / "failed-native-read.json", {"queries": queries, "actual_reply": node.call("/api/queries/batch", {"queries": queries})[0]})
+                reads = [{"schema": configured["schemas"]["status"]["runtime"],
+                    "range": {"hash": f"routines#{bucket:02x}"},
+                    "via": "by_fleet", "limit": limit} for bucket in range(16)]
+                save(node.output / "failed-native-read.json", {"reads": reads, "actual_reply": node.call("/v1/read", {"reads": reads})[0]})
                 save(node.output / "failed-read-node-status.json", node.call("/api/status")[0])
             except Exception as error:
                 save(node.output / "failed-native-read-diagnostic.json", {"error": str(error)})
@@ -264,53 +265,60 @@ def stored_key_fields(key, contract):
     return required, hash_wire, range_wire
 
 
+def read_pages(node, reads):
+    reply = node.call("/v1/read", {"reads": reads})[0]
+    results = reply.get("results")
+    require(isinstance(results, list) and len(results) == len(reads), "The record read batch is incomplete")
+    for result in results:
+        require(isinstance(result, dict) and not result.get("error")
+                and isinstance(result.get("records"), list) and "next_cursor" in result
+                and (result["next_cursor"] is None or isinstance(result["next_cursor"], str) and result["next_cursor"]),
+                "A record page is incomplete")
+        for row in result["records"]:
+            require(isinstance(row, dict) and isinstance(row.get("record"), dict)
+                    and isinstance(row.get("key"), dict)
+                    and isinstance(row.get("revision"), str) and re.fullmatch(r"[a-f0-9]{64}", row["revision"])
+                    and "file" in row and (row["file"] is None or isinstance(row["file"], dict)),
+                    "A record page returned an invalid record")
+    return results
+
+
 def snapshot(node, bindings, contract, coordinates):
-    queries = []
-    for key, address, range_value in coordinates:
-        # LastDB removed the query field projection: a read returns the whole record.
-        queries.append({"schema_name": bindings[key],
-            "filter": {"HashKey": address} if range_value is None else {"HashRangeKey": {"hash": address, "range": range_value}},
-            "limit": 2, "response_format": "full"})
+    reads = [{"schema": bindings[key], "key": {"hash": address, "range": range_value}, "limit": 2}
+             for key, address, range_value in coordinates]
     observed = {}
-    for start in range(0, len(queries), 64):
-        batch = queries[start:start + 64]
-        reply = node.call("/api/queries/batch", {"queries": batch})[0]
-        require(reply.get("count") == len(batch) and len(reply.get("results", [])) == len(batch), "The known-key snapshot batch is incomplete")
-        for offset, item in enumerate(reply["results"]):
+    for start in range(0, len(reads), 64):
+        batch = reads[start:start + 64]
+        for offset, item in enumerate(read_pages(node, batch)):
             key, address, range_value = coordinates[start + offset]
-            response = item.get("response", {})
-            if not (item.get("status") == 200 and response.get("ok") is True
-                    and response.get("has_more") is False and len(response.get("results", [])) <= 1):
+            if item["next_cursor"] is not None or len(item["records"]) > 1:
                 # Keep the node's answer. Without it the failure names no cause.
                 save(node.output / "failed-known-key-snapshot.json", {"coordinate": [key, address, range_value],
-                    "query": batch[offset], "actual_result": item})
+                    "read": batch[offset], "actual_result": item})
                 raise RuntimeError("A known-key snapshot is unresolved or ambiguous; see failed-known-key-snapshot.json")
             identity = json.dumps([key, address, range_value])
-            if not response["results"]:
+            if not item["records"]:
                 observed[identity] = None
                 continue
-            row = response["results"][0]
+            row = item["records"][0]
             require(row.get("key") == {"hash": address, "range": range_value}, "A known-key snapshot returned different primary coordinates")
-            declared, present = set(contract[key]["definition"]["fields"]), set(row["fields"])
+            declared, present = set(contract[key]["definition"]["fields"]), set(row["record"])
             required, hash_wire, range_wire = stored_key_fields(key, contract)
             if not required <= present or not present <= declared:
                 save(node.output / "failed-known-key-snapshot.json", {"coordinate": [key, address, range_value],
-                    "query": batch[offset], "actual_result": item,
+                    "read": batch[offset], "actual_result": item,
                     "missing_required_fields": sorted(required - present), "unexpected_fields": sorted(present - declared)})
                 raise RuntimeError(f"Actual {key} record lacks required key fields or returns undeclared fields; see failed-known-key-snapshot.json")
-            values = {field: unwrapped(value) for field, value in row["fields"].items()}
+            values = {field: unwrapped(value) for field, value in row["record"].items()}
             require(all(value is None or isinstance(value, str) for value in values.values()) and
                 all(isinstance(values[field], str) and values[field] for field in required), "A value type or required key field differs")
             require(values[hash_wire] == address and
                 (range_value is None or values[range_wire] == range_value), "A stored primary field differs from its actual coordinates")
-            # A record has one metadata block (or null).
-            metadata = row.get("metadata")
-            require(metadata is None or isinstance(metadata, dict), "A full query returns an invalid record metadata block")
-            # Preserve the record metadata block and optional key presence.
+            # Preserve the durable revision, attached file and optional field presence.
             observed[identity] = {"values_sha256": digest(values), "value_bytes": sum(len(json.dumps(value, ensure_ascii=False).encode()) for value in values.values()),
                 "present_fields": sorted(present), "absent_fields": sorted(declared - present),
                 "null_fields": sorted(field for field, value in values.items() if value is None),
-                "metadata": metadata}
+                "revision": row["revision"], "file": row["file"]}
     return observed
 
 
@@ -330,31 +338,30 @@ def field_volume(observed, contract):
 def native_pages(node, binding, contract, expected_rows):
     names = contract["status"]["field_map"]
     observed = []
-    for bucket in range(16):
-        key, cursor, previous, seen = f"routines#{bucket:02x}", None, None, set()
-        for page in range(10000):
-            request = {"schema_name": binding, "filter": {"HashKey": key},
-                "key_name": "by_fleet", "limit": 7, "response_format": "full"}
-            if cursor is not None:
-                request["cursor"] = cursor
-            reply = node.call("/api/query", request)[0]
-            require(reply.get("ok") is True and isinstance(reply.get("has_more"), bool),
-                "A normal native fleet page is incomplete")
-            for row in reply["results"]:
-                values = {local: unwrapped(row["fields"][wire]) for local, wire in names.items()}
+    pending = [{"hash": f"routines#{bucket:02x}", "cursor": None, "previous": None, "seen": set()} for bucket in range(16)]
+    for _ in range(10000):
+        reads = [{"schema": binding, "range": {"hash": state["hash"]}, "via": "by_fleet", "limit": 7,
+                  **({"cursor": state["cursor"]} if state["cursor"] is not None else {})} for state in pending]
+        remaining = []
+        for state, reply in zip(pending, read_pages(node, reads)):
+            for row in reply["records"]:
+                values = {local: unwrapped(row["record"][wire]) for local, wire in names.items()}
                 require(row["key"] == {"hash": values["id"], "range": None}
-                    and row["matched_key"] == {"hash": key, "range": values["sk"]}, "A native result changed its primary or alternate coordinates")
-                require(previous is None or previous < values["sk"], "A native page repeated or reversed a range key")
-                previous = values["sk"]
+                    and values["fleet_bucket"] == state["hash"], "A native result changed its primary or alternate coordinates")
+                require(state["previous"] is None or state["previous"] < values["sk"], "A native page repeated or reversed a range key")
+                state["previous"] = values["sk"]
                 observed.append(values)
-            if not reply["has_more"]:
-                break
-            cursor = reply.get("next_cursor")
-            token = json.dumps(cursor, sort_keys=True)
-            require(cursor and token not in seen, "An opaque native cursor failed to advance")
-            seen.add(token)
-        else:
-            raise RuntimeError("Native fleet continuation exceeded its finite page bound")
+            cursor = reply["next_cursor"]
+            if cursor is not None:
+                require(cursor not in state["seen"], "An opaque native cursor failed to advance")
+                state["seen"].add(cursor)
+                state["cursor"] = cursor
+                remaining.append(state)
+        pending = remaining
+        if not pending:
+            break
+    else:
+        raise RuntimeError("Native fleet continuation exceeded its finite page bound")
     require(sorted(observed, key=lambda row: row["id"]) == sorted(expected_rows, key=lambda row: row["id"]),
         "Native continuation returned different complete field values")
     return {"logical_records": len(observed), "field_values": sum(len(row) for row in observed), "value_bytes": sum(len(value.encode()) for row in observed for value in row.values())}
@@ -394,6 +401,8 @@ def arm(args, Node, finish_setup, contract, label, pair):
         node.start()
         version_body = node.call("/api/version")[0]
         args.node_api_version = version_body.get("api_version") if isinstance(version_body, dict) else None
+        require(isinstance(args.node_api_version, int) and args.node_api_version >= 40,
+            "The hosted operation requires the API 40 batched record contract")
         cloud_off(node, "start")
         place_app_schemas(node, args.control if label == "control" else args.candidate)
         home = node.root / "routines"
